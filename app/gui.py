@@ -39,8 +39,10 @@ from PySide6.QtWidgets import (
 try:
     from .editor_asset_plan import (
         clips_of_kind,
+        editor_plan_context_matches,
         load_editor_asset_plan,
         save_editor_asset_plan,
+        set_editor_plan_context,
         upsert_clip,
     )
     from .sfx_engine import asset_metadata_for_path
@@ -53,8 +55,10 @@ try:
 except ImportError:
     from editor_asset_plan import (
         clips_of_kind,
+        editor_plan_context_matches,
         load_editor_asset_plan,
         save_editor_asset_plan,
+        set_editor_plan_context,
         upsert_clip,
     )
     from sfx_engine import asset_metadata_for_path
@@ -6312,6 +6316,30 @@ class ShortsFactoryWindow(QMainWindow):
         end_ms: int,
     ):
 
+        preserve_editor_assets = bool(
+            self.editor_asset_context_matches_current_selection()
+            and self.editor_asset_plan.get(
+                "clips",
+                [],
+            )
+            and (
+                getattr(
+                    self.timeline,
+                    "dragging_handle",
+                    None,
+                )
+                in {
+                    "start",
+                    "end",
+                }
+                or getattr(
+                    self.timeline,
+                    "dragging_source_clip",
+                    False,
+                )
+            )
+        )
+
         self.start_ms = start_ms
         self.end_ms = end_ms
 
@@ -6374,6 +6402,11 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.update_transcript_panel()
         self.clear_visual_plan_display()
+        if preserve_editor_assets:
+            self.retarget_editor_asset_context_to_current_selection()
+        else:
+            self.selected_sfx_clip_id = None
+            self.refresh_editor_asset_timeline()
 
         if hasattr(
             self,
@@ -6387,6 +6420,14 @@ class ShortsFactoryWindow(QMainWindow):
             )
 
     def set_start(self):
+
+        preserve_editor_assets = bool(
+            self.editor_asset_context_matches_current_selection()
+            and self.editor_asset_plan.get(
+                "clips",
+                [],
+            )
+        )
 
         self.timeline.set_selected_suggestion(
             None
@@ -6419,8 +6460,18 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.update_selection_label()
         self.clear_visual_plan_display()
+        if preserve_editor_assets:
+            self.retarget_editor_asset_context_to_current_selection()
 
     def set_end(self):
+
+        preserve_editor_assets = bool(
+            self.editor_asset_context_matches_current_selection()
+            and self.editor_asset_plan.get(
+                "clips",
+                [],
+            )
+        )
 
         self.timeline.set_selected_suggestion(
             None
@@ -6448,6 +6499,8 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.update_selection_label()
         self.clear_visual_plan_display()
+        if preserve_editor_assets:
+            self.retarget_editor_asset_context_to_current_selection()
 
     def update_selection_label(self):
 
@@ -8868,6 +8921,9 @@ class ShortsFactoryWindow(QMainWindow):
             )
             return
 
+        self.ensure_current_editor_asset_context(
+            clear_on_change=True
+        )
         self.user_visual_edits = False
         self.selected_visual_slot_index = None
 
@@ -10549,6 +10605,8 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.update_selection_label()
         self.clear_visual_plan_display()
+        self.selected_sfx_clip_id = None
+        self.refresh_editor_asset_timeline()
 
         if hasattr(
             self,
@@ -11225,6 +11283,78 @@ class ShortsFactoryWindow(QMainWindow):
             )
 
 
+    def current_editor_asset_context(self) -> tuple[str, float, float]:
+
+        return (
+            str(self.video_path) if self.video_path else "",
+            self.start_ms / 1000,
+            self.end_ms / 1000,
+        )
+
+
+    def editor_asset_context_matches_current_selection(self) -> bool:
+
+        source_video, selection_start, selection_end = (
+            self.current_editor_asset_context()
+        )
+        if (
+            not source_video
+            or selection_end <= selection_start
+        ):
+            return False
+
+        return editor_plan_context_matches(
+            self.editor_asset_plan,
+            source_video,
+            selection_start,
+            selection_end,
+        )
+
+
+    def ensure_current_editor_asset_context(
+        self,
+        *,
+        clear_on_change: bool,
+    ):
+
+        if not self.video_path or self.end_ms <= self.start_ms:
+            return
+
+        self.editor_asset_plan = set_editor_plan_context(
+            self.editor_asset_plan,
+            self.video_path,
+            self.start_ms / 1000,
+            self.end_ms / 1000,
+            clear_clips_on_change=clear_on_change,
+        )
+        self.selected_sfx_clip_id = None
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+
+    def retarget_editor_asset_context_to_current_selection(self):
+
+        if (
+            not self.video_path
+            or self.end_ms <= self.start_ms
+            or not self.editor_asset_plan.get(
+                "clips",
+                [],
+            )
+        ):
+            return
+
+        self.editor_asset_plan = set_editor_plan_context(
+            self.editor_asset_plan,
+            self.video_path,
+            self.start_ms / 1000,
+            self.end_ms / 1000,
+            clear_clips_on_change=False,
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+
     def load_editor_asset_plan_state(self):
 
         self.editor_asset_plan = load_editor_asset_plan()
@@ -11239,6 +11369,9 @@ class ShortsFactoryWindow(QMainWindow):
 
 
     def visible_editor_asset_clips(self) -> list[dict]:
+
+        if not self.editor_asset_context_matches_current_selection():
+            return []
 
         clips = []
         for clip in self.editor_asset_plan.get(
@@ -11333,6 +11466,8 @@ class ShortsFactoryWindow(QMainWindow):
 
     def selected_sfx_clip(self) -> dict | None:
 
+        if not self.editor_asset_context_matches_current_selection():
+            return None
         if not self.selected_sfx_clip_id:
             return None
         return self.find_editor_clip(
@@ -11887,6 +12022,10 @@ class ShortsFactoryWindow(QMainWindow):
         position_ms: int,
     ):
 
+        if not self.editor_asset_context_matches_current_selection():
+            self.sfx_preview_triggered.clear()
+            return
+
         if (
             self.player.playbackState()
             != QMediaPlayer.PlaybackState.PlayingState
@@ -12060,6 +12199,9 @@ class ShortsFactoryWindow(QMainWindow):
             )
             return
 
+        self.ensure_current_editor_asset_context(
+            clear_on_change=True
+        )
         self.save_render_settings()
         self.generate_sfx_button.setEnabled(False)
         self.generate_sfx_button.setText("Generating...")
@@ -12982,6 +13124,8 @@ class ShortsFactoryWindow(QMainWindow):
             self.timeline.fit_selection()
 
         self.update_selection_label()
+        self.selected_sfx_clip_id = None
+        self.refresh_editor_asset_timeline()
 
         self.player.setPosition(
             best_start
@@ -13158,6 +13302,16 @@ class ShortsFactoryWindow(QMainWindow):
 
         key = event.key()
         modifiers = event.modifiers()
+
+        if (
+            QApplication.activeModalWidget() is None
+            and key == Qt.Key.Key_Backspace
+            and modifiers == Qt.KeyboardModifier.NoModifier
+            and self.selected_sfx_clip() is not None
+        ):
+            self.delete_selected_sfx_clip()
+            event.accept()
+            return True
 
         if (
             key == Qt.Key.Key_Space
@@ -13540,6 +13694,16 @@ class ShortsFactoryWindow(QMainWindow):
                 background: #FFFFFF;
                 selection-color: #000000;
                 selection-background-color: #B8D7FF;
+            }
+
+            QInputDialog QComboBox,
+            QInputDialog QListView,
+            QInputDialog QAbstractItemView {
+                color: #F2ECE4;
+                background: #09090A;
+                border: 1px solid #5D252E;
+                selection-color: #FFFFFF;
+                selection-background-color: #6E1E2B;
             }
 
             QFrame#VisualSlotCard {

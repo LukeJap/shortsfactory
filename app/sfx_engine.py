@@ -13,9 +13,15 @@ from typing import Any
 try:
     from .editor_asset_plan import (
         clips_of_kind,
+        editor_plan_context_matches,
         load_editor_asset_plan,
-        replace_kind_clips,
         save_editor_asset_plan,
+        set_editor_plan_context,
+    )
+    from .apply_ai_visuals import (
+        keep_segments,
+        map_source_interval_to_tight,
+        map_tight_interval_to_final,
     )
     from .visual_emphasis import (
         DEFAULT_ENERGY,
@@ -26,9 +32,15 @@ try:
 except ImportError:
     from editor_asset_plan import (
         clips_of_kind,
+        editor_plan_context_matches,
         load_editor_asset_plan,
-        replace_kind_clips,
         save_editor_asset_plan,
+        set_editor_plan_context,
+    )
+    from apply_ai_visuals import (
+        keep_segments,
+        map_source_interval_to_tight,
+        map_tight_interval_to_final,
     )
     from visual_emphasis import (
         DEFAULT_ENERGY,
@@ -46,6 +58,7 @@ VIDEO_PATH = RENDERED_DIR / "short1_captioned.mp4"
 TEMP_VIDEO_PATH = RENDERED_DIR / "short1_sfx_tmp.mp4"
 
 VISUAL_EDIT_PLAN_PATH = OUTPUT_DIR / "visual_edit_plan.json"
+COMBINED_EDIT_PLAN_PATH = OUTPUT_DIR / "combined_edit_plan.json"
 TEMPORAL_EDIT_PLAN_PATH = OUTPUT_DIR / "temporal_edit_plan.json"
 SFX_PLAN_PATH = OUTPUT_DIR / "sfx_plan.json"
 
@@ -2279,6 +2292,14 @@ def event_from_sfx_clip(
     if not asset_path:
         return None
 
+    asset_file = Path(
+        asset_path
+    )
+    if not asset_is_valid(
+        asset_file
+    ):
+        return None
+
     metadata = asset_metadata_for_path(
         asset_path,
         fallback_category=str(
@@ -2322,10 +2343,52 @@ def event_from_sfx_clip(
                 0.0,
             )
         )
-        start = max(
+        selection_end = as_float(
+            settings.get(
+                "selection_end",
+                selection_start,
+            ),
+            selection_start,
+        )
+
+        if (
+            end <= selection_start
+            or start >= selection_end
+        ):
+            return None
+
+        selection_duration = max(
             0.0,
-            start
-            - selection_start,
+            selection_end - selection_start,
+        )
+        combined_plan = read_json(
+            COMBINED_EDIT_PLAN_PATH
+        )
+        keeps = keep_segments(
+            combined_plan,
+            selection_duration,
+        )
+        mapped = map_source_interval_to_tight(
+            start,
+            end,
+            selection_start,
+            keeps,
+        )
+        if mapped is None:
+            return None
+
+        tight_start, tight_end = mapped
+        temporal_plan = read_json(
+            TEMPORAL_EDIT_PLAN_PATH
+        )
+        start, end = map_tight_interval_to_final(
+            tight_start,
+            tight_end,
+            temporal_plan,
+        )
+        duration = max(
+            0.06,
+            end - start,
         )
 
     return {
@@ -2445,24 +2508,45 @@ def merge_sfx_with_editor_plan(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
     plan = load_editor_asset_plan()
-
-    automatic_clips = [
-        sfx_clip_from_event(
-            {
-                **event,
-                "origin": "automatic",
-                "manual_override": False,
-            }
+    settings = load_render_settings()
+    source_video = str(
+        settings.get(
+            "source_video",
+            "",
         )
-        for event in automatic_events
-    ]
+        or ""
+    )
+    selection_start = as_float(
+        settings.get(
+            "selection_start",
+            0.0,
+        )
+    )
+    selection_end = as_float(
+        settings.get(
+            "selection_end",
+            selection_start,
+        ),
+        selection_start,
+    )
 
-    plan = replace_kind_clips(
+    editor_sfx_clips = clips_of_kind(
         plan,
         "SFX",
-        automatic_clips,
-        preserve_manual=True,
+        active_only=False,
     )
+    use_editor_plan = bool(
+        editor_sfx_clips
+        and editor_plan_context_matches(
+            plan,
+            source_video,
+            selection_start,
+            selection_end,
+        )
+    )
+
+    if not use_editor_plan:
+        return list(automatic_events), plan
 
     final_events: list[dict[str, Any]] = []
     for clip in clips_of_kind(
@@ -2470,6 +2554,13 @@ def merge_sfx_with_editor_plan(
         "SFX",
         active_only=True,
     ):
+        if bool(
+            clip.get(
+                "deleted",
+                False,
+            )
+        ):
+            continue
         event = event_from_sfx_clip(
             clip
         )
@@ -2485,10 +2576,6 @@ def merge_sfx_with_editor_plan(
                 0.0,
             )
         )
-    )
-
-    save_editor_asset_plan(
-        plan
     )
 
     return final_events, plan
@@ -2676,8 +2763,11 @@ def mix_sfx_into_video(
     )
 
     if result.returncode != 0 or not TEMP_VIDEO_PATH.exists():
+        stderr_text = result.stderr.strip()
+        stderr_tail = stderr_text[-1800:] if stderr_text else "unknown FFmpeg error"
         warnings.append(
-            f"FFmpeg SFX mix failed; video left unchanged: {result.stderr.strip()[:360]}"
+            "FFmpeg SFX mix failed; video left unchanged. "
+            f"Error tail: {stderr_tail}"
         )
         try:
             TEMP_VIDEO_PATH.unlink(
@@ -2972,13 +3062,48 @@ def write_editor_sfx_plan(
         )
         for event in prepared
     ]
-    editor_plan = load_editor_asset_plan()
-    editor_plan = replace_kind_clips(
-        editor_plan,
-        "SFX",
-        editor_clips,
-        preserve_manual=True,
+    settings = load_render_settings()
+    source_video = str(
+        settings.get(
+            "source_video",
+            "",
+        )
+        or ""
     )
+    editor_plan = load_editor_asset_plan()
+    context_matches = editor_plan_context_matches(
+        editor_plan,
+        source_video,
+        selection_start,
+        selection_end,
+    )
+    editor_plan = set_editor_plan_context(
+        editor_plan,
+        source_video,
+        selection_start,
+        selection_end,
+        clear_clips_on_change=not context_matches,
+    )
+
+    retained = [
+        clip
+        for clip in editor_plan.get(
+            "clips",
+            [],
+        )
+        if isinstance(clip, dict)
+        and str(
+            clip.get(
+                "kind",
+                "",
+            )
+            or ""
+        ).upper() != "SFX"
+    ]
+    retained.extend(
+        editor_clips
+    )
+    editor_plan["clips"] = retained
     save_editor_asset_plan(
         editor_plan
     )

@@ -10,13 +10,20 @@ from typing import Any
 try:
     from .editor_asset_plan import (
         clips_of_kind,
+        editor_plan_context_matches,
         load_editor_asset_plan,
     )
 except ImportError:
     from editor_asset_plan import (
         clips_of_kind,
+        editor_plan_context_matches,
         load_editor_asset_plan,
     )
+
+try:
+    from .visual_emphasis import load_render_settings
+except ImportError:
+    from visual_emphasis import load_render_settings
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -752,11 +759,44 @@ def main() -> int:
     }
 
     editor_asset_plan = load_editor_asset_plan()
-    editor_visual_clips = clips_of_kind(
-        editor_asset_plan,
-        "AI_VISUAL",
-        active_only=True,
+    render_settings = load_render_settings()
+    source_video = str(
+        render_settings.get(
+            "source_video",
+            "",
+        )
+        or ""
     )
+    try:
+        selection_start = float(
+            render_settings.get(
+                "selection_start",
+                -1.0,
+            )
+        )
+        selection_end = float(
+            render_settings.get(
+                "selection_end",
+                -1.0,
+            )
+        )
+    except (TypeError, ValueError):
+        selection_start = -1.0
+        selection_end = -1.0
+
+    if editor_plan_context_matches(
+        editor_asset_plan,
+        source_video,
+        selection_start,
+        selection_end,
+    ):
+        editor_visual_clips = clips_of_kind(
+            editor_asset_plan,
+            "AI_VISUAL",
+            active_only=True,
+        )
+    else:
+        editor_visual_clips = []
 
     mapped_assets: list[
         dict[str, Any]

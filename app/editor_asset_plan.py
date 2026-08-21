@@ -36,6 +36,105 @@ def default_plan() -> dict[str, Any]:
     }
 
 
+
+def _normalized_source_path(
+    value: str | Path | None,
+) -> str:
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    try:
+        return str(
+            Path(text).expanduser().resolve(
+                strict=False
+            )
+        ).casefold()
+    except OSError:
+        return text.casefold()
+
+
+def editor_plan_context_matches(
+    plan: dict[str, Any],
+    source_video: str | Path | None,
+    selection_start: float,
+    selection_end: float,
+    *,
+    tolerance: float = 0.12,
+) -> bool:
+
+    plan_source = _normalized_source_path(
+        plan.get(
+            "source_video",
+            "",
+        )
+    )
+    current_source = _normalized_source_path(
+        source_video
+    )
+
+    if not plan_source or not current_source:
+        return False
+    if plan_source != current_source:
+        return False
+
+    try:
+        plan_start = float(
+            plan.get(
+                "selection_start",
+                -1.0,
+            )
+        )
+        plan_end = float(
+            plan.get(
+                "selection_end",
+                -1.0,
+            )
+        )
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        abs(plan_start - float(selection_start))
+        <= tolerance
+        and abs(plan_end - float(selection_end))
+        <= tolerance
+    )
+
+
+def set_editor_plan_context(
+    plan: dict[str, Any],
+    source_video: str | Path | None,
+    selection_start: float,
+    selection_end: float,
+    *,
+    clear_clips_on_change: bool = False,
+) -> dict[str, Any]:
+
+    matches = editor_plan_context_matches(
+        plan,
+        source_video,
+        selection_start,
+        selection_end,
+    )
+
+    if clear_clips_on_change and not matches:
+        plan["clips"] = []
+
+    plan["source_video"] = str(
+        source_video or ""
+    )
+    plan["selection_start"] = round(
+        float(selection_start),
+        3,
+    )
+    plan["selection_end"] = round(
+        float(selection_end),
+        3,
+    )
+    return plan
+
 def load_editor_asset_plan() -> dict[str, Any]:
 
     plan = read_json(
