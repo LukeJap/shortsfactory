@@ -5378,6 +5378,39 @@ class ShortsFactoryWindow(QMainWindow):
             "CompactLineEdit"
         )
 
+        self.visual_display_mode_combo = QComboBox()
+        self.visual_display_mode_combo.setObjectName(
+            "CompactCombo"
+        )
+        self.visual_display_mode_combo.addItems(
+            [
+                "OVERLAY_CARD",
+                "FULL_FRAME_CONTAIN",
+                "FULL_FRAME_COVER",
+            ]
+        )
+
+        self.visual_scale_slider = QSlider(
+            Qt.Orientation.Horizontal
+        )
+        self.visual_scale_slider.setObjectName(
+            "MusicVolumeSlider"
+        )
+        self.visual_scale_slider.setRange(
+            60,
+            140,
+        )
+        self.visual_scale_slider.setValue(
+            100
+        )
+
+        self.visual_scale_label = QLabel(
+            "100%"
+        )
+        self.visual_scale_label.setObjectName(
+            "MusicVolumeLabel"
+        )
+
         self.visual_label_edit.editingFinished.connect(
             self.visual_inspector_fields_changed
         )
@@ -5389,6 +5422,12 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.visual_type_edit.editingFinished.connect(
             self.visual_inspector_fields_changed
+        )
+        self.visual_display_mode_combo.currentTextChanged.connect(
+            self.visual_inspector_fields_changed
+        )
+        self.visual_scale_slider.valueChanged.connect(
+            self.visual_scale_changed
         )
 
         inspector_grid.addWidget(
@@ -5433,6 +5472,35 @@ class ShortsFactoryWindow(QMainWindow):
             2,
             1,
             1,
+            3,
+        )
+        inspector_grid.addWidget(
+            QLabel("Mode"),
+            3,
+            0,
+        )
+        inspector_grid.addWidget(
+            self.visual_display_mode_combo,
+            3,
+            1,
+            1,
+            3,
+        )
+        inspector_grid.addWidget(
+            QLabel("Scale"),
+            4,
+            0,
+        )
+        inspector_grid.addWidget(
+            self.visual_scale_slider,
+            4,
+            1,
+            1,
+            2,
+        )
+        inspector_grid.addWidget(
+            self.visual_scale_label,
+            4,
             3,
         )
 
@@ -8061,11 +8129,30 @@ class ShortsFactoryWindow(QMainWindow):
             True
         )
 
+        display_mode = self.normalize_visual_display_mode(
+            slot.get(
+                "display_mode",
+                "OVERLAY_CARD",
+            )
+        )
+        scale_percent = int(
+            round(
+                self.coerce_visual_scale(
+                    slot.get(
+                        "scale",
+                        1.0,
+                    )
+                )
+                * 100
+            )
+        )
+
         meta = QLabel(
             (
                 f"{format_time(int(start * 1000))} -> "
                 f"{format_time(int(end * 1000))}    "
-                f"{state_text}"
+                f"{state_text}    "
+                f"{display_mode} / {scale_percent}%"
             )
         )
         meta.setObjectName(
@@ -8321,6 +8408,7 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_start_edit,
             self.visual_end_edit,
             self.visual_type_edit,
+            self.visual_display_mode_combo,
             self.visual_prompt_edit,
             self.disable_visual_button,
             self.delete_visual_button,
@@ -8329,12 +8417,74 @@ class ShortsFactoryWindow(QMainWindow):
                 enabled
             )
 
+        self.visual_scale_slider.setEnabled(
+            enabled
+        )
+
         self.regenerate_visual_button.setEnabled(
             enabled
             and self.image_ai_state == "ready"
             and self.visual_asset_process.state()
             == QProcess.ProcessState.NotRunning
         )
+
+
+    def normalize_visual_display_mode(
+        self,
+        value,
+    ) -> str:
+
+        normalized = str(
+            value or ""
+        ).strip().upper()
+
+        if normalized in {
+            "OVERLAY_CARD",
+            "FULL_FRAME_CONTAIN",
+            "FULL_FRAME_COVER",
+        }:
+            return normalized
+
+        return "OVERLAY_CARD"
+
+
+    def coerce_visual_scale(
+        self,
+        value,
+    ) -> float:
+
+        try:
+            number = float(
+                value
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            number = 1.0
+
+        return max(
+            0.6,
+            min(
+                1.4,
+                number,
+            ),
+        )
+
+
+    def visual_scale_changed(
+        self,
+        value: int,
+    ):
+
+        self.visual_scale_label.setText(
+            f"{int(value)}%"
+        )
+
+        if self.updating_visual_inspector:
+            return
+
+        self.visual_inspector_fields_changed()
 
 
     def load_selected_visual_into_inspector(self):
@@ -8356,6 +8506,15 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_start_edit.setText("")
             self.visual_end_edit.setText("")
             self.visual_type_edit.setText("")
+            self.visual_display_mode_combo.setCurrentText(
+                "OVERLAY_CARD"
+            )
+            self.visual_scale_slider.setValue(
+                100
+            )
+            self.visual_scale_label.setText(
+                "100%"
+            )
             self.visual_reason_label.setText(
                 "Select a planned visual to inspect it."
             )
@@ -8401,6 +8560,31 @@ class ShortsFactoryWindow(QMainWindow):
                 )
                 or ""
             )
+        )
+        self.visual_display_mode_combo.setCurrentText(
+            self.normalize_visual_display_mode(
+                slot.get(
+                    "display_mode",
+                    "OVERLAY_CARD",
+                )
+            )
+        )
+        visual_scale_percent = int(
+            round(
+                self.coerce_visual_scale(
+                    slot.get(
+                        "scale",
+                        1.0,
+                    )
+                )
+                * 100
+            )
+        )
+        self.visual_scale_slider.setValue(
+            visual_scale_percent
+        )
+        self.visual_scale_label.setText(
+            f"{visual_scale_percent}%"
         )
         self.visual_reason_label.setText(
             (
@@ -8566,6 +8750,18 @@ class ShortsFactoryWindow(QMainWindow):
         slot["visual_type"] = (
             self.visual_type_edit.text().strip()
             or "ai_recreation"
+        )
+        slot["display_mode"] = (
+            self.normalize_visual_display_mode(
+                self.visual_display_mode_combo.currentText()
+            )
+        )
+        slot["scale"] = round(
+            self.coerce_visual_scale(
+                self.visual_scale_slider.value()
+                / 100.0
+            ),
+            2,
         )
 
         if old_prompt != str(
