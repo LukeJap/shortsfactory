@@ -37,6 +37,13 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from .editor_asset_plan import (
+        clips_of_kind,
+        load_editor_asset_plan,
+        save_editor_asset_plan,
+        upsert_clip,
+    )
+    from .sfx_engine import asset_metadata_for_path
     from .visual_emphasis import (
         DEFAULT_ENERGY,
         normalize_energy,
@@ -44,6 +51,13 @@ try:
         write_render_settings,
     )
 except ImportError:
+    from editor_asset_plan import (
+        clips_of_kind,
+        load_editor_asset_plan,
+        save_editor_asset_plan,
+        upsert_clip,
+    )
+    from sfx_engine import asset_metadata_for_path
     from visual_emphasis import (
         DEFAULT_ENERGY,
         normalize_energy,
@@ -233,6 +247,21 @@ class SuggestionSlider(QSlider):
         int,
     )
 
+    assetClipSelected = Signal(
+        str,
+        str,
+    )
+
+    assetClipChanged = Signal(
+        str,
+        object,
+    )
+
+    assetClipDoubleClicked = Signal(
+        str,
+        str,
+    )
+
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
 
@@ -252,9 +281,17 @@ class SuggestionSlider(QSlider):
         self.source_clip_drag_start = 0
         self.source_clip_drag_end = 0
         self.scrubbing_playhead = False
+        self.asset_clips: list[dict] = []
+        self.selected_asset_clip_id: str | None = None
+        self.dragging_asset_clip = False
+        self.dragging_asset_part: str | None = None
+        self.asset_drag_anchor = 0
+        self.asset_drag_start = 0
+        self.asset_drag_end = 0
 
         self.handle_radius = 8
         self.minimum_selection_ms = 500
+        self.minimum_asset_clip_ms = 80
         self.minimum_visible_ms = 5000
         self.viewport_start = 0
         self.viewport_end = 0
@@ -276,7 +313,7 @@ class SuggestionSlider(QSlider):
         )
 
         self.setMinimumHeight(
-            168
+            218
         )
 
         self.setSizePolicy(
@@ -358,29 +395,40 @@ class SuggestionSlider(QSlider):
     ) -> dict[str, int]:
 
         height = max(
-            168,
+            218,
             self.height(),
         )
         ruler_top = 14
-        ruler_bottom = 46
-        video_top = 54
+        ruler_bottom = 42
+        video_top = 50
         video_height = max(
-            42,
+            36,
             min(
-                58,
+                48,
                 int(
                     height
-                    * 0.28
+                    * 0.22
                 ),
             ),
         )
-        edit_top = video_top + video_height + 9
-        edit_height = 22
-        visual_top = edit_top + edit_height + 8
+        edit_top = video_top + video_height + 7
+        edit_height = 26
+        visual_top = edit_top + edit_height + 7
         visual_height = max(
-            24,
+            30,
+            min(
+                38,
+                int(
+                    height
+                    * 0.16
+                ),
+            ),
+        )
+        sfx_top = visual_top + visual_height + 7
+        sfx_height = max(
+            30,
             height
-            - visual_top
+            - sfx_top
             - 14,
         )
 
@@ -393,8 +441,10 @@ class SuggestionSlider(QSlider):
             "edit_height": edit_height,
             "visual_top": visual_top,
             "visual_height": visual_height,
-            "lane_bottom": visual_top
-            + visual_height,
+            "sfx_top": sfx_top,
+            "sfx_height": sfx_height,
+            "lane_bottom": sfx_top
+            + sfx_height,
         }
 
     def emit_viewport_changed(self):
@@ -1165,6 +1215,295 @@ class SuggestionSlider(QSlider):
 
         return "body"
 
+    def clip_time_bounds_ms(
+        self,
+        clip: dict,
+    ) -> tuple[int, int]:
+
+        try:
+            start_ms = int(
+                round(
+                    float(
+                        clip.get(
+                            "start",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                    * 1000
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            start_ms = 0
+
+        try:
+            end_ms = int(
+                round(
+                    float(
+                        clip.get(
+                            "end",
+                            start_ms / 1000,
+                        )
+                        or start_ms / 1000
+                    )
+                    * 1000
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            end_ms = start_ms
+
+        return start_ms, max(
+            start_ms + self.minimum_asset_clip_ms,
+            end_ms,
+        )
+
+    def asset_clip_lane(
+        self,
+        clip: dict,
+    ) -> tuple[int, int] | None:
+
+        kind = str(
+            clip.get(
+                "kind",
+                "",
+            )
+            or ""
+        ).upper()
+        lanes = self.lane_geometry()
+
+        if kind == "SFX":
+            return (
+                lanes["sfx_top"] + 4,
+                max(
+                    18,
+                    lanes["sfx_height"] - 8,
+                ),
+            )
+
+        if kind == "AI_VISUAL":
+            return (
+                lanes["visual_top"] + 4,
+                max(
+                    18,
+                    lanes["visual_height"] - 8,
+                ),
+            )
+
+        return None
+
+    def asset_clip_geometry(
+        self,
+        clip: dict,
+    ) -> tuple[float, float, float, float] | None:
+
+        lane = self.asset_clip_lane(
+            clip
+        )
+        if lane is None:
+            return None
+
+        start_ms, end_ms = self.clip_time_bounds_ms(
+            clip
+        )
+        geometry = self.range_to_geometry(
+            start_ms,
+            end_ms,
+        )
+        if geometry is None:
+            return None
+
+        x1, x2 = geometry
+        lane_y, lane_height = lane
+        return (
+            x1,
+            float(
+                lane_y
+            ),
+            max(
+                6.0,
+                x2 - x1,
+            ),
+            float(
+                lane_height
+            ),
+        )
+
+    def asset_clip_part_at_position(
+        self,
+        x: float,
+        y: float,
+    ) -> tuple[str, str, str] | None:
+
+        for clip in reversed(
+            self.asset_clips
+        ):
+            if not isinstance(
+                clip,
+                dict,
+            ):
+                continue
+
+            clip_id = str(
+                clip.get(
+                    "id",
+                    "",
+                )
+                or ""
+            )
+            if not clip_id:
+                continue
+
+            geometry = self.asset_clip_geometry(
+                clip
+            )
+            if geometry is None:
+                continue
+
+            clip_x, clip_y, clip_width, clip_height = geometry
+            if not (
+                clip_x - 8
+                <= x
+                <= clip_x + clip_width + 8
+                and clip_y - 4
+                <= y
+                <= clip_y + clip_height + 4
+            ):
+                continue
+
+            edge_width = max(
+                8.0,
+                min(
+                    16.0,
+                    clip_width * 0.22,
+                ),
+            )
+            if x <= clip_x + edge_width:
+                part = "start"
+            elif x >= clip_x + clip_width - edge_width:
+                part = "end"
+            else:
+                part = "body"
+
+            return (
+                str(
+                    clip.get(
+                        "kind",
+                        "",
+                    )
+                    or ""
+                ).upper(),
+                clip_id,
+                part,
+            )
+
+        return None
+
+    def asset_clip_by_id(
+        self,
+        clip_id: str,
+    ) -> dict | None:
+
+        normalized = str(
+            clip_id
+            or ""
+        )
+        for clip in self.asset_clips:
+            if str(
+                clip.get(
+                    "id",
+                    "",
+                )
+                or ""
+            ) == normalized:
+                return clip
+        return None
+
+    def mark_asset_clip_manual(
+        self,
+        clip: dict,
+    ):
+
+        clip["manual_override"] = True
+        clip["locked"] = True
+        clip["origin"] = (
+            clip.get(
+                "origin",
+                "manual",
+            )
+            or "manual"
+        )
+
+    def apply_asset_clip_drag(
+        self,
+        clip: dict,
+        new_start_ms: int,
+        new_end_ms: int,
+    ):
+
+        new_start_ms = max(
+            0,
+            int(
+                new_start_ms
+            ),
+        )
+        new_end_ms = max(
+            new_start_ms + self.minimum_asset_clip_ms,
+            int(
+                new_end_ms
+            ),
+        )
+
+        maximum = max(
+            0,
+            self.maximum(),
+        )
+        if maximum > 0:
+            duration = new_end_ms - new_start_ms
+            if new_end_ms > maximum:
+                new_end_ms = maximum
+                new_start_ms = max(
+                    0,
+                    new_end_ms - duration,
+                )
+
+        clip["start"] = round(
+            new_start_ms / 1000,
+            3,
+        )
+        clip["end"] = round(
+            new_end_ms / 1000,
+            3,
+        )
+        clip["duration"] = round(
+            max(
+                0,
+                new_end_ms - new_start_ms,
+            )
+            / 1000,
+            3,
+        )
+        self.mark_asset_clip_manual(
+            clip
+        )
+        self.assetClipChanged.emit(
+            str(
+                clip.get(
+                    "kind",
+                    "",
+                )
+                or ""
+            ).upper(),
+            dict(
+                clip
+            ),
+        )
+
     def handle_at_position(
         self,
         x: float,
@@ -1219,6 +1558,47 @@ class SuggestionSlider(QSlider):
     def mousePressEvent(self, event):
 
         position = event.position()
+
+        asset_hit = self.asset_clip_part_at_position(
+            position.x(),
+            position.y(),
+        )
+
+        if asset_hit is not None:
+            kind, clip_id, part = asset_hit
+            clip = self.asset_clip_by_id(
+                clip_id
+            )
+            if clip is None:
+                return
+
+            self.selected_asset_clip_id = clip_id
+            self.dragging_asset_clip = True
+            self.dragging_asset_part = part
+            self.asset_drag_anchor = self.x_to_value(
+                position.x()
+            )
+            self.asset_drag_start, self.asset_drag_end = (
+                self.clip_time_bounds_ms(
+                    clip
+                )
+            )
+            self.source_clip_selected = False
+            self.assetClipSelected.emit(
+                kind,
+                clip_id,
+            )
+            self.setCursor(
+                Qt.CursorShape.SizeHorCursor
+                if part in {
+                    "start",
+                    "end",
+                }
+                else Qt.CursorShape.ClosedHandCursor
+            )
+            self.update()
+            event.accept()
+            return
 
         source_part = self.source_clip_part_at_position(
             position.x(),
@@ -1332,6 +1712,57 @@ class SuggestionSlider(QSlider):
     def mouseMoveEvent(self, event):
 
         position = event.position()
+
+        if self.dragging_asset_clip:
+            clip = self.asset_clip_by_id(
+                self.selected_asset_clip_id
+                or ""
+            )
+            if clip is None:
+                self.dragging_asset_clip = False
+                self.dragging_asset_part = None
+                event.accept()
+                return
+
+            new_value = self.x_to_value(
+                position.x()
+            )
+
+            if self.dragging_asset_part == "body":
+                delta = new_value - self.asset_drag_anchor
+                duration = self.asset_drag_end - self.asset_drag_start
+                new_start = self.asset_drag_start + delta
+                new_end = new_start + duration
+            elif self.dragging_asset_part == "start":
+                new_start = min(
+                    new_value,
+                    self.asset_drag_end
+                    - self.minimum_asset_clip_ms,
+                )
+                new_end = self.asset_drag_end
+            elif self.dragging_asset_part == "end":
+                new_start = self.asset_drag_start
+                new_end = max(
+                    new_value,
+                    self.asset_drag_start
+                    + self.minimum_asset_clip_ms,
+                )
+            else:
+                event.accept()
+                return
+
+            self.apply_asset_clip_drag(
+                clip,
+                int(
+                    new_start
+                ),
+                int(
+                    new_end
+                ),
+            )
+            self.update()
+            event.accept()
+            return
 
         if self.dragging_source_clip:
 
@@ -1457,12 +1888,29 @@ class SuggestionSlider(QSlider):
             position.y(),
         )
 
+        asset_hit = self.asset_clip_part_at_position(
+            position.x(),
+            position.y(),
+        )
         source_part = self.source_clip_part_at_position(
             position.x(),
             position.y(),
         )
 
-        if (
+        if asset_hit is not None and asset_hit[2] in {
+            "start",
+            "end",
+        }:
+            self.setCursor(
+                Qt.CursorShape.SizeHorCursor
+            )
+
+        elif asset_hit is not None:
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor
+            )
+
+        elif (
             source_part in {
                 "start",
                 "end",
@@ -1503,6 +1951,32 @@ class SuggestionSlider(QSlider):
         )
 
     def mouseReleaseEvent(self, event):
+
+        if self.dragging_asset_clip:
+            clip = self.asset_clip_by_id(
+                self.selected_asset_clip_id
+                or ""
+            )
+            self.dragging_asset_clip = False
+            self.dragging_asset_part = None
+            self.setCursor(
+                Qt.CursorShape.ArrowCursor
+            )
+            if clip is not None:
+                self.assetClipChanged.emit(
+                    str(
+                        clip.get(
+                            "kind",
+                            "",
+                        )
+                        or ""
+                    ).upper(),
+                    dict(
+                        clip
+                    ),
+                )
+            event.accept()
+            return
 
         if self.dragging_source_clip:
 
@@ -1546,6 +2020,31 @@ class SuggestionSlider(QSlider):
             return
 
         super().mouseReleaseEvent(
+            event
+        )
+
+    def mouseDoubleClickEvent(self, event):
+
+        position = event.position()
+        asset_hit = self.asset_clip_part_at_position(
+            position.x(),
+            position.y(),
+        )
+        if asset_hit is not None:
+            kind, clip_id, _part = asset_hit
+            self.selected_asset_clip_id = clip_id
+            self.assetClipSelected.emit(
+                kind,
+                clip_id,
+            )
+            self.assetClipDoubleClicked.emit(
+                kind,
+                clip_id,
+            )
+            event.accept()
+            return
+
+        super().mouseDoubleClickEvent(
             event
         )
 
@@ -1755,6 +2254,55 @@ class SuggestionSlider(QSlider):
         self.update()
 
 
+    def set_asset_clips(
+        self,
+        clips: list[dict],
+    ):
+
+        self.asset_clips = [
+            dict(
+                clip
+            )
+            for clip in clips
+            if isinstance(
+                clip,
+                dict,
+            )
+            and not bool(
+                clip.get(
+                    "deleted",
+                    False,
+                )
+            )
+        ]
+
+        if (
+            self.selected_asset_clip_id
+            and self.asset_clip_by_id(
+                self.selected_asset_clip_id
+            )
+            is None
+        ):
+            self.selected_asset_clip_id = None
+
+        self.update()
+
+
+    def set_selected_asset_clip(
+        self,
+        clip_id: str | None,
+    ):
+
+        self.selected_asset_clip_id = (
+            str(
+                clip_id
+                or ""
+            )
+            or None
+        )
+        self.update()
+
+
     def clear_editor_overlays(self):
 
         self.manual_cut_ranges = []
@@ -1766,6 +2314,8 @@ class SuggestionSlider(QSlider):
         self.caption_impact_ranges = []
         self.visual_ranges = []
         self.selected_visual_range = None
+        self.asset_clips = []
+        self.selected_asset_clip_id = None
 
         self.update()
 
@@ -1869,6 +2419,196 @@ class SuggestionSlider(QSlider):
             2,
         )
 
+    def draw_asset_clip(
+        self,
+        painter: QPainter,
+        clip: dict,
+    ):
+
+        geometry = self.asset_clip_geometry(
+            clip
+        )
+        if geometry is None:
+            return
+
+        clip_x, clip_y, clip_width, clip_height = geometry
+        kind = str(
+            clip.get(
+                "kind",
+                "",
+            )
+            or ""
+        ).upper()
+        selected = str(
+            clip.get(
+                "id",
+                "",
+            )
+            or ""
+        ) == str(
+            self.selected_asset_clip_id
+            or ""
+        )
+        active = clip.get(
+            "active",
+            True,
+        ) is not False
+
+        if kind == "SFX":
+            fill = QColor(
+                226,
+                132,
+                58,
+                238 if active else 88,
+            )
+            edge = QColor(
+                255,
+                216,
+                156,
+                245,
+            )
+        else:
+            fill = QColor(
+                72,
+                196,
+                129,
+                235 if active else 80,
+            )
+            edge = QColor(
+                218,
+                255,
+                228,
+                235,
+            )
+
+        painter.setPen(
+            edge
+            if selected
+            else QColor(
+                54,
+                44,
+                36,
+                190,
+            )
+        )
+        painter.setBrush(
+            fill
+        )
+        painter.drawRoundedRect(
+            int(
+                clip_x
+            ),
+            int(
+                clip_y
+            ),
+            int(
+                clip_width
+            ),
+            int(
+                clip_height
+            ),
+            3,
+            3,
+        )
+
+        grip_color = QColor(
+            255,
+            235,
+            205,
+            230 if active else 120,
+        )
+        painter.fillRect(
+            int(
+                clip_x
+            ),
+            int(
+                clip_y
+            ),
+            4,
+            int(
+                clip_height
+            ),
+            grip_color,
+        )
+        painter.fillRect(
+            int(
+                clip_x
+                + clip_width
+                - 4
+            ),
+            int(
+                clip_y
+            ),
+            4,
+            int(
+                clip_height
+            ),
+            grip_color,
+        )
+
+        if clip_width >= 42:
+            label = str(
+                clip.get(
+                    "label",
+                    kind or "CLIP",
+                )
+                or kind
+                or "CLIP"
+            ).upper()
+            if not active:
+                label = "MUTED " + label
+
+            painter.setFont(
+                QFont(
+                    "Segoe UI",
+                    8,
+                    QFont.Weight.Bold,
+                )
+            )
+            painter.setPen(
+                QColor(
+                    23,
+                    12,
+                    7,
+                    235,
+                )
+                if active
+                else QColor(
+                    150,
+                    142,
+                    132,
+                    220,
+                )
+            )
+            max_width = max(
+                18,
+                int(
+                    clip_width
+                    - 14
+                ),
+            )
+            metrics = painter.fontMetrics()
+            while (
+                label
+                and metrics.horizontalAdvance(
+                    label
+                )
+                > max_width
+            ):
+                label = label[:-1]
+            painter.drawText(
+                int(
+                    clip_x
+                )
+                + 8,
+                int(
+                    clip_y
+                    + clip_height / 2
+                )
+                + 4,
+                label,
+            )
+
     def paintEvent(self, event):
 
         del event
@@ -1890,6 +2630,8 @@ class SuggestionSlider(QSlider):
         edit_height = lanes["edit_height"]
         visual_top = lanes["visual_top"]
         visual_height = lanes["visual_height"]
+        sfx_top = lanes["sfx_top"]
+        sfx_height = lanes["sfx_height"]
         lane_bottom = min(
             height
             - 10,
@@ -1957,6 +2699,11 @@ class SuggestionSlider(QSlider):
                 "VISUALS",
                 visual_top,
                 visual_height,
+            ),
+            (
+                "SFX",
+                sfx_top,
+                sfx_height,
             ),
         ]
 
@@ -2034,6 +2781,8 @@ class SuggestionSlider(QSlider):
             + edit_height,
             visual_top
             + visual_height,
+            sfx_top
+            + sfx_height,
         ):
             painter.drawLine(
                 left,
@@ -2401,6 +3150,12 @@ class SuggestionSlider(QSlider):
                     240,
                 ),
                 selected=selected,
+            )
+
+        for clip in self.asset_clips:
+            self.draw_asset_clip(
+                painter,
+                clip,
             )
 
         painter.setPen(
@@ -3416,6 +4171,9 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.visual_plan_slots: list[dict] = []
+        self.editor_asset_plan: dict = load_editor_asset_plan()
+        self.selected_sfx_clip_id: str | None = None
+        self.sfx_preview_triggered: set[str] = set()
 
         self.visual_asset_process = QProcess(self)
 
@@ -3680,6 +4438,12 @@ class ShortsFactoryWindow(QMainWindow):
             self.playback_error_occurred
         )
 
+        self.sfx_preview_audio = QAudioOutput()
+        self.sfx_preview_player = QMediaPlayer()
+        self.sfx_preview_player.setAudioOutput(
+            self.sfx_preview_audio
+        )
+
         self.build_ui()
         self.apply_style()
         app = QApplication.instance()
@@ -3693,6 +4457,7 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.update_image_ai_indicator()
         self.load_selected_visual_into_inspector()
+        self.load_editor_asset_plan_state()
 
     def build_ui(self):
 
@@ -3938,6 +4703,11 @@ class ShortsFactoryWindow(QMainWindow):
         self.timeline.suggestionClicked.connect(self.select_ai_suggestion)
         self.timeline.selectionChanged.connect(self.timeline_selection_changed)
         self.timeline.viewportChanged.connect(self.timeline_viewport_changed)
+        self.timeline.assetClipSelected.connect(self.editor_asset_clip_selected)
+        self.timeline.assetClipChanged.connect(self.editor_asset_clip_changed)
+        self.timeline.assetClipDoubleClicked.connect(
+            self.editor_asset_clip_double_clicked
+        )
 
         timeline_panel = QWidget()
         timeline_panel.setObjectName("TimelinePanel")
@@ -4159,6 +4929,60 @@ class ShortsFactoryWindow(QMainWindow):
         self.narrator_button.setEnabled(False)
         self.narrator_button.setToolTip("Planned: generate and mix AI narration/commentary over selected source clips.")
 
+        self.sfx_context_frame = QFrame()
+        self.sfx_context_frame.setObjectName("SubPanel")
+        self.sfx_context_frame.setVisible(False)
+
+        sfx_context_layout = QHBoxLayout(self.sfx_context_frame)
+        sfx_context_layout.setContentsMargins(8, 6, 8, 6)
+        sfx_context_layout.setSpacing(8)
+
+        sfx_selected_label = QLabel("Selected SFX")
+        sfx_selected_label.setObjectName("MicroLabel")
+
+        self.sfx_clip_label = QLabel("No SFX selected")
+        self.sfx_clip_label.setObjectName("MusicLabel")
+        self.sfx_clip_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        self.sfx_volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sfx_volume_slider.setObjectName("MusicVolumeSlider")
+        self.sfx_volume_slider.setRange(0, 80)
+        self.sfx_volume_slider.setValue(25)
+        self.sfx_volume_slider.setFixedWidth(96)
+        self.sfx_volume_slider.setEnabled(False)
+        self.sfx_volume_slider.setToolTip(
+            "Selected SFX clip volume. This affects preview and final SFX mix."
+        )
+        self.sfx_volume_slider.valueChanged.connect(self.sfx_volume_changed)
+
+        self.swap_sfx_button = QPushButton("Swap")
+        self.swap_sfx_button.setObjectName("QuietButton")
+        self.swap_sfx_button.setEnabled(False)
+        self.swap_sfx_button.setToolTip(
+            "Replace the selected SFX clip while keeping its timing."
+        )
+        self.swap_sfx_button.clicked.connect(self.swap_selected_sfx_clip)
+
+        self.disable_sfx_button = QPushButton("Disable")
+        self.disable_sfx_button.setObjectName("QuietButton")
+        self.disable_sfx_button.setEnabled(False)
+        self.disable_sfx_button.clicked.connect(self.toggle_selected_sfx_clip)
+
+        self.delete_sfx_button = QPushButton("Delete")
+        self.delete_sfx_button.setObjectName("CutButton")
+        self.delete_sfx_button.setEnabled(False)
+        self.delete_sfx_button.clicked.connect(self.delete_selected_sfx_clip)
+
+        sfx_context_layout.addWidget(sfx_selected_label)
+        sfx_context_layout.addWidget(self.sfx_clip_label, 1)
+        sfx_context_layout.addWidget(self.sfx_volume_slider)
+        sfx_context_layout.addWidget(self.swap_sfx_button)
+        sfx_context_layout.addWidget(self.disable_sfx_button)
+        sfx_context_layout.addWidget(self.delete_sfx_button)
+
         audio_top_row.addWidget(audio_title)
         audio_top_row.addSpacing(6)
         audio_top_row.addWidget(edit_energy_label)
@@ -4181,6 +5005,7 @@ class ShortsFactoryWindow(QMainWindow):
 
         audio_layout.addLayout(audio_top_row)
         audio_layout.addLayout(audio_bottom_row)
+        audio_layout.addWidget(self.sfx_context_frame)
 
         center_editor_layout.addWidget(audio_frame, 0)
 
@@ -4887,6 +5712,8 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.timeline.clear_suggestions()
         self.timeline.clear_editor_overlays()
+        self.selected_sfx_clip_id = None
+        self.load_editor_asset_plan_state()
 
         self.ai_candidates = []
         self.visual_plan_slots = []
@@ -5086,6 +5913,10 @@ class ShortsFactoryWindow(QMainWindow):
                     f"{format_precise_time(self.player.duration())}"
                 )
             )
+
+        self.trigger_sfx_previews(
+            position
+        )
 
     def duration_changed(
         self,
@@ -9829,6 +10660,14 @@ class ShortsFactoryWindow(QMainWindow):
             self.preview_volume
             / 100
         )
+        if hasattr(
+            self,
+            "sfx_preview_audio",
+        ):
+            self.sfx_preview_audio.setVolume(
+                self.preview_volume
+                / 100
+            )
 
         self.preview_volume_label.setText(
             f"{self.preview_volume}%"
@@ -10386,6 +11225,750 @@ class ShortsFactoryWindow(QMainWindow):
             )
 
 
+    def load_editor_asset_plan_state(self):
+
+        self.editor_asset_plan = load_editor_asset_plan()
+        self.refresh_editor_asset_timeline()
+
+
+    def save_editor_asset_plan_state(self):
+
+        save_editor_asset_plan(
+            self.editor_asset_plan
+        )
+
+
+    def visible_editor_asset_clips(self) -> list[dict]:
+
+        clips = []
+        for clip in self.editor_asset_plan.get(
+            "clips",
+            [],
+        ):
+            if not isinstance(
+                clip,
+                dict,
+            ):
+                continue
+            if bool(
+                clip.get(
+                    "deleted",
+                    False,
+                )
+            ):
+                continue
+            if str(
+                clip.get(
+                    "kind",
+                    "",
+                )
+                or ""
+            ).upper() not in {
+                "SFX",
+                "AI_VISUAL",
+            }:
+                continue
+            clips.append(
+                clip
+            )
+        return clips
+
+
+    def refresh_editor_asset_timeline(self):
+
+        if hasattr(
+            self,
+            "timeline",
+        ):
+            self.timeline.set_asset_clips(
+                self.visible_editor_asset_clips()
+            )
+            self.timeline.set_selected_asset_clip(
+                self.selected_sfx_clip_id
+            )
+        self.update_sfx_inspector()
+
+
+    def find_editor_clip(
+        self,
+        kind: str,
+        clip_id: str,
+    ) -> dict | None:
+
+        normalized_kind = str(
+            kind
+            or ""
+        ).upper()
+        normalized_id = str(
+            clip_id
+            or ""
+        )
+        for clip in self.editor_asset_plan.get(
+            "clips",
+            [],
+        ):
+            if not isinstance(
+                clip,
+                dict,
+            ):
+                continue
+            if str(
+                clip.get(
+                    "kind",
+                    "",
+                )
+                or ""
+            ).upper() != normalized_kind:
+                continue
+            if str(
+                clip.get(
+                    "id",
+                    "",
+                )
+                or ""
+            ) == normalized_id:
+                return clip
+        return None
+
+
+    def selected_sfx_clip(self) -> dict | None:
+
+        if not self.selected_sfx_clip_id:
+            return None
+        return self.find_editor_clip(
+            "SFX",
+            self.selected_sfx_clip_id,
+        )
+
+
+    def editor_asset_clip_selected(
+        self,
+        kind: str,
+        clip_id: str,
+    ):
+
+        if str(
+            kind
+            or ""
+        ).upper() != "SFX":
+            return
+
+        self.selected_sfx_clip_id = str(
+            clip_id
+            or ""
+        )
+        self.timeline.set_selected_asset_clip(
+            self.selected_sfx_clip_id
+        )
+        self.update_sfx_inspector()
+
+        clip = self.selected_sfx_clip()
+        if clip is not None:
+            try:
+                start_ms = int(
+                    round(
+                        float(
+                            clip.get(
+                                "start",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                        * 1000
+                    )
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                start_ms = self.player.position()
+
+            self.player.setPosition(
+                start_ms
+            )
+            self.timeline.setValue(
+                start_ms
+            )
+            self.reveal_timeline_time(
+                start_ms
+            )
+            self.play_sfx_preview_clip(
+                clip
+            )
+
+
+    def editor_asset_clip_changed(
+        self,
+        kind: str,
+        clip: object,
+    ):
+
+        if not isinstance(
+            clip,
+            dict,
+        ):
+            return
+
+        normalized_kind = str(
+            kind
+            or clip.get(
+                "kind",
+                "",
+            )
+            or ""
+        ).upper()
+        if normalized_kind != "SFX":
+            return
+
+        clip["kind"] = "SFX"
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.save_editor_asset_plan_state()
+        self.selected_sfx_clip_id = str(
+            clip.get(
+                "id",
+                "",
+            )
+            or ""
+        )
+        self.update_sfx_inspector()
+
+
+    def editor_asset_clip_double_clicked(
+        self,
+        kind: str,
+        clip_id: str,
+    ):
+
+        if str(
+            kind
+            or ""
+        ).upper() != "SFX":
+            return
+
+        self.selected_sfx_clip_id = str(
+            clip_id
+            or ""
+        )
+        self.update_sfx_inspector()
+        self.swap_selected_sfx_clip()
+
+
+    def update_sfx_inspector(self):
+
+        if not hasattr(
+            self,
+            "sfx_clip_label",
+        ):
+            return
+
+        clip = self.selected_sfx_clip()
+        if clip is None or bool(
+            clip.get(
+                "deleted",
+                False,
+            )
+        ):
+            if hasattr(
+                self,
+                "sfx_context_frame",
+            ):
+                self.sfx_context_frame.setVisible(
+                    False
+                )
+            self.sfx_clip_label.setText(
+                "No SFX selected"
+            )
+            self.swap_sfx_button.setEnabled(False)
+            self.disable_sfx_button.setEnabled(False)
+            self.delete_sfx_button.setEnabled(False)
+            self.sfx_volume_slider.setEnabled(False)
+            self.disable_sfx_button.setText("Disable")
+            return
+
+        self.sfx_context_frame.setVisible(
+            True
+        )
+        label = str(
+            clip.get(
+                "label",
+                "SFX",
+            )
+            or "SFX"
+        )
+        self.sfx_clip_label.setText(
+            f"SFX: {label}"
+        )
+        self.swap_sfx_button.setEnabled(True)
+        self.disable_sfx_button.setEnabled(True)
+        self.delete_sfx_button.setEnabled(True)
+        self.disable_sfx_button.setText(
+            "Enable"
+            if clip.get(
+                "active",
+                True,
+            )
+            is False
+            else "Disable"
+        )
+
+        try:
+            volume = float(
+                clip.get(
+                    "volume",
+                    0.25,
+                )
+                or 0.25
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            volume = 0.25
+        self.sfx_volume_slider.blockSignals(True)
+        self.sfx_volume_slider.setValue(
+            int(
+                round(
+                    max(
+                        0.0,
+                        min(
+                            0.8,
+                            volume,
+                        ),
+                    )
+                    * 100
+                )
+            )
+        )
+        self.sfx_volume_slider.blockSignals(False)
+        self.sfx_volume_slider.setEnabled(True)
+
+
+    def available_sfx_files(self) -> list[Path]:
+
+        sfx_dir = ROOT / "assets" / "sfx"
+        if not sfx_dir.exists():
+            return []
+
+        supported = {
+            ".wav",
+            ".mp3",
+            ".ogg",
+            ".m4a",
+            ".aac",
+            ".flac",
+        }
+        return sorted(
+            [
+                path
+                for path in sfx_dir.rglob("*")
+                if path.is_file()
+                and path.suffix.lower() in supported
+            ],
+            key=lambda path: str(
+                path.relative_to(
+                    sfx_dir
+                )
+            ).lower(),
+        )
+
+
+    def swap_selected_sfx_clip(self):
+
+        clip = self.selected_sfx_clip()
+        if clip is None:
+            return
+
+        paths = self.available_sfx_files()
+        if not paths:
+            QMessageBox.information(
+                self,
+                "Swap SFX",
+                "Add sound files to assets/sfx first.",
+            )
+            return
+
+        sfx_dir = ROOT / "assets" / "sfx"
+        labels = [
+            str(
+                path.relative_to(
+                    sfx_dir
+                )
+            )
+            for path in paths
+        ]
+
+        current_path = str(
+            clip.get(
+                "asset_path",
+                "",
+            )
+            or ""
+        )
+        selected_index = 0
+        for index, path in enumerate(
+            paths
+        ):
+            if str(path) == current_path:
+                selected_index = index
+                break
+
+        choice, accepted = QInputDialog.getItem(
+            self,
+            "Swap SFX",
+            "Sound:",
+            labels,
+            selected_index,
+            False,
+        )
+        if not accepted or not choice:
+            return
+
+        chosen_path = paths[
+            labels.index(
+                choice
+            )
+        ]
+        metadata = asset_metadata_for_path(
+            chosen_path,
+            fallback_category=str(
+                clip.get(
+                    "category",
+                    "",
+                )
+                or ""
+            ),
+        )
+        clip["asset_path"] = str(
+            chosen_path
+        )
+        clip["asset_source"] = "manual_swap"
+        clip["category"] = str(
+            metadata.get(
+                "category",
+                clip.get(
+                    "category",
+                    "",
+                ),
+            )
+            or ""
+        )
+        clip["label"] = str(
+            metadata.get(
+                "label",
+                clip.get(
+                    "label",
+                    "SFX",
+                ),
+            )
+            or "SFX"
+        )
+        clip["asset_filename"] = str(
+            metadata.get(
+                "asset_filename",
+                chosen_path.name,
+            )
+            or chosen_path.name
+        )
+        clip["description"] = str(
+            metadata.get(
+                "description",
+                chosen_path.stem,
+            )
+            or chosen_path.stem
+        )
+        clip["manual_override"] = True
+        clip["locked"] = True
+
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+        self.play_sfx_preview_clip(
+            clip
+        )
+
+
+    def toggle_selected_sfx_clip(self):
+
+        clip = self.selected_sfx_clip()
+        if clip is None:
+            return
+
+        clip["active"] = not bool(
+            clip.get(
+                "active",
+                True,
+            )
+        )
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+
+    def delete_selected_sfx_clip(self):
+
+        clip = self.selected_sfx_clip()
+        if clip is None:
+            return
+
+        clip["active"] = False
+        clip["deleted"] = True
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.selected_sfx_clip_id = None
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+
+    def sfx_volume_changed(
+        self,
+        value: int,
+    ):
+
+        clip = self.selected_sfx_clip()
+        if clip is None:
+            return
+
+        clip["volume"] = round(
+            max(
+                0,
+                min(
+                    80,
+                    int(
+                        value
+                    ),
+                ),
+            )
+            / 100,
+            3,
+        )
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.save_editor_asset_plan_state()
+        self.update_sfx_inspector()
+
+
+    def play_sfx_preview_clip(
+        self,
+        clip: dict,
+    ):
+
+        if clip.get(
+            "active",
+            True,
+        ) is False:
+            return
+
+        asset_path = Path(
+            str(
+                clip.get(
+                    "asset_path",
+                    "",
+                )
+                or ""
+            )
+        )
+        if not asset_path.exists():
+            return
+
+        try:
+            volume = float(
+                clip.get(
+                    "volume",
+                    0.25,
+                )
+                or 0.25
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            volume = 0.25
+
+        self.sfx_preview_audio.setVolume(
+            max(
+                0.0,
+                min(
+                    1.0,
+                    volume
+                    * max(
+                        0.0,
+                        min(
+                            1.0,
+                            self.preview_volume / 100,
+                        ),
+                    ),
+                ),
+            )
+        )
+        self.sfx_preview_player.stop()
+        self.sfx_preview_player.setSource(
+            QUrl.fromLocalFile(
+                str(
+                    asset_path
+                )
+            )
+        )
+        try:
+            trim_in_ms = int(
+                round(
+                    float(
+                        clip.get(
+                            "trim_in",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                    * 1000
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            trim_in_ms = 0
+        self.sfx_preview_player.setPosition(
+            max(
+                0,
+                trim_in_ms,
+            )
+        )
+        self.sfx_preview_player.play()
+
+        try:
+            duration_ms = int(
+                round(
+                    float(
+                        clip.get(
+                            "duration",
+                            0.25,
+                        )
+                        or 0.25
+                    )
+                    * 1000
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            duration_ms = 250
+        QTimer.singleShot(
+            max(
+                90,
+                duration_ms,
+            ),
+            self.sfx_preview_player.stop,
+        )
+
+
+    def trigger_sfx_previews(
+        self,
+        position_ms: int,
+    ):
+
+        if (
+            self.player.playbackState()
+            != QMediaPlayer.PlaybackState.PlayingState
+        ):
+            self.sfx_preview_triggered.clear()
+            return
+
+        active_ids = set()
+        for clip in clips_of_kind(
+            self.editor_asset_plan,
+            "SFX",
+            active_only=True,
+        ):
+            if not isinstance(
+                clip,
+                dict,
+            ) or bool(
+                clip.get(
+                    "deleted",
+                    False,
+                )
+            ):
+                continue
+
+            clip_id = str(
+                clip.get(
+                    "id",
+                    "",
+                )
+                or ""
+            )
+            if not clip_id:
+                continue
+
+            try:
+                start_ms = int(
+                    round(
+                        float(
+                            clip.get(
+                                "start",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                        * 1000
+                    )
+                )
+                end_ms = int(
+                    round(
+                        float(
+                            clip.get(
+                                "end",
+                                start_ms / 1000,
+                            )
+                            or start_ms / 1000
+                        )
+                        * 1000
+                    )
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if start_ms <= int(position_ms) <= end_ms:
+                active_ids.add(
+                    clip_id
+                )
+                if clip_id not in self.sfx_preview_triggered:
+                    self.play_sfx_preview_clip(
+                        clip
+                    )
+                    self.sfx_preview_triggered.add(
+                        clip_id
+                    )
+
+        self.sfx_preview_triggered.intersection_update(
+            active_ids
+        )
+
+
     def update_sfx_button_state(self):
 
         if not hasattr(
@@ -10547,8 +12130,9 @@ class ShortsFactoryWindow(QMainWindow):
         self.render_log.append(
             f"SFX plan ready: {event_count} clip(s)."
         )
+        self.load_editor_asset_plan_state()
         self.suggestions_label.setText(
-            f"SFX plan ready: {event_count} clip(s). The SFX timeline lane will be restored in the next recovery batch."
+            f"SFX plan ready: {event_count} clip(s). Select orange clips on the SFX lane to edit them."
         )
 
 
