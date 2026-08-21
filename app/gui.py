@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, QProcess, QProcessEnvironment, QTimer, Signal, QSize, QSettings, QEvent, QPoint
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QColor, QPainter, QFont, QPixmap, QPolygon
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QColor, QPainter, QFont, QPixmap, QPolygon, QDesktopServices
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QSplitter,
@@ -10240,6 +10241,36 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.load_render_timeline_overlays()
+        self.open_final_video(final_video)
+
+
+    def open_final_video(
+        self,
+        final_video: Path,
+    ):
+
+        if not final_video.exists():
+            self.render_log.append(
+                "Could not auto-open final video because the file was not found."
+            )
+            return
+
+        opened = QDesktopServices.openUrl(
+            QUrl.fromLocalFile(
+                str(
+                    final_video
+                )
+            )
+        )
+
+        if opened:
+            self.render_log.append(
+                "Opened final video in the default video player."
+            )
+        else:
+            self.render_log.append(
+                "Could not auto-open final video."
+            )
 
 
     def generate_short(self):
@@ -11202,6 +11233,7 @@ class ShortsFactoryWindow(QMainWindow):
                     widget,
                     (
                         QLineEdit,
+                        QPlainTextEdit,
                         QTextEdit,
                     ),
                 ):
