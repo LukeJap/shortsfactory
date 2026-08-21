@@ -722,6 +722,16 @@ def variant_output_path(
                 or ""
             ) != active_variant_id:
                 continue
+            if bool(
+                variant.get(
+                    "saved",
+                    False,
+                )
+            ):
+                # A kept variant is immutable. Regeneration creates a new
+                # sibling instead of overwriting the file the user saved.
+                break
+
             raw_path = str(
                 variant.get(
                     "path",

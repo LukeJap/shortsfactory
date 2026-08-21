@@ -5559,6 +5559,84 @@ class ShortsFactoryWindow(QMainWindow):
             self.regenerate_selected_visual_asset
         )
 
+        self.keep_visual_variant_button = QPushButton(
+            "KEEP"
+        )
+        self.keep_visual_variant_button.setObjectName(
+            "QuietButton"
+        )
+        self.keep_visual_variant_button.setToolTip(
+            "Preserve the active image variant so future generation cannot overwrite it."
+        )
+        self.keep_visual_variant_button.clicked.connect(
+            self.keep_selected_visual_variant
+        )
+
+        self.generate_more_visual_button = QPushButton(
+            "GENERATE MORE"
+        )
+        self.generate_more_visual_button.setObjectName(
+            "QuietButton"
+        )
+        self.generate_more_visual_button.setToolTip(
+            "Generate another image variant without replacing kept images."
+        )
+        self.generate_more_visual_button.clicked.connect(
+            self.generate_more_selected_visual_variant
+        )
+
+        variant_nav = QHBoxLayout()
+        variant_nav.setSpacing(
+            4
+        )
+
+        self.previous_visual_variant_button = QPushButton(
+            "<"
+        )
+        self.previous_visual_variant_button.setObjectName(
+            "TinyButton"
+        )
+        self.previous_visual_variant_button.setToolTip(
+            "Previous image variant"
+        )
+        self.previous_visual_variant_button.clicked.connect(
+            self.previous_visual_variant
+        )
+
+        self.visual_variant_label = QLabel(
+            "0/0"
+        )
+        self.visual_variant_label.setObjectName(
+            "MicroLabel"
+        )
+        self.visual_variant_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        self.next_visual_variant_button = QPushButton(
+            ">"
+        )
+        self.next_visual_variant_button.setObjectName(
+            "TinyButton"
+        )
+        self.next_visual_variant_button.setToolTip(
+            "Next image variant"
+        )
+        self.next_visual_variant_button.clicked.connect(
+            self.next_visual_variant
+        )
+
+        variant_nav.addWidget(
+            self.previous_visual_variant_button
+        )
+        variant_nav.addWidget(
+            self.visual_variant_label,
+            1,
+        )
+        variant_nav.addWidget(
+            self.next_visual_variant_button
+        )
+
         self.disable_visual_button = QPushButton(
             "DISABLE"
         )
@@ -5581,6 +5659,15 @@ class ShortsFactoryWindow(QMainWindow):
 
         action_column.addWidget(
             self.regenerate_visual_button
+        )
+        action_column.addWidget(
+            self.keep_visual_variant_button
+        )
+        action_column.addWidget(
+            self.generate_more_visual_button
+        )
+        action_column.addLayout(
+            variant_nav
         )
         action_column.addWidget(
             self.disable_visual_button
@@ -7976,6 +8063,95 @@ class ShortsFactoryWindow(QMainWindow):
                     )
                 )
 
+            variant_id = str(
+                asset.get(
+                    "variant_id",
+                    "",
+                )
+                or ""
+            )
+            if variant_id:
+                variants = self.visual_variants(
+                    slot
+                )
+                variant_data = {
+                    "variant_id": variant_id,
+                    "path": str(
+                        asset.get(
+                            "path",
+                            "",
+                        )
+                        or ""
+                    ),
+                    "state": str(
+                        asset.get(
+                            "state",
+                            "READY",
+                        )
+                        or "READY"
+                    ),
+                    "provider": str(
+                        asset.get(
+                            "provider",
+                            "",
+                        )
+                        or ""
+                    ),
+                    "generated": bool(
+                        asset.get(
+                            "generated",
+                            False,
+                        )
+                    ),
+                }
+                if "saved" in asset:
+                    variant_data["saved"] = bool(
+                        asset.get(
+                            "saved",
+                            False,
+                        )
+                    )
+
+                replaced = False
+                for variant_index, variant in enumerate(
+                    variants
+                ):
+                    if str(
+                        variant.get(
+                            "variant_id",
+                            "",
+                        )
+                        or ""
+                    ) != variant_id:
+                        continue
+                    variants[variant_index] = {
+                        **variant,
+                        **variant_data,
+                    }
+                    replaced = True
+                    break
+
+                if not replaced:
+                    variant_data.setdefault(
+                        "saved",
+                        False,
+                    )
+                    variants.append(
+                        variant_data
+                    )
+
+                slot["active_variant_id"] = variant_id
+                active_index = self.active_visual_variant_index(
+                    slot
+                )
+                slot["saved_variant"] = bool(
+                    active_index >= 0
+                    and variants[active_index].get(
+                        "saved",
+                        False,
+                    )
+                )
+
 
     def visual_asset_path(
         self,
@@ -8146,6 +8322,18 @@ class ShortsFactoryWindow(QMainWindow):
                 * 100
             )
         )
+        variant_number, variant_count, variant_saved = (
+            self.visual_variant_state(
+                slot
+            )
+        )
+        variant_text = (
+            f"    VAR {variant_number}/{variant_count}"
+            if variant_count
+            else ""
+        )
+        if variant_saved:
+            variant_text += " KEEP"
 
         meta = QLabel(
             (
@@ -8153,6 +8341,7 @@ class ShortsFactoryWindow(QMainWindow):
                 f"{format_time(int(end * 1000))}    "
                 f"{state_text}    "
                 f"{display_mode} / {scale_percent}%"
+                f"{variant_text}"
             )
         )
         meta.setObjectName(
@@ -8410,6 +8599,10 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_type_edit,
             self.visual_display_mode_combo,
             self.visual_prompt_edit,
+            self.keep_visual_variant_button,
+            self.generate_more_visual_button,
+            self.previous_visual_variant_button,
+            self.next_visual_variant_button,
             self.disable_visual_button,
             self.delete_visual_button,
         ):
@@ -8472,6 +8665,359 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
 
+    def visual_variants(
+        self,
+        slot: dict | None,
+    ) -> list[dict]:
+
+        if not isinstance(
+            slot,
+            dict,
+        ):
+            return []
+
+        variants = slot.get(
+            "variants",
+            [],
+        )
+        if not isinstance(
+            variants,
+            list,
+        ):
+            variants = []
+            slot["variants"] = variants
+
+        variants = [
+            variant
+            for variant in variants
+            if isinstance(
+                variant,
+                dict,
+            )
+        ]
+        slot["variants"] = variants
+
+        current_path = str(
+            slot.get(
+                "asset_path",
+                "",
+            )
+            or ""
+        ).strip()
+        active_variant_id = str(
+            slot.get(
+                "active_variant_id",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if current_path and not variants:
+            variant_id = (
+                active_variant_id
+                or "variant_001"
+            )
+            variants.append(
+                {
+                    "variant_id": variant_id,
+                    "path": current_path,
+                    "state": str(
+                        slot.get(
+                            "state",
+                            "READY",
+                        )
+                        or "READY"
+                    ),
+                    "provider": str(
+                        slot.get(
+                            "provider",
+                            "",
+                        )
+                        or ""
+                    ),
+                    "generated": bool(
+                        slot.get(
+                            "generated",
+                            False,
+                        )
+                    ),
+                    "saved": bool(
+                        slot.get(
+                            "saved_variant",
+                            False,
+                        )
+                    ),
+                }
+            )
+            slot["active_variant_id"] = variant_id
+            active_variant_id = variant_id
+
+        if variants:
+            known_ids = {
+                str(
+                    variant.get(
+                        "variant_id",
+                        "",
+                    )
+                    or ""
+                )
+                for variant in variants
+            }
+            if (
+                not active_variant_id
+                or active_variant_id not in known_ids
+            ):
+                fallback_id = str(
+                    variants[0].get(
+                        "variant_id",
+                        "variant_001",
+                    )
+                    or "variant_001"
+                )
+                slot["active_variant_id"] = fallback_id
+
+        return variants
+
+
+    def active_visual_variant_index(
+        self,
+        slot: dict | None,
+    ) -> int:
+
+        variants = self.visual_variants(
+            slot
+        )
+        if not variants or not isinstance(
+            slot,
+            dict,
+        ):
+            return -1
+
+        active_variant_id = str(
+            slot.get(
+                "active_variant_id",
+                "",
+            )
+            or ""
+        )
+        for index, variant in enumerate(
+            variants
+        ):
+            if str(
+                variant.get(
+                    "variant_id",
+                    "",
+                )
+                or ""
+            ) == active_variant_id:
+                return index
+
+        return 0
+
+
+    def visual_variant_state(
+        self,
+        slot: dict | None,
+    ) -> tuple[int, int, bool]:
+
+        variants = self.visual_variants(
+            slot
+        )
+        index = self.active_visual_variant_index(
+            slot
+        )
+        if index < 0:
+            return 0, 0, False
+
+        return (
+            index + 1,
+            len(variants),
+            bool(
+                variants[index].get(
+                    "saved",
+                    False,
+                )
+            ),
+        )
+
+
+    def select_visual_variant(
+        self,
+        offset: int,
+    ):
+
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return
+
+        variants = self.visual_variants(
+            slot
+        )
+        if not variants:
+            return
+
+        current = self.active_visual_variant_index(
+            slot
+        )
+        if current < 0:
+            current = 0
+
+        next_index = (
+            current
+            + int(offset)
+        ) % len(variants)
+        variant = variants[
+            next_index
+        ]
+
+        slot["active_variant_id"] = str(
+            variant.get(
+                "variant_id",
+                "",
+            )
+            or ""
+        )
+        if variant.get(
+            "path"
+        ):
+            slot["asset_path"] = str(
+                variant.get(
+                    "path"
+                )
+            )
+        slot["state"] = str(
+            variant.get(
+                "state",
+                slot.get(
+                    "state",
+                    "READY",
+                ),
+            )
+            or slot.get(
+                "state",
+                "READY",
+            )
+        )
+        slot["provider"] = str(
+            variant.get(
+                "provider",
+                slot.get(
+                    "provider",
+                    "",
+                ),
+            )
+            or ""
+        )
+        slot["generated"] = bool(
+            variant.get(
+                "generated",
+                slot.get(
+                    "generated",
+                    False,
+                ),
+            )
+        )
+        slot["saved_variant"] = bool(
+            variant.get(
+                "saved",
+                False,
+            )
+        )
+
+        self.mark_visual_slot_modified(
+            slot
+        )
+        self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
+        self.refresh_visual_plan_display()
+        self.load_selected_visual_into_inspector()
+
+
+    def previous_visual_variant(self):
+
+        self.select_visual_variant(
+            -1
+        )
+
+
+    def next_visual_variant(self):
+
+        self.select_visual_variant(
+            1
+        )
+
+
+    def keep_selected_visual_variant(self):
+
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return
+
+        variants = self.visual_variants(
+            slot
+        )
+        index = self.active_visual_variant_index(
+            slot
+        )
+        if index < 0:
+            return
+
+        variants[index]["saved"] = True
+        slot["saved_variant"] = True
+
+        self.mark_visual_slot_modified(
+            slot
+        )
+        self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
+        self.refresh_visual_plan_display()
+        self.load_selected_visual_into_inspector()
+        self.visual_status_label.setText(
+            "Active image variant kept. Future generation will preserve it."
+        )
+
+
+    def generate_more_selected_visual_variant(self):
+
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return
+
+
+        if self.image_ai_state != "ready":
+            self.visual_status_label.setText(
+                "Image AI is offline. Existing variants are preserved."
+            )
+            return
+
+        self.visual_inspector_fields_changed()
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return
+
+        slot["force_new_variant"] = True
+        self.mark_visual_slot_modified(
+            slot
+        )
+        self.save_ai_visual_plan()
+        self.start_visual_asset_generation(
+            str(
+                slot.get(
+                    "slot_id",
+                    "",
+                )
+                or ""
+            ),
+            new_variant=True,
+        )
+
+
     def visual_scale_changed(
         self,
         value: int,
@@ -8514,6 +9060,12 @@ class ShortsFactoryWindow(QMainWindow):
             )
             self.visual_scale_label.setText(
                 "100%"
+            )
+            self.visual_variant_label.setText(
+                "0/0"
+            )
+            self.keep_visual_variant_button.setText(
+                "KEEP"
             )
             self.visual_reason_label.setText(
                 "Select a planned visual to inspect it."
@@ -8585,6 +9137,27 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.visual_scale_label.setText(
             f"{visual_scale_percent}%"
+        )
+
+        variant_number, variant_count, variant_saved = (
+            self.visual_variant_state(
+                slot
+            )
+        )
+        self.visual_variant_label.setText(
+            (
+                f"{variant_number}/{variant_count}"
+                + (
+                    "  KEPT"
+                    if variant_saved
+                    else ""
+                )
+            )
+        )
+        self.keep_visual_variant_button.setText(
+            "KEPT"
+            if variant_saved
+            else "KEEP"
         )
         self.visual_reason_label.setText(
             (
@@ -8846,10 +9419,39 @@ class ShortsFactoryWindow(QMainWindow):
             )
         ) if slot else False
 
+        variants = (
+            self.visual_variants(
+                slot
+            )
+            if selected
+            else []
+        )
+
         self.regenerate_visual_button.setEnabled(
             selected
             and enabled
             and self.image_ai_state == "ready"
+            and not running
+        )
+        self.keep_visual_variant_button.setEnabled(
+            selected
+            and bool(variants)
+            and not running
+        )
+        self.generate_more_visual_button.setEnabled(
+            selected
+            and enabled
+            and self.image_ai_state == "ready"
+            and not running
+        )
+        self.previous_visual_variant_button.setEnabled(
+            selected
+            and len(variants) > 1
+            and not running
+        )
+        self.next_visual_variant_button.setEnabled(
+            selected
+            and len(variants) > 1
             and not running
         )
         self.disable_visual_button.setEnabled(
@@ -8943,6 +9545,125 @@ class ShortsFactoryWindow(QMainWindow):
                 )
             )
 
+        variant_id = str(
+            event.get(
+                "variant_id",
+                "",
+            )
+            or ""
+        )
+        if variant_id:
+            variants = self.visual_variants(
+                slot
+            )
+            event_path = str(
+                event.get(
+                    "path",
+                    "",
+                )
+                or ""
+            )
+            replaced = False
+            for variant_index, variant in enumerate(
+                variants
+            ):
+                if str(
+                    variant.get(
+                        "variant_id",
+                        "",
+                    )
+                    or ""
+                ) != variant_id:
+                    continue
+
+                variants[variant_index] = {
+                    **variant,
+                    "variant_id": variant_id,
+                    "path": event_path or str(
+                        variant.get(
+                            "path",
+                            "",
+                        )
+                        or ""
+                    ),
+                    "state": state or str(
+                        variant.get(
+                            "state",
+                            "READY",
+                        )
+                        or "READY"
+                    ),
+                    "provider": str(
+                        event.get(
+                            "provider",
+                            variant.get(
+                                "provider",
+                                "",
+                            ),
+                        )
+                        or ""
+                    ),
+                    "generated": bool(
+                        event.get(
+                            "generated",
+                            variant.get(
+                                "generated",
+                                False,
+                            ),
+                        )
+                    ),
+                }
+                replaced = True
+                break
+
+            if not replaced:
+                variants.append(
+                    {
+                        "variant_id": variant_id,
+                        "path": event_path,
+                        "state": state or "READY",
+                        "provider": str(
+                            event.get(
+                                "provider",
+                                "",
+                            )
+                            or ""
+                        ),
+                        "generated": bool(
+                            event.get(
+                                "generated",
+                                False,
+                            )
+                        ),
+                        "saved": False,
+                    }
+                )
+
+            slot["active_variant_id"] = variant_id
+            slot["saved_variant"] = bool(
+                next(
+                    (
+                        variant.get(
+                            "saved",
+                            False,
+                        )
+                        for variant in variants
+                        if str(
+                            variant.get(
+                                "variant_id",
+                                "",
+                            )
+                            or ""
+                        ) == variant_id
+                    ),
+                    False,
+                )
+            )
+            slot.pop(
+                "force_new_variant",
+                None,
+            )
+
         if "generated" in event:
             slot["generated"] = bool(
                 event.get(
@@ -8982,6 +9703,7 @@ class ShortsFactoryWindow(QMainWindow):
     def start_visual_asset_generation(
         self,
         slot_id: str = "",
+        new_variant: bool = False,
     ):
 
         if not self.visual_plan_slots:
@@ -9069,6 +9791,11 @@ class ShortsFactoryWindow(QMainWindow):
                     "--slot-id",
                     slot_id,
                 ]
+            )
+
+        if new_variant:
+            args.append(
+                "--new-variant"
             )
 
         self.visual_asset_process.start(
