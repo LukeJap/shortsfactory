@@ -41,6 +41,7 @@ try:
         clips_of_kind,
         editor_plan_context_matches,
         load_editor_asset_plan,
+        replace_kind_clips,
         save_editor_asset_plan,
         set_editor_plan_context,
         upsert_clip,
@@ -57,6 +58,7 @@ except ImportError:
         clips_of_kind,
         editor_plan_context_matches,
         load_editor_asset_plan,
+        replace_kind_clips,
         save_editor_asset_plan,
         set_editor_plan_context,
         upsert_clip,
@@ -6401,10 +6403,14 @@ class ShortsFactoryWindow(QMainWindow):
         self.update_selection_label()
 
         self.update_transcript_panel()
-        self.clear_visual_plan_display()
         if preserve_editor_assets:
             self.retarget_editor_asset_context_to_current_selection()
+            self.apply_editor_visual_overrides_to_slots()
+            if self.visual_plan_slots:
+                self.save_ai_visual_plan()
+            self.refresh_visual_plan_display()
         else:
+            self.clear_visual_plan_display()
             self.selected_sfx_clip_id = None
             self.refresh_editor_asset_timeline()
 
@@ -6459,9 +6465,14 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.update_selection_label()
-        self.clear_visual_plan_display()
         if preserve_editor_assets:
             self.retarget_editor_asset_context_to_current_selection()
+            self.apply_editor_visual_overrides_to_slots()
+            if self.visual_plan_slots:
+                self.save_ai_visual_plan()
+            self.refresh_visual_plan_display()
+        else:
+            self.clear_visual_plan_display()
 
     def set_end(self):
 
@@ -6498,9 +6509,14 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.update_selection_label()
-        self.clear_visual_plan_display()
         if preserve_editor_assets:
             self.retarget_editor_asset_context_to_current_selection()
+            self.apply_editor_visual_overrides_to_slots()
+            if self.visual_plan_slots:
+                self.save_ai_visual_plan()
+            self.refresh_visual_plan_display()
+        else:
+            self.clear_visual_plan_display()
 
     def update_selection_label(self):
 
@@ -7433,6 +7449,14 @@ class ShortsFactoryWindow(QMainWindow):
                 "state",
                 "PLANNED",
             )
+            slot.setdefault(
+                "display_mode",
+                "OVERLAY_CARD",
+            )
+            slot.setdefault(
+                "scale",
+                1.0,
+            )
 
             try:
                 start = float(
@@ -7460,6 +7484,149 @@ class ShortsFactoryWindow(QMainWindow):
                 ValueError,
             ):
                 pass
+
+
+    def visual_clip_id(self, slot: dict, index: int) -> str:
+        slot_id = str(slot.get("slot_id", "") or "")
+        return f"visual:{slot_id or f'visual_{index + 1:02d}'}"
+
+
+    def visual_slot_asset_path_text(self, slot: dict) -> str:
+        variants = slot.get("variants", [])
+        active_id = str(slot.get("active_variant_id", "") or "")
+        if isinstance(variants, list):
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                variant_id = str(variant.get("variant_id", "") or "")
+                if active_id and variant_id != active_id:
+                    continue
+                path = str(variant.get("path", "") or "")
+                if path:
+                    return path
+        return str(slot.get("asset_path", "") or "")
+
+
+    def visual_slot_to_editor_clip(self, slot: dict, index: int) -> dict:
+        try:
+            start = float(slot.get("start", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            start = 0.0
+        try:
+            end = float(slot.get("end", start) or start)
+        except (TypeError, ValueError):
+            end = start
+        try:
+            scale = float(slot.get("scale", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            scale = 1.0
+        scale = max(0.6, min(1.4, scale))
+        display_mode = str(slot.get("display_mode", "OVERLAY_CARD") or "OVERLAY_CARD").strip().upper()
+        if display_mode not in {"OVERLAY_CARD", "FULL_FRAME_CONTAIN", "FULL_FRAME_COVER"}:
+            display_mode = "OVERLAY_CARD"
+        manual = bool(slot.get("user_modified", False))
+        asset_path = self.visual_slot_asset_path_text(slot)
+        return {
+            "id": self.visual_clip_id(slot, index),
+            "kind": "AI_VISUAL",
+            "time_basis": "source",
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(max(0.0, end - start), 3),
+            "asset_path": asset_path,
+            "active_variant_path": asset_path,
+            "label": str(slot.get("label", f"Visual {index + 1}") or f"Visual {index + 1}"),
+            "display_mode": display_mode,
+            "scale": round(scale, 2),
+            "source_type": str(slot.get("source_type", "ai_generated") or "ai_generated"),
+            "slot_id": str(slot.get("slot_id", "") or ""),
+            "variant_id": str(slot.get("active_variant_id", "") or ""),
+            "active": bool(slot.get("enabled", True)),
+            "origin": "manual" if manual else "automatic",
+            "manual_override": manual,
+            "locked": manual,
+        }
+
+
+    def apply_editor_visual_overrides_to_slots(self):
+        self.editor_asset_plan = load_editor_asset_plan()
+        if not self.editor_asset_context_matches_current_selection():
+            return
+
+        visual_clips = {
+            str(clip.get("id", "") or ""): clip
+            for clip in clips_of_kind(self.editor_asset_plan, "AI_VISUAL")
+            if isinstance(clip, dict)
+            and (bool(clip.get("manual_override", False)) or bool(clip.get("locked", False)))
+        }
+        for index, slot in enumerate(self.visual_plan_slots):
+            if not isinstance(slot, dict):
+                continue
+            clip = visual_clips.get(self.visual_clip_id(slot, index))
+            if clip is None:
+                continue
+            try:
+                start = float(clip.get("start", slot.get("start", 0.0)))
+                end = float(clip.get("end", slot.get("end", start)))
+            except (TypeError, ValueError):
+                continue
+            slot["start"] = round(start, 3)
+            slot["end"] = round(max(start + 0.2, end), 3)
+            slot["duration"] = round(slot["end"] - slot["start"], 3)
+            slot["enabled"] = bool(clip.get("active", True))
+            if clip.get("asset_path"):
+                slot["asset_path"] = str(clip["asset_path"])
+            if clip.get("variant_id"):
+                slot["active_variant_id"] = str(clip["variant_id"])
+            if clip.get("display_mode"):
+                slot["display_mode"] = str(clip["display_mode"])
+            if clip.get("scale") is not None:
+                try:
+                    slot["scale"] = float(clip["scale"])
+                except (TypeError, ValueError):
+                    pass
+            slot["user_modified"] = True
+            self.user_visual_edits = True
+
+
+    def sync_visual_slots_to_editor_asset_plan(self, *, preserve_manual: bool = True):
+        if not self.video_path or self.end_ms <= self.start_ms:
+            return
+        if not self.editor_asset_context_matches_current_selection():
+            self.editor_asset_plan = set_editor_plan_context(
+                self.editor_asset_plan,
+                self.video_path,
+                self.start_ms / 1000,
+                self.end_ms / 1000,
+                clear_clips_on_change=False,
+            )
+        clips = [
+            self.visual_slot_to_editor_clip(slot, index)
+            for index, slot in enumerate(self.visual_plan_slots)
+            if isinstance(slot, dict)
+        ]
+        self.editor_asset_plan = replace_kind_clips(
+            self.editor_asset_plan,
+            "AI_VISUAL",
+            clips,
+            preserve_manual=preserve_manual,
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+
+    def sync_visual_slot_to_editor_asset_plan(self, index: int):
+        if not (0 <= index < len(self.visual_plan_slots)):
+            return
+        slot = self.visual_plan_slots[index]
+        if not isinstance(slot, dict):
+            return
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            self.visual_slot_to_editor_clip(slot, index),
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
 
 
     def visual_plan_has_user_edits(self) -> bool:
@@ -8042,8 +8209,18 @@ class ShortsFactoryWindow(QMainWindow):
                     )
                 )
 
+        has_editor_visual_clips = bool(
+            hasattr(self, "editor_asset_plan")
+            and self.editor_asset_context_matches_current_selection()
+            and clips_of_kind(
+                self.editor_asset_plan,
+                "AI_VISUAL",
+            )
+        )
         self.timeline.set_visual_ranges(
-            visual_ranges
+            []
+            if has_editor_visual_clips
+            else visual_ranges
         )
 
         if (
@@ -8058,38 +8235,43 @@ class ShortsFactoryWindow(QMainWindow):
             slot = self.visual_plan_slots[
                 self.selected_visual_slot_index
             ]
-            try:
-                self.timeline.set_selected_visual_range(
-                    int(
-                        round(
-                            float(
-                                slot.get(
-                                    "start",
-                                    0.0,
-                                )
-                            )
-                            * 1000
-                        )
-                    ),
-                    int(
-                        round(
-                            float(
-                                slot.get(
-                                    "end",
-                                    0.0,
-                                )
-                            )
-                            * 1000
-                        )
-                    ),
-                )
-            except (
-                TypeError,
-                ValueError,
-            ):
+            if has_editor_visual_clips:
                 self.timeline.set_selected_visual_range(
                     None
                 )
+            else:
+                try:
+                    self.timeline.set_selected_visual_range(
+                        int(
+                            round(
+                                float(
+                                    slot.get(
+                                        "start",
+                                        0.0,
+                                    )
+                                )
+                                * 1000
+                            )
+                        ),
+                        int(
+                            round(
+                                float(
+                                    slot.get(
+                                        "end",
+                                        0.0,
+                                    )
+                                )
+                                * 1000
+                            )
+                        ),
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    self.timeline.set_selected_visual_range(
+                        None
+                    )
         else:
             self.timeline.set_selected_visual_range(
                 None
@@ -8399,6 +8581,10 @@ class ShortsFactoryWindow(QMainWindow):
             slot
         )
         self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
 
@@ -8436,6 +8622,10 @@ class ShortsFactoryWindow(QMainWindow):
             slot
         )
         self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
         self.refresh_visual_plan_display()
 
 
@@ -8583,6 +8773,10 @@ class ShortsFactoryWindow(QMainWindow):
             )
 
         self.save_ai_visual_plan()
+        if index_match is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                index_match
+            )
         self.refresh_visual_plan_display()
 
         if index_match == self.selected_visual_slot_index:
@@ -8708,6 +8902,10 @@ class ShortsFactoryWindow(QMainWindow):
 
         slot["state"] = "GENERATING"
         self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
         self.refresh_visual_plan_display()
         self.start_visual_asset_generation(
             str(
@@ -8736,6 +8934,10 @@ class ShortsFactoryWindow(QMainWindow):
             slot
         )
         self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
 
@@ -8754,10 +8956,50 @@ class ShortsFactoryWindow(QMainWindow):
         ):
             return
 
+        deleted_index = self.selected_visual_slot_index
+        deleted_slot = self.visual_plan_slots[
+            deleted_index
+        ]
+        deleted_clip_id = (
+            self.visual_clip_id(
+                deleted_slot,
+                deleted_index,
+            )
+            if isinstance(
+                deleted_slot,
+                dict,
+            )
+            else ""
+        )
+
         del self.visual_plan_slots[
-            self.selected_visual_slot_index
+            deleted_index
         ]
         self.user_visual_edits = True
+
+        if deleted_clip_id:
+            self.editor_asset_plan["clips"] = [
+                clip
+                for clip in self.editor_asset_plan.get(
+                    "clips",
+                    [],
+                )
+                if not (
+                    isinstance(
+                        clip,
+                        dict,
+                    )
+                    and str(
+                        clip.get(
+                            "id",
+                            "",
+                        )
+                        or ""
+                    )
+                    == deleted_clip_id
+                )
+            ]
+            self.save_editor_asset_plan_state()
 
         if self.selected_visual_slot_index >= len(
             self.visual_plan_slots
@@ -8775,6 +9017,7 @@ class ShortsFactoryWindow(QMainWindow):
         self.save_ai_visual_plan()
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
+        self.refresh_editor_asset_timeline()
 
 
     def clear_visual_plan_display(self):
@@ -8924,6 +9167,28 @@ class ShortsFactoryWindow(QMainWindow):
         self.ensure_current_editor_asset_context(
             clear_on_change=True
         )
+        self.editor_asset_plan["clips"] = [
+            clip
+            for clip in self.editor_asset_plan.get(
+                "clips",
+                [],
+            )
+            if not (
+                isinstance(
+                    clip,
+                    dict,
+                )
+                and str(
+                    clip.get(
+                        "kind",
+                        "",
+                    )
+                    or ""
+                ).upper()
+                == "AI_VISUAL"
+            )
+        ]
+        self.save_editor_asset_plan_state()
         self.user_visual_edits = False
         self.selected_visual_slot_index = None
 
@@ -9094,7 +9359,11 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.ensure_visual_slot_defaults()
         self.refresh_visual_assets_from_manifest()
+        self.apply_editor_visual_overrides_to_slots()
         self.save_ai_visual_plan()
+        self.sync_visual_slots_to_editor_asset_plan(
+            preserve_manual=True
+        )
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
 
@@ -9339,6 +9608,9 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.refresh_visual_assets_from_manifest()
         self.save_ai_visual_plan()
+        self.sync_visual_slots_to_editor_asset_plan(
+            preserve_manual=True
+        )
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
 
@@ -9487,6 +9759,7 @@ class ShortsFactoryWindow(QMainWindow):
             return
 
         self.selected_visual_slot_index = slot_index
+        self.selected_sfx_clip_id = None
 
         self.player.setPosition(
             position
@@ -9501,6 +9774,27 @@ class ShortsFactoryWindow(QMainWindow):
             end_position,
         )
 
+        if (
+            0
+            <= slot_index
+            < len(
+                self.visual_plan_slots
+            )
+        ):
+            slot = self.visual_plan_slots[
+                slot_index
+            ]
+            if isinstance(
+                slot,
+                dict,
+            ):
+                self.timeline.set_selected_asset_clip(
+                    self.visual_clip_id(
+                        slot,
+                        slot_index,
+                    )
+                )
+
         self.reveal_timeline_range(
             position,
             end_position,
@@ -9508,6 +9802,7 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
+        self.refresh_editor_asset_timeline()
 
 
     def transcript_item_clicked(
@@ -11416,8 +11711,30 @@ class ShortsFactoryWindow(QMainWindow):
             self.timeline.set_asset_clips(
                 self.visible_editor_asset_clips()
             )
+
+            selected_asset_id = self.selected_sfx_clip_id
+            if (
+                self.selected_visual_slot_index is not None
+                and 0
+                <= self.selected_visual_slot_index
+                < len(
+                    self.visual_plan_slots
+                )
+            ):
+                slot = self.visual_plan_slots[
+                    self.selected_visual_slot_index
+                ]
+                if isinstance(
+                    slot,
+                    dict,
+                ):
+                    selected_asset_id = self.visual_clip_id(
+                        slot,
+                        self.selected_visual_slot_index,
+                    )
+
             self.timeline.set_selected_asset_clip(
-                self.selected_sfx_clip_id
+                selected_asset_id
             )
         self.update_sfx_inspector()
 
@@ -11482,11 +11799,93 @@ class ShortsFactoryWindow(QMainWindow):
         clip_id: str,
     ):
 
-        if str(
+        normalized_kind = str(
             kind
             or ""
-        ).upper() != "SFX":
+        ).upper()
+        normalized_id = str(
+            clip_id
+            or ""
+        )
+
+        if normalized_kind == "AI_VISUAL":
+            self.selected_sfx_clip_id = None
+
+            for index, slot in enumerate(
+                self.visual_plan_slots
+            ):
+                if not isinstance(
+                    slot,
+                    dict,
+                ):
+                    continue
+                if self.visual_clip_id(
+                    slot,
+                    index,
+                ) != normalized_id:
+                    continue
+
+                self.selected_visual_slot_index = index
+                self.timeline.set_selected_asset_clip(
+                    normalized_id
+                )
+
+                try:
+                    start_ms = int(
+                        round(
+                            float(
+                                slot.get(
+                                    "start",
+                                    0.0,
+                                )
+                                or 0.0
+                            )
+                            * 1000
+                        )
+                    )
+                    end_ms = int(
+                        round(
+                            float(
+                                slot.get(
+                                    "end",
+                                    slot.get(
+                                        "start",
+                                        0.0,
+                                    ),
+                                )
+                            )
+                            * 1000
+                        )
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    start_ms = self.player.position()
+                    end_ms = start_ms
+
+                self.player.setPosition(
+                    start_ms
+                )
+                self.timeline.setValue(
+                    start_ms
+                )
+                self.reveal_timeline_range(
+                    start_ms,
+                    end_ms,
+                )
+                self.refresh_visual_plan_display()
+                self.load_selected_visual_into_inspector()
+                self.refresh_editor_asset_timeline()
+                return
+
             return
+
+        if normalized_kind != "SFX":
+            return
+
+        self.selected_visual_slot_index = None
+        self.refresh_visual_plan_display()
 
         self.selected_sfx_clip_id = str(
             clip_id
@@ -11552,6 +11951,111 @@ class ShortsFactoryWindow(QMainWindow):
             )
             or ""
         ).upper()
+
+        if normalized_kind == "AI_VISUAL":
+            clip["kind"] = "AI_VISUAL"
+
+            try:
+                start = float(
+                    clip.get(
+                        "start",
+                        0.0,
+                    )
+                    or 0.0
+                )
+                end = float(
+                    clip.get(
+                        "end",
+                        start,
+                    )
+                    or start
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                start = 0.0
+                end = 0.2
+
+            end = max(
+                start + 0.2,
+                end,
+            )
+            clip["start"] = round(
+                start,
+                3,
+            )
+            clip["end"] = round(
+                end,
+                3,
+            )
+            clip["duration"] = round(
+                end - start,
+                3,
+            )
+            clip["manual_override"] = True
+            clip["locked"] = True
+            clip["origin"] = (
+                clip.get(
+                    "origin",
+                    "manual",
+                )
+                or "manual"
+            )
+
+            self.editor_asset_plan = upsert_clip(
+                self.editor_asset_plan,
+                clip,
+            )
+            self.save_editor_asset_plan_state()
+
+            clip_id = str(
+                clip.get(
+                    "id",
+                    "",
+                )
+                or ""
+            )
+            self.selected_sfx_clip_id = None
+
+            for index, slot in enumerate(
+                self.visual_plan_slots
+            ):
+                if not isinstance(
+                    slot,
+                    dict,
+                ):
+                    continue
+                if self.visual_clip_id(
+                    slot,
+                    index,
+                ) != clip_id:
+                    continue
+
+                slot["start"] = clip["start"]
+                slot["end"] = clip["end"]
+                slot["duration"] = clip["duration"]
+                slot["enabled"] = bool(
+                    clip.get(
+                        "active",
+                        slot.get(
+                            "enabled",
+                            True,
+                        ),
+                    )
+                )
+                slot["user_modified"] = True
+                self.user_visual_edits = True
+                self.selected_visual_slot_index = index
+
+                self.save_ai_visual_plan()
+                self.refresh_visual_plan_display()
+                self.load_selected_visual_into_inspector()
+                self.refresh_editor_asset_timeline()
+                return
+
+            return
+
         if normalized_kind != "SFX":
             return
 
@@ -11579,10 +12083,19 @@ class ShortsFactoryWindow(QMainWindow):
         clip_id: str,
     ):
 
-        if str(
+        normalized_kind = str(
             kind
             or ""
-        ).upper() != "SFX":
+        ).upper()
+
+        if normalized_kind == "AI_VISUAL":
+            self.editor_asset_clip_selected(
+                kind,
+                clip_id,
+            )
+            return
+
+        if normalized_kind != "SFX":
             return
 
         self.selected_sfx_clip_id = str(
