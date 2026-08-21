@@ -1,0 +1,1064 @@
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    from .visual_emphasis import (
+        DEFAULT_ENERGY,
+        load_render_settings,
+        normalize_energy,
+        normalize_sfx_mode,
+    )
+except ImportError:
+    from visual_emphasis import (
+        DEFAULT_ENERGY,
+        load_render_settings,
+        normalize_energy,
+        normalize_sfx_mode,
+    )
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+PLAN_PATH = ROOT / "output" / "short_plan.json"
+SEMANTIC_PLAN_PATH = (
+    ROOT / "output" / "semantic_edit_plan.json"
+)
+
+OUTPUT_DIR = ROOT / "output" / "rendered"
+
+COMPONENTS_DIR = OUTPUT_DIR / "_components"
+
+BASE_OUTPUT_PATH = (
+    OUTPUT_DIR / "short1_base.mp4"
+)
+
+TIGHT_OUTPUT_PATH = (
+    OUTPUT_DIR / "short1_tight.mp4"
+)
+
+CAPTION_OUTPUT_PATH = (
+    OUTPUT_DIR / "short1_captioned.mp4"
+)
+
+CAPTIONS_PATH = (
+    ROOT / "output" / "captions.ass"
+)
+
+SUBTITLES_PATH = (
+    ROOT / "output" / "subtitles.json"
+)
+
+DEFAULT_SOURCE_VIDEO = (
+    ROOT / "input" / "short1.mp4"
+)
+
+
+# ============================================================
+# PIPELINE SCRIPTS
+# ============================================================
+
+SUBTITLES_SCRIPT = (
+    ROOT / "app" / "subtitles.py"
+)
+
+AUTO_CUT_SCRIPT = (
+    ROOT / "app" / "auto_cut.py"
+)
+
+SEMANTIC_EDIT_SCRIPT = (
+    ROOT / "app" / "semantic_edit.py"
+)
+
+APPLY_SMART_EDIT_SCRIPT = (
+    ROOT / "app" / "apply_smart_edit.py"
+)
+
+CAPTIONS_SCRIPT = (
+    ROOT / "app" / "make_captions.py"
+)
+
+EMOJI_SCRIPT = (
+    ROOT / "app" / "emoji_overlay.py"
+)
+
+SFX_SCRIPT = (
+    ROOT / "app" / "sfx_engine.py"
+)
+
+
+def run_command(
+    command: list[str],
+) -> None:
+
+    print()
+    print("Running:")
+    print(" ".join(command))
+    print()
+
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed with exit code "
+            f"{result.returncode}"
+        )
+
+
+def python_executable() -> str:
+
+    current = str(
+        sys.executable
+        or ""
+    ).strip()
+    if current:
+        current_path = Path(
+            current
+        )
+        if current_path.exists():
+            return current
+
+        broken_root = f"{ROOT}.venv"
+        if broken_root in current:
+            repaired = str(
+                ROOT / ".venv" / "Scripts" / "python.exe"
+            )
+            if Path(
+                repaired
+            ).exists():
+                return repaired
+
+    candidates = [
+        ROOT / ".venv" / "Scripts" / "python.exe",
+        ROOT / ".venv" / "bin" / "python",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(
+                candidate
+            )
+
+    return current or sys.executable
+
+
+def write_semantic_fallback_plan(
+    reason: str,
+) -> None:
+
+    SEMANTIC_PLAN_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    SEMANTIC_PLAN_PATH.write_text(
+        json.dumps(
+            {
+                "summary": "Semantic editing skipped for this render.",
+                "initial_proposal_count": 0,
+                "approved_cut_count": 0,
+                "removed_seconds": 0.0,
+                "approved_cuts": [],
+                "all_verification_results": [],
+                "warning": reason,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_json(
+    path: Path,
+) -> dict:
+
+    if not path.exists():
+
+        raise FileNotFoundError(
+            f"File not found: {path}"
+        )
+
+    with path.open(
+        "r",
+        encoding="utf-8",
+    ) as f:
+
+        return json.load(f)
+
+
+def component_target_for(
+    path: Path,
+) -> Path:
+
+    target = COMPONENTS_DIR / path.name
+
+    if not target.exists():
+        return target
+
+    stem = path.stem
+    suffix = path.suffix
+
+    for index in range(
+        2,
+        1000,
+    ):
+
+        candidate = COMPONENTS_DIR / f"{stem}_{index}{suffix}"
+
+        if not candidate.exists():
+            return candidate
+
+    return COMPONENTS_DIR / f"{stem}_old{suffix}"
+
+
+def organize_rendered_output() -> None:
+
+    if not CAPTION_OUTPUT_PATH.exists():
+        return
+
+    COMPONENTS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    moved: list[str] = []
+
+    for path in sorted(
+        OUTPUT_DIR.iterdir(),
+        key=lambda item: item.name.lower(),
+    ):
+
+        if path == COMPONENTS_DIR:
+            continue
+
+        if not path.is_file():
+            continue
+
+        if path.name == CAPTION_OUTPUT_PATH.name:
+            continue
+
+        target = component_target_for(
+            path
+        )
+
+        path.replace(
+            target
+        )
+
+        moved.append(
+            path.name
+        )
+
+    print()
+    print(
+        "=== STEP 11: Organizing rendered output ==="
+    )
+    print()
+    print(
+        f"Final video kept here: {CAPTION_OUTPUT_PATH}"
+    )
+
+    if moved:
+        print(
+            f"Moved {len(moved)} component/artifact file(s) to: {COMPONENTS_DIR}"
+        )
+    else:
+        print(
+            "No extra rendered artifacts needed to be moved."
+        )
+
+
+# ============================================================
+# CLIP SELECTION
+# ============================================================
+
+def parse_args():
+
+    parser = argparse.ArgumentParser(
+        description="ShortsFactory renderer"
+    )
+
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        help="Path to the source video.",
+    )
+
+    parser.add_argument(
+        "--start",
+        type=str,
+        default=None,
+        help="Start time in seconds or HH:MM:SS.mmm.",
+    )
+
+    parser.add_argument(
+        "--end",
+        type=str,
+        default=None,
+        help="End time in seconds or HH:MM:SS.mmm.",
+    )
+
+    args = parser.parse_args()
+
+    if bool(args.start) != bool(args.end):
+
+        parser.error(
+            "--start and --end must be supplied together."
+        )
+
+    return args
+
+
+def resolve_source_video(
+    value: str | None,
+) -> Path:
+
+    if not value:
+        return DEFAULT_SOURCE_VIDEO
+
+    path = Path(value)
+
+    if not path.is_absolute():
+        path = ROOT / path
+
+    return path.resolve()
+
+def get_clip_timestamps() -> tuple[str, str]:
+
+    print()
+    print(
+        "How do you want to select the clip?"
+    )
+
+    print()
+    print("[1] AI-selected clip")
+    print("[2] Manually enter timestamps")
+    print()
+
+    choice = input(
+        "Choice: "
+    ).strip()
+
+    if choice == "2":
+
+        print()
+
+        start = input(
+            "Enter START timestamp "
+            "(HH:MM:SS.mmm): "
+        ).strip()
+
+        end = input(
+            "Enter END timestamp "
+            "(HH:MM:SS.mmm): "
+        ).strip()
+
+        if not start or not end:
+
+            raise RuntimeError(
+                "Both start and end timestamps "
+                "are required."
+            )
+
+        print()
+        print(
+            f"Selected clip: "
+            f"{start} -> {end}"
+        )
+
+        return start, end
+
+    plan = load_json(
+        PLAN_PATH
+    )
+
+    source_clip = plan.get(
+        "source_clip",
+        {},
+    )
+
+    start = source_clip.get(
+        "start_timestamp"
+    )
+
+    end = source_clip.get(
+        "end_timestamp"
+    )
+
+    if not start or not end:
+
+        raise RuntimeError(
+            "short_plan.json does not contain "
+            "valid source clip timestamps."
+        )
+
+    print()
+    print(
+        "Using AI-selected clip from "
+        "short_plan.json."
+    )
+
+    return str(start), str(end)
+
+
+# ============================================================
+# STEP 1
+# ============================================================
+
+def render_base_video(
+    source_video: Path,
+    start: str,
+    end: str,
+) -> None:
+
+    print()
+    print(
+        "=== STEP 1: Rendering selected "
+        "vertical clip ==="
+    )
+    print()
+
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-ss",
+        start,
+
+        "-to",
+        end,
+
+        "-i",
+        str(source_video),
+
+        "-vf",
+        (
+            "scale=1080:1920:"
+            "force_original_aspect_ratio=increase,"
+            "crop=1080:1920"
+        ),
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "medium",
+
+        "-crf",
+        "20",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-movflags",
+        "+faststart",
+
+        str(BASE_OUTPUT_PATH),
+    ]
+
+    run_command(
+        command
+    )
+
+
+# ============================================================
+# TRANSCRIPTION
+# ============================================================
+
+def regenerate_subtitles(
+    video_path: Path,
+    step_name: str,
+) -> None:
+
+    print()
+    print(
+        f"=== {step_name} ==="
+    )
+    print()
+
+    if not SUBTITLES_SCRIPT.exists():
+
+        raise FileNotFoundError(
+            f"Subtitle script not found: "
+            f"{SUBTITLES_SCRIPT}"
+        )
+
+    if not video_path.exists():
+
+        raise FileNotFoundError(
+            f"Video for transcription "
+            f"not found: {video_path}"
+        )
+
+    if SUBTITLES_PATH.exists():
+
+        SUBTITLES_PATH.unlink()
+
+        print(
+            "Deleted previous subtitles.json"
+        )
+
+    command = [
+        python_executable(),
+        str(SUBTITLES_SCRIPT),
+        str(video_path),
+    ]
+
+    run_command(
+        command
+    )
+
+
+# ============================================================
+# SMART EDIT ANALYSIS
+# ============================================================
+
+def analyze_pauses() -> None:
+
+    print()
+    print(
+        "=== STEP 3: Detecting dead air "
+        "and long pauses ==="
+    )
+    print()
+
+    if not AUTO_CUT_SCRIPT.exists():
+
+        raise FileNotFoundError(
+            f"Auto-cut script not found: "
+            f"{AUTO_CUT_SCRIPT}"
+        )
+
+    run_command(
+        [
+            python_executable(),
+            str(AUTO_CUT_SCRIPT),
+        ]
+    )
+
+
+def analyze_semantic_cuts() -> None:
+
+    print()
+    print(
+        "=== STEP 4: AI semantic editing ==="
+    )
+    print()
+
+    if not SEMANTIC_EDIT_SCRIPT.exists():
+        warning = (
+            "Semantic editor not found: "
+            f"{SEMANTIC_EDIT_SCRIPT}"
+        )
+        print(
+            f"WARNING: {warning}"
+        )
+        print(
+            "Continuing without AI semantic cuts."
+        )
+        write_semantic_fallback_plan(
+            warning
+        )
+        return
+
+    try:
+        run_command(
+            [
+                python_executable(),
+                str(SEMANTIC_EDIT_SCRIPT),
+            ]
+        )
+    except Exception as exc:
+        warning = str(
+            exc
+        )
+        print(
+            f"WARNING: Semantic editing failed: {warning}"
+        )
+        print(
+            "Continuing with pause and manual edits only."
+        )
+        write_semantic_fallback_plan(
+            warning
+        )
+
+
+def apply_smart_edit() -> None:
+
+    print()
+    print(
+        "=== STEP 5: Applying approved "
+        "smart jump cuts ==="
+    )
+    print()
+
+    if not APPLY_SMART_EDIT_SCRIPT.exists():
+
+        raise FileNotFoundError(
+            f"Smart-edit renderer not found: "
+            f"{APPLY_SMART_EDIT_SCRIPT}"
+        )
+
+    run_command(
+        [
+            python_executable(),
+            str(APPLY_SMART_EDIT_SCRIPT),
+        ]
+    )
+
+    if not TIGHT_OUTPUT_PATH.exists():
+
+        raise FileNotFoundError(
+            "Smart editor did not produce "
+            "short1_tight.mp4."
+        )
+
+
+# ============================================================
+# CAPTIONS
+# ============================================================
+
+def regenerate_captions() -> None:
+
+    print()
+    print(
+        "=== STEP 7: Generating expressive "
+        "karaoke captions ==="
+    )
+    print()
+
+    if not CAPTIONS_SCRIPT.exists():
+
+        raise FileNotFoundError(
+            f"Caption generator not found: "
+            f"{CAPTIONS_SCRIPT}"
+        )
+
+    if CAPTIONS_PATH.exists():
+
+        CAPTIONS_PATH.unlink()
+
+        print(
+            "Deleted previous captions.ass"
+        )
+
+    run_command(
+        [
+            python_executable(),
+            str(CAPTIONS_SCRIPT),
+        ]
+    )
+
+
+def burn_captions() -> None:
+
+    print()
+    print(
+        "=== STEP 8: Burning captions "
+        "into SMART-EDITED video ==="
+    )
+    print()
+
+    if not CAPTIONS_PATH.exists():
+
+        raise FileNotFoundError(
+            f"Caption file not found: "
+            f"{CAPTIONS_PATH}"
+        )
+
+    if not TIGHT_OUTPUT_PATH.exists():
+
+        raise FileNotFoundError(
+            f"Tight video not found: "
+            f"{TIGHT_OUTPUT_PATH}"
+        )
+
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-i",
+        str(TIGHT_OUTPUT_PATH),
+
+        "-vf",
+        "ass=output/captions.ass",
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "medium",
+
+        "-crf",
+        "20",
+
+        "-c:a",
+        "copy",
+
+        "-movflags",
+        "+faststart",
+
+        str(CAPTION_OUTPUT_PATH),
+    ]
+
+    run_command(
+        command
+    )
+
+
+# ============================================================
+# EMOJIS
+# ============================================================
+
+def add_emoji_overlay() -> None:
+
+    print()
+    print(
+        "=== STEP 9: Adding full-color "
+        "emoji overlays ==="
+    )
+    print()
+
+    if not EMOJI_SCRIPT.exists():
+
+        raise FileNotFoundError(
+            f"Emoji overlay script not found: "
+            f"{EMOJI_SCRIPT}"
+        )
+
+    run_command(
+        [
+            python_executable(),
+            str(EMOJI_SCRIPT),
+        ]
+    )
+
+
+# ============================================================
+# SOUND FX
+# ============================================================
+
+def add_sound_effects() -> None:
+
+    print()
+    print(
+        "=== STEP 10: Adding automatic sound effects ==="
+    )
+    print()
+
+    if not SFX_SCRIPT.exists():
+
+        print(
+            f"WARNING: SFX engine script not found: {SFX_SCRIPT}"
+        )
+
+        return
+
+    result = subprocess.run(
+        [
+            python_executable(),
+            str(SFX_SCRIPT),
+        ],
+        cwd=ROOT,
+    )
+
+    if result.returncode != 0:
+
+        print(
+            (
+                "WARNING: SFX engine failed with exit code "
+                f"{result.returncode}; continuing without blocking render."
+            )
+        )
+
+
+# ============================================================
+# MAIN PIPELINE
+# ============================================================
+
+def main() -> int:
+    args = parse_args()
+
+    source_video = resolve_source_video(
+        args.source
+    )
+
+    render_settings = load_render_settings()
+    edit_energy = normalize_energy(
+        render_settings.get(
+            "edit_energy",
+            DEFAULT_ENERGY,
+        )
+    )
+    sfx_mode = normalize_sfx_mode(
+        render_settings.get(
+            "sfx_mode",
+            "AUTO",
+        )
+    )
+
+    print()
+    print(
+        "========================================"
+    )
+
+    print(
+        "       ShortsFactory Renderer"
+    )
+
+    print(
+        "========================================"
+    )
+
+    print()
+
+    print(
+        f"Project folder: {ROOT}"
+    )
+
+    print(
+        f"Edit energy: {edit_energy}"
+    )
+
+    print(
+        f"Sound FX: {sfx_mode}"
+    )
+
+    if not source_video.exists():
+
+        raise FileNotFoundError(
+            f"Source video not found: "
+            f"{source_video}"
+        )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # --------------------------------------------------------
+    # Select source section
+    # --------------------------------------------------------
+
+    if (
+        args.start is not None
+        and args.end is not None
+    ):
+
+        start = str(
+            args.start
+        )
+
+        end = str(
+            args.end
+        )
+
+        print()
+        print(
+            "Using timestamps supplied by "
+            "the app/command line."
+        )
+
+    else:
+
+        start, end = get_clip_timestamps()
+
+    print()
+    print(
+        f"Selected source: "
+        f"{start} -> {end}"
+    )
+
+    # --------------------------------------------------------
+    # STEP 1
+    # Render source section
+    # --------------------------------------------------------
+
+    render_base_video(
+        source_video,
+        start,
+        end,
+    )
+
+    # --------------------------------------------------------
+    # STEP 2
+    # Transcribe ORIGINAL selected section
+    # --------------------------------------------------------
+
+    regenerate_subtitles(
+        BASE_OUTPUT_PATH,
+        (
+            "STEP 2: Transcribing original "
+            "selected clip"
+        ),
+    )
+
+    # --------------------------------------------------------
+    # STEP 3
+    # Detect pauses
+    # --------------------------------------------------------
+
+    analyze_pauses()
+
+    # --------------------------------------------------------
+    # STEP 4
+    # Detect + verify redundant speech
+    # --------------------------------------------------------
+
+    analyze_semantic_cuts()
+
+    # --------------------------------------------------------
+    # STEP 5
+    # Merge + apply approved edits
+    # --------------------------------------------------------
+
+    apply_smart_edit()
+
+    # --------------------------------------------------------
+    # STEP 6
+    # CRITICAL:
+    # Re-transcribe AFTER the jump cuts.
+    #
+    # This guarantees caption timing now matches
+    # the edited video.
+    # --------------------------------------------------------
+
+    regenerate_subtitles(
+        TIGHT_OUTPUT_PATH,
+        (
+            "STEP 6: Re-transcribing "
+            "SMART-EDITED clip"
+        ),
+    )
+
+    # --------------------------------------------------------
+    # STEP 7
+    # Generate captions using NEW timestamps
+    # --------------------------------------------------------
+
+    regenerate_captions()
+
+    # --------------------------------------------------------
+    # STEP 8
+    # Burn captions into TIGHT video
+    # --------------------------------------------------------
+
+    burn_captions()
+
+    # --------------------------------------------------------
+    # STEP 9
+    # Full-color emoji graphics
+    # --------------------------------------------------------
+
+    add_emoji_overlay()
+
+    # --------------------------------------------------------
+    # STEP 10
+    # Automatic sound design
+    # --------------------------------------------------------
+
+    add_sound_effects()
+
+    # --------------------------------------------------------
+    # STEP 11
+    # Keep the rendered folder easy to scan.
+    # --------------------------------------------------------
+
+    organize_rendered_output()
+
+    # --------------------------------------------------------
+    # DONE
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "========================================"
+    )
+
+    print(
+        "       RENDERING COMPLETE"
+    )
+
+    print(
+        "========================================"
+    )
+
+    print()
+
+    print(
+        f"Source clip:       "
+        f"{start} -> {end}"
+    )
+
+    print(
+        f"Original render:   "
+        f"{BASE_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Smart edit:        "
+        f"{TIGHT_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Final transcript:  "
+        f"{SUBTITLES_PATH}"
+    )
+
+    print(
+        f"Caption file:      "
+        f"{CAPTIONS_PATH}"
+    )
+
+    print(
+        f"FINAL SHORT:       "
+        f"{CAPTION_OUTPUT_PATH}"
+    )
+
+    print()
+
+    return 0
+
+
+if __name__ == "__main__":
+
+    try:
+
+        sys.exit(
+            main()
+        )
+
+    except Exception as exc:
+
+        print()
+        print(
+            "========================================"
+        )
+
+        print(
+            "       RENDERING FAILED"
+        )
+
+        print(
+            "========================================"
+        )
+
+        print()
+
+        print(
+            f"Error: {exc}"
+        )
+
+        sys.exit(1)

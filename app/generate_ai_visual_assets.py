@@ -1,0 +1,1255 @@
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from image_backend_status import (
+    DEFAULT_API,
+    WebUIImageProvider,
+    status_with_optional_launch,
+)
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+DEFAULT_PLAN = (
+    ROOT
+    / "output"
+    / "ai_visual_plan.json"
+)
+
+DEFAULT_ASSET_DIR = (
+    ROOT
+    / "output"
+    / "ai_visual_assets"
+)
+
+EVENT_PREFIX = "SF_VISUAL_EVENT "
+
+QUALITY_PRESETS = {
+    "FAST": {
+        "width": 512,
+        "height": 896,
+        "steps": 14,
+        "cfg_scale": 5.8,
+        "sampler_name": "Euler a",
+    },
+    "BALANCED": {
+        "width": 576,
+        "height": 1024,
+        "steps": 24,
+        "cfg_scale": 6.5,
+        "sampler_name": "DPM++ 2M",
+    },
+    "HIGH": {
+        "width": 768,
+        "height": 1344,
+        "steps": 30,
+        "cfg_scale": 6.8,
+        "sampler_name": "DPM++ 2M",
+    },
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate image assets for ShortsFactory AI visual slots."
+        )
+    )
+    parser.add_argument(
+        "--plan",
+        default=str(
+            DEFAULT_PLAN
+        ),
+    )
+    parser.add_argument(
+        "--asset-dir",
+        default=str(
+            DEFAULT_ASSET_DIR
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        choices=[
+            "auto",
+            "a1111",
+            "preview",
+        ],
+        default="auto",
+    )
+    parser.add_argument(
+        "--api",
+        default=DEFAULT_API,
+    )
+    parser.add_argument(
+        "--quality",
+        choices=sorted(
+            QUALITY_PRESETS.keys()
+        ),
+        default="BALANCED",
+    )
+    parser.add_argument(
+        "--model",
+        default="",
+        help=(
+            "Expected active model title. The generator verifies it but "
+            "does not switch checkpoints during generation."
+        ),
+    )
+    parser.add_argument(
+        "--slot-id",
+        default="",
+        help="Regenerate only the visual slot with this stable slot id.",
+    )
+    parser.add_argument(
+        "--new-variant",
+        action="store_true",
+        help=(
+            "Create a new variant file for the selected slot instead of "
+            "reusing/replacing the current slot asset."
+        ),
+    )
+    parser.add_argument(
+        "--autolaunch",
+        action="store_true",
+        help="Start Stable Diffusion Forge if the image API is offline.",
+    )
+    return parser.parse_args()
+
+
+def load_json(
+    path: Path,
+) -> dict[str, Any]:
+    try:
+        data = json.loads(
+            path.read_text(
+                encoding="utf-8-sig"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ):
+        return {}
+
+    return data if isinstance(
+        data,
+        dict,
+    ) else {}
+
+
+def write_json(
+    path: Path,
+    data: dict[str, Any],
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    path.write_text(
+        json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def emit_event(
+    **payload: Any,
+) -> None:
+    print(
+        EVENT_PREFIX
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
+def slot_id_for(
+    slot: dict[str, Any],
+    index: int,
+) -> str:
+    value = str(
+        slot.get(
+            "slot_id",
+            "",
+        )
+        or ""
+    ).strip()
+    if value:
+        return value
+    return f"slot_{index:02d}"
+
+
+def enabled_slot(
+    slot: dict[str, Any],
+) -> bool:
+    return bool(
+        slot.get(
+            "enabled",
+            True,
+        )
+    )
+
+
+def asset_key(
+    item: dict[str, Any],
+) -> str:
+    slot_id = str(
+        item.get(
+            "slot_id",
+            "",
+        )
+        or ""
+    ).strip()
+    if slot_id:
+        return "id:" + slot_id
+
+    try:
+        slot_index = int(
+            item.get(
+                "slot_index",
+                0,
+            )
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        slot_index = 0
+
+    return f"index:{slot_index}"
+
+
+def generated_asset_exists(
+    asset: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(
+        asset,
+        dict,
+    ):
+        return False
+
+    if not asset.get(
+        "generated"
+    ):
+        return False
+
+    path = Path(
+        str(
+            asset.get(
+                "path",
+                "",
+            )
+        )
+    )
+    return path.exists()
+
+
+def existing_asset_map(
+    manifest: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    assets = manifest.get(
+        "assets",
+        [],
+    )
+    if not isinstance(
+        assets,
+        list,
+    ):
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for item in assets:
+        if isinstance(
+            item,
+            dict,
+        ):
+            result[
+                asset_key(
+                    item
+                )
+            ] = item
+    return result
+
+
+def generate_a1111(
+    api: str,
+    prompt: str,
+    output_path: Path,
+    preset: dict[str, Any],
+) -> None:
+    negative_prompt = (
+        "text, captions, subtitles, logos, watermark, UI, interface, "
+        "deformed anatomy, extra limbs, duplicated objects, low resolution"
+    )
+
+    response = requests.post(
+        api.rstrip("/")
+        + "/sdapi/v1/txt2img",
+        json={
+            "prompt": (
+                prompt
+                + ", vertical 9:16 composition, high visual clarity, "
+                "cinematic documentary illustration"
+            ),
+            "negative_prompt": negative_prompt,
+            "steps": int(
+                preset["steps"]
+            ),
+            "cfg_scale": float(
+                preset["cfg_scale"]
+            ),
+            "width": int(
+                preset["width"]
+            ),
+            "height": int(
+                preset["height"]
+            ),
+            "sampler_name": str(
+                preset["sampler_name"]
+            ),
+            "batch_size": 1,
+            "n_iter": 1,
+        },
+        timeout=360,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+    images = data.get(
+        "images",
+        [],
+    )
+    if not images:
+        raise RuntimeError(
+            "Image AI returned no image."
+        )
+
+    encoded = str(
+        images[0]
+    )
+    if "," in encoded:
+        encoded = encoded.split(
+            ",",
+            1,
+        )[1]
+
+    output_path.write_bytes(
+        base64.b64decode(
+            encoded
+        )
+    )
+
+
+def write_ppm_preview(
+    path: Path,
+    label: str,
+    visual_type: str,
+    preset: dict[str, Any],
+) -> None:
+    """
+    Dependency-free placeholder image. This is deliberately a timing preview,
+    not fake generated artwork. PPM is supported by FFmpeg and Qt.
+    """
+
+    width = int(
+        preset["width"]
+    )
+    height = int(
+        preset["height"]
+    )
+    pixels = bytearray()
+
+    for y in range(
+        height
+    ):
+        ratio = y / max(
+            1,
+            height - 1,
+        )
+        base = int(
+            20
+            + 24
+            * ratio
+        )
+
+        for x in range(
+            width
+        ):
+            edge = abs(
+                x
+                - width / 2
+            ) / (
+                width / 2
+            )
+            r = max(
+                0,
+                min(
+                    255,
+                    base
+                    + int(
+                        28
+                        * (
+                            1.0
+                            - edge
+                        )
+                    ),
+                ),
+            )
+            g = max(
+                0,
+                min(
+                    255,
+                    base
+                    + 16,
+                ),
+            )
+            b = max(
+                0,
+                min(
+                    255,
+                    base
+                    + 10,
+                ),
+            )
+            pixels.extend(
+                (
+                    r,
+                    g,
+                    b,
+                )
+            )
+
+    path.write_bytes(
+        f"P6\n{width} {height}\n255\n".encode(
+            "ascii"
+        )
+        + pixels
+    )
+
+    path.with_suffix(
+        ".txt"
+    ).write_text(
+        (
+            "SHORTSFACTORY AI VISUAL PREVIEW\n"
+            f"Label: {label}\n"
+            f"Type: {visual_type}\n"
+            "No local image model was available; this is a timing placeholder.\n"
+        ),
+        encoding="utf-8",
+    )
+
+
+def update_slot_from_asset(
+    slot: dict[str, Any],
+    asset: dict[str, Any],
+) -> None:
+    slot["state"] = str(
+        asset.get(
+            "state",
+            slot.get(
+                "state",
+                "PLANNED",
+            ),
+        )
+    )
+    slot["asset_path"] = str(
+        asset.get(
+            "path",
+            slot.get(
+                "asset_path",
+                "",
+            ),
+        )
+        or ""
+    )
+    slot["generated"] = bool(
+        asset.get(
+            "generated",
+            False,
+        )
+    )
+    slot["provider"] = str(
+        asset.get(
+            "provider",
+            "",
+        )
+        or ""
+    )
+    if asset.get(
+        "error"
+    ):
+        slot["error"] = str(
+            asset.get(
+                "error"
+            )
+        )
+    else:
+        slot.pop(
+            "error",
+            None,
+        )
+
+    variant_id = str(
+        asset.get(
+            "variant_id",
+            "",
+        )
+        or ""
+    )
+    if variant_id:
+        variants = slot.setdefault(
+            "variants",
+            [],
+        )
+        if not isinstance(
+            variants,
+            list,
+        ):
+            variants = []
+            slot["variants"] = variants
+
+        variant = {
+            "variant_id": variant_id,
+            "path": asset.get(
+                "path",
+                "",
+            ),
+            "state": asset.get(
+                "state",
+                "",
+            ),
+            "provider": asset.get(
+                "provider",
+                "",
+            ),
+            "generated": asset.get(
+                "generated",
+                False,
+            ),
+            "quality": asset.get(
+                "quality",
+                "",
+            ),
+            "saved": bool(
+                asset.get(
+                    "saved",
+                    False,
+                )
+            ),
+        }
+
+        replaced = False
+        for index, existing in enumerate(
+            variants
+        ):
+            if not isinstance(
+                existing,
+                dict,
+            ):
+                continue
+            if str(
+                existing.get(
+                    "variant_id",
+                    "",
+                )
+                or ""
+            ) == variant_id:
+                variants[index] = {
+                    **existing,
+                    **variant,
+                }
+                replaced = True
+                break
+
+        if not replaced:
+            variants.append(
+                variant
+            )
+
+        slot["active_variant_id"] = variant_id
+
+
+def build_asset(
+    *,
+    slot: dict[str, Any],
+    slot_index: int,
+    slot_id: str,
+    label: str,
+    visual_type: str,
+    prompt: str,
+    path: Path | None,
+    provider: str,
+    generated: bool,
+    state: str,
+    quality: str,
+    error: str = "",
+    variant_id: str = "",
+    saved: bool = False,
+) -> dict[str, Any]:
+    asset = {
+        "slot_index": slot_index,
+        "slot_id": slot_id,
+        "start": slot.get(
+            "start"
+        ),
+        "end": slot.get(
+            "end"
+        ),
+        "label": label,
+        "visual_type": visual_type,
+        "prompt": prompt,
+        "path": str(
+            path
+        )
+        if path is not None
+        else "",
+        "provider": provider,
+        "generated": generated,
+        "state": state,
+        "quality": quality,
+    }
+    if variant_id:
+        asset["variant_id"] = variant_id
+    if saved:
+        asset["saved"] = True
+    if error:
+        asset["error"] = error
+    return asset
+
+
+def existing_variants_for_slot(
+    slot: dict[str, Any],
+) -> list[dict[str, Any]]:
+
+    variants = slot.get(
+        "variants",
+        [],
+    )
+    if not isinstance(
+        variants,
+        list,
+    ):
+        return []
+    return [
+        variant
+        for variant in variants
+        if isinstance(
+            variant,
+            dict,
+        )
+    ]
+
+
+def next_variant_id(
+    slot: dict[str, Any],
+) -> str:
+
+    highest = 0
+    for variant in existing_variants_for_slot(
+        slot
+    ):
+        raw = str(
+            variant.get(
+                "variant_id",
+                "",
+            )
+            or ""
+        )
+        if raw.startswith(
+            "variant_"
+        ):
+            try:
+                highest = max(
+                    highest,
+                    int(
+                        raw.rsplit(
+                            "_",
+                            1,
+                        )[1]
+                    ),
+                )
+            except (
+                IndexError,
+                ValueError,
+            ):
+                pass
+
+    return f"variant_{highest + 1:03d}"
+
+
+def variant_output_path(
+    asset_dir: Path,
+    slot_index: int,
+    slot: dict[str, Any],
+    suffix: str,
+    *,
+    force_new: bool,
+) -> tuple[Path, str]:
+
+    variants = existing_variants_for_slot(
+        slot
+    )
+    active_variant_id = str(
+        slot.get(
+            "active_variant_id",
+            "",
+        )
+        or ""
+    )
+
+    if not force_new:
+        for variant in variants:
+            if active_variant_id and str(
+                variant.get(
+                    "variant_id",
+                    "",
+                )
+                or ""
+            ) != active_variant_id:
+                continue
+            raw_path = str(
+                variant.get(
+                    "path",
+                    "",
+                )
+                or ""
+            )
+            if raw_path:
+                return Path(
+                    raw_path
+                ), str(
+                    variant.get(
+                        "variant_id",
+                        active_variant_id
+                        or "variant_001",
+                    )
+                    or "variant_001"
+                )
+
+    variant_id = next_variant_id(
+        slot
+    )
+    return (
+        asset_dir
+        / f"visual_{slot_index:02d}_{variant_id}{suffix}",
+        variant_id,
+    )
+
+
+def main() -> int:
+    args = parse_args()
+
+    plan_path = Path(
+        args.plan
+    ).resolve()
+    asset_dir = Path(
+        args.asset_dir
+    ).resolve()
+    quality = str(
+        args.quality
+    ).upper()
+    preset = QUALITY_PRESETS[
+        quality
+    ]
+
+    print(
+        "ShortsFactory AI visual asset generator starting...",
+        flush=True,
+    )
+
+    if not plan_path.exists():
+        print(
+            f"ERROR: Visual plan not found: {plan_path}",
+            flush=True,
+        )
+        return 1
+
+    plan = load_json(
+        plan_path
+    )
+    slots = plan.get(
+        "slots",
+        [],
+    )
+    if not isinstance(
+        slots,
+        list,
+    ):
+        slots = []
+
+    asset_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    manifest_path = (
+        asset_dir
+        / "manifest.json"
+    )
+    existing_manifest = load_json(
+        manifest_path
+    )
+    assets_by_key = existing_asset_map(
+        existing_manifest
+    )
+
+    provider = args.provider
+    backend = WebUIImageProvider(
+        args.api
+    )
+    backend_status = status_with_optional_launch(
+        backend,
+        autolaunch=bool(
+            args.autolaunch
+            and provider
+            in {
+                "auto",
+                "a1111",
+            }
+        ),
+        wait_seconds=180.0,
+    )
+
+    if provider == "auto":
+        provider = (
+            "a1111"
+            if backend_status.get(
+                "state"
+            )
+            == "ready"
+            else "preview"
+        )
+
+    if provider == "a1111":
+        if backend_status.get(
+            "state"
+        ) != "ready":
+            print(
+                (
+                    "Image AI is not ready. Existing assets will be preserved "
+                    "and missing slots will be marked failed."
+                ),
+                flush=True,
+            )
+            provider = "failed"
+        elif args.model:
+            current_title = str(
+                backend_status.get(
+                    "current_model_title",
+                    "",
+                )
+                or ""
+            )
+            if current_title and current_title != args.model:
+                print(
+                    (
+                        "WARNING: The active image model no longer matches "
+                        "the editor selection. Generation will use the "
+                        "currently loaded model; the generator will not switch "
+                        "models during a render."
+                    ),
+                    flush=True,
+                )
+
+    if provider == "a1111":
+        print(
+            (
+                "Image AI ready. Generating visuals with "
+                f"{quality.lower()} quality."
+            ),
+            flush=True,
+        )
+    elif provider == "preview":
+        print(
+            (
+                "Image AI is offline or has no model. Creating clearly "
+                "labeled preview-only timing assets for missing slots."
+            ),
+            flush=True,
+        )
+
+    enabled_count = 0
+    ready_count = 0
+    preview_count = 0
+    failed_count = 0
+
+    for slot_index, slot in enumerate(
+        slots,
+        start=1,
+    ):
+        if not isinstance(
+            slot,
+            dict,
+        ):
+            continue
+
+        slot_id = slot_id_for(
+            slot,
+            slot_index,
+        )
+        slot["slot_id"] = slot_id
+
+        if args.slot_id and slot_id != args.slot_id:
+            continue
+
+        if not enabled_slot(
+            slot
+        ):
+            continue
+
+        enabled_count += 1
+        key = "id:" + slot_id
+        existing_asset = assets_by_key.get(
+            key
+        )
+        if existing_asset is None:
+            existing_asset = assets_by_key.get(
+                f"index:{slot_index}"
+            )
+
+        label = str(
+            slot.get(
+                "label",
+                f"Visual {slot_index}",
+            )
+            or f"Visual {slot_index}"
+        ).strip()
+        visual_type = str(
+            slot.get(
+                "visual_type",
+                "ai_recreation",
+            )
+            or "ai_recreation"
+        ).strip()
+        prompt = str(
+            slot.get(
+                "prompt",
+                "",
+            )
+            or ""
+        ).strip()
+
+        emit_event(
+            slot_index=slot_index,
+            slot_id=slot_id,
+            state="GENERATING",
+            label=label,
+        )
+
+        force_new_variant = bool(
+            args.new_variant
+            or slot.pop(
+                "force_new_variant",
+                False,
+            )
+        )
+
+        if provider == "preview":
+            if generated_asset_exists(
+                existing_asset
+            ) and not force_new_variant:
+                asset = build_asset(
+                    slot=slot,
+                    slot_index=slot_index,
+                    slot_id=slot_id,
+                    label=label,
+                    visual_type=visual_type,
+                    prompt=prompt,
+                    path=Path(
+                        str(
+                            existing_asset.get(
+                                "path",
+                                "",
+                            )
+                        )
+                    ),
+                    provider=str(
+                        existing_asset.get(
+                            "provider",
+                            "a1111",
+                        )
+                    ),
+                    generated=True,
+                    state="READY",
+                    quality=str(
+                        existing_asset.get(
+                            "quality",
+                            quality,
+                        )
+                    ),
+                    variant_id=str(
+                        existing_asset.get(
+                            "variant_id",
+                            slot.get(
+                                "active_variant_id",
+                                "variant_001",
+                            ),
+                        )
+                        or "variant_001"
+                    ),
+                    saved=bool(
+                        existing_asset.get(
+                            "saved",
+                            False,
+                        )
+                    ),
+                )
+                ready_count += 1
+                print(
+                    f"Preserved existing visual {slot_index}: {label}",
+                    flush=True,
+                )
+            else:
+                output_path, variant_id = variant_output_path(
+                    asset_dir,
+                    slot_index,
+                    slot,
+                    ".ppm",
+                    force_new=True,
+                )
+                write_ppm_preview(
+                    output_path,
+                    label,
+                    visual_type,
+                    preset,
+                )
+                asset = build_asset(
+                    slot=slot,
+                    slot_index=slot_index,
+                    slot_id=slot_id,
+                    label=label,
+                    visual_type=visual_type,
+                    prompt=prompt,
+                    path=output_path,
+                    provider="preview",
+                    generated=False,
+                    state="PREVIEW_ONLY",
+                    quality=quality,
+                    variant_id=variant_id,
+                )
+                preview_count += 1
+                print(
+                    f"Preview-only visual {slot_index}: {label}",
+                    flush=True,
+                )
+
+        elif provider == "a1111":
+            output_path, variant_id = variant_output_path(
+                asset_dir,
+                slot_index,
+                slot,
+                ".png",
+                force_new=force_new_variant,
+            )
+            print(
+                f"Generating visual {slot_index}: {label}",
+                flush=True,
+            )
+            try:
+                generate_a1111(
+                    args.api,
+                    prompt,
+                    output_path,
+                    preset,
+                )
+                asset = build_asset(
+                    slot=slot,
+                    slot_index=slot_index,
+                    slot_id=slot_id,
+                    label=label,
+                    visual_type=visual_type,
+                    prompt=prompt,
+                    path=output_path,
+                    provider="a1111",
+                    generated=True,
+                    state="READY",
+                    quality=quality,
+                    variant_id=variant_id,
+                )
+                ready_count += 1
+            except Exception as exc:
+                message = str(
+                    exc
+                )
+                if (
+                    "CUDA"
+                    in message.upper()
+                    or "MEMORY"
+                    in message.upper()
+                    or "OUTOFMEMORY"
+                    in message.replace(
+                        " ",
+                        "",
+                    ).upper()
+                ):
+                    message = (
+                        message
+                        + " Try BALANCED or FAST quality."
+                    )
+                asset = build_asset(
+                    slot=slot,
+                    slot_index=slot_index,
+                    slot_id=slot_id,
+                    label=label,
+                    visual_type=visual_type,
+                    prompt=prompt,
+                    path=None,
+                    provider="a1111",
+                    generated=False,
+                    state="FAILED",
+                    quality=quality,
+                    error=message,
+                    variant_id=variant_id,
+                )
+                failed_count += 1
+                print(
+                    (
+                        f"WARNING: Visual {slot_index} failed: "
+                        f"{message}"
+                    ),
+                    flush=True,
+                )
+
+        else:
+            asset = build_asset(
+                slot=slot,
+                slot_index=slot_index,
+                slot_id=slot_id,
+                label=label,
+                visual_type=visual_type,
+                prompt=prompt,
+                path=None,
+                provider="a1111",
+                generated=False,
+                state="FAILED",
+                quality=quality,
+                error="Image AI is not ready.",
+                variant_id=str(
+                    slot.get(
+                        "active_variant_id",
+                        "variant_001",
+                    )
+                    or "variant_001"
+                ),
+            )
+            failed_count += 1
+
+        assets_by_key[
+            key
+        ] = asset
+        update_slot_from_asset(
+            slot,
+            asset,
+        )
+        write_json(
+            plan_path,
+            plan,
+        )
+        emit_event(
+            slot_index=slot_index,
+            slot_id=slot_id,
+            state=asset["state"],
+            label=label,
+            path=asset.get(
+                "path",
+                "",
+            ),
+            generated=asset.get(
+                "generated",
+                False,
+            ),
+            provider=asset.get(
+                "provider",
+                "",
+            ),
+            variant_id=asset.get(
+                "variant_id",
+                "",
+            ),
+            error=asset.get(
+                "error",
+                "",
+            ),
+        )
+
+    manifest_assets: list[dict[str, Any]] = []
+    for slot_index, slot in enumerate(
+        slots,
+        start=1,
+    ):
+        if not isinstance(
+            slot,
+            dict,
+        ):
+            continue
+        slot_id = slot_id_for(
+            slot,
+            slot_index,
+        )
+        key = "id:" + slot_id
+        asset = assets_by_key.get(
+            key
+        )
+        if asset is not None:
+            manifest_assets.append(
+                asset
+            )
+
+    manifest = {
+        "source_plan": str(
+            plan_path
+        ),
+        "asset_count": len(
+            manifest_assets
+        ),
+        "provider": provider,
+        "quality": quality,
+        "assets": manifest_assets,
+    }
+    write_json(
+        manifest_path,
+        manifest,
+    )
+
+    print(
+        (
+            "Visual assets complete: "
+            f"{ready_count} ready, "
+            f"{preview_count} preview-only, "
+            f"{failed_count} failed."
+        ),
+        flush=True,
+    )
+    print(
+        f"Asset manifest: {manifest_path}",
+        flush=True,
+    )
+
+    if enabled_count == 0:
+        print(
+            "No enabled visual slots to generate.",
+            flush=True,
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(
+        main()
+    )

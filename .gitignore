@@ -1,0 +1,33 @@
+# Python virtual environments
+.venv/
+venv/
+
+input/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+
+# Source/input media
+input/
+
+# Generated ShortsFactory output
+output/
+
+# Recovery/decompiler files
+.tmp_pycdc_rapid/
+.tmp_pycdc_rapid.zip
+recovered_gui.py
+recovered_gui_BACKUP.py
+app/gui_CORRUPTED_RECOVERY.py
