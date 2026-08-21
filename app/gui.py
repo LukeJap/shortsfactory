@@ -40,12 +40,14 @@ try:
     from .visual_emphasis import (
         DEFAULT_ENERGY,
         normalize_energy,
+        normalize_sfx_mode,
         write_render_settings,
     )
 except ImportError:
     from visual_emphasis import (
         DEFAULT_ENERGY,
         normalize_energy,
+        normalize_sfx_mode,
         write_render_settings,
     )
 
@@ -3569,6 +3571,13 @@ class ShortsFactoryWindow(QMainWindow):
             )
             or DEFAULT_ENERGY
         )
+        self.sfx_mode = normalize_sfx_mode(
+            self.settings.value(
+                "render/sfx_mode",
+                "AUTO",
+            )
+            or "AUTO"
+        )
 
         self.music_process = QProcess(self)
 
@@ -3590,6 +3599,28 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.music_process.finished.connect(
             self.music_finished
+        )
+
+        self.sfx_process = QProcess(self)
+
+        self.sfx_process.setWorkingDirectory(
+            str(ROOT)
+        )
+
+        self.sfx_process.setProcessEnvironment(
+            process_env
+        )
+
+        self.sfx_process.readyReadStandardOutput.connect(
+            self.read_sfx_output
+        )
+
+        self.sfx_process.readyReadStandardError.connect(
+            self.read_sfx_error
+        )
+
+        self.sfx_process.finished.connect(
+            self.sfx_finished
         )
 
         self.render_progress_timer = QTimer(
@@ -4029,11 +4060,17 @@ class ShortsFactoryWindow(QMainWindow):
 
         audio_frame = QFrame()
         audio_frame.setObjectName("Panel")
-        audio_layout = QHBoxLayout(audio_frame)
+        audio_layout = QVBoxLayout(audio_frame)
         audio_layout.setContentsMargins(16, 14, 16, 14)
-        audio_layout.setSpacing(10)
+        audio_layout.setSpacing(8)
 
-        audio_title = QLabel("AUDIO BED")
+        audio_top_row = QHBoxLayout()
+        audio_top_row.setSpacing(10)
+
+        audio_bottom_row = QHBoxLayout()
+        audio_bottom_row.setSpacing(10)
+
+        audio_title = QLabel("AUDIO")
         audio_title.setObjectName("SectionTitle")
 
         edit_energy_label = QLabel("Edit Energy")
@@ -4057,6 +4094,42 @@ class ShortsFactoryWindow(QMainWindow):
         self.edit_energy_combo.currentTextChanged.connect(
             self.edit_energy_changed
         )
+
+        sfx_mode_label = QLabel("Sound FX")
+        sfx_mode_label.setObjectName("MicroLabel")
+
+        self.sfx_mode_combo = QComboBox()
+        self.sfx_mode_combo.setObjectName("CompactCombo")
+        self.sfx_mode_combo.addItems(
+            [
+                "AUTO",
+                "OFF",
+            ]
+        )
+        self.sfx_mode_combo.setCurrentText(
+            self.sfx_mode
+        )
+        self.sfx_mode_combo.setToolTip(
+            "AUTO plans safe local or generated sound effects. OFF leaves SFX out of the render."
+        )
+        self.sfx_mode_combo.currentTextChanged.connect(
+            self.sfx_mode_changed
+        )
+
+        self.generate_sfx_button = QPushButton("Generate SFX")
+        self.generate_sfx_button.setObjectName("QuietButton")
+        self.generate_sfx_button.setToolTip(
+            "Plan editable sound-effect clips for the current selection."
+        )
+        self.generate_sfx_button.setEnabled(False)
+        self.generate_sfx_button.clicked.connect(self.generate_sfx)
+
+        self.open_sfx_folder_button = QPushButton("SFX Folder")
+        self.open_sfx_folder_button.setObjectName("QuietButton")
+        self.open_sfx_folder_button.setToolTip(
+            "Open assets/sfx. Add audio files with descriptive names like whoosh, impact, pop, money, or glitch."
+        )
+        self.open_sfx_folder_button.clicked.connect(self.open_sfx_folder)
 
         self.music_button = QPushButton("♫ Add Music")
         self.music_button.setObjectName("MusicButton")
@@ -4086,19 +4159,28 @@ class ShortsFactoryWindow(QMainWindow):
         self.narrator_button.setEnabled(False)
         self.narrator_button.setToolTip("Planned: generate and mix AI narration/commentary over selected source clips.")
 
-        audio_layout.addWidget(audio_title)
-        audio_layout.addSpacing(6)
-        audio_layout.addWidget(edit_energy_label)
-        audio_layout.addWidget(self.edit_energy_combo)
-        audio_layout.addSpacing(12)
-        audio_layout.addWidget(self.music_button)
-        audio_layout.addWidget(self.music_label, 1)
-        audio_layout.addWidget(QLabel("Music"))
-        audio_layout.addWidget(self.music_volume_slider)
-        audio_layout.addWidget(self.music_volume_label)
-        audio_layout.addWidget(self.clear_music_button)
-        audio_layout.addSpacing(10)
-        audio_layout.addWidget(self.narrator_button)
+        audio_top_row.addWidget(audio_title)
+        audio_top_row.addSpacing(6)
+        audio_top_row.addWidget(edit_energy_label)
+        audio_top_row.addWidget(self.edit_energy_combo)
+        audio_top_row.addSpacing(12)
+        audio_top_row.addWidget(sfx_mode_label)
+        audio_top_row.addWidget(self.sfx_mode_combo)
+        audio_top_row.addWidget(self.generate_sfx_button)
+        audio_top_row.addWidget(self.open_sfx_folder_button)
+        audio_top_row.addStretch()
+
+        audio_bottom_row.addWidget(self.music_button)
+        audio_bottom_row.addWidget(self.music_label, 1)
+        audio_bottom_row.addWidget(QLabel("Music"))
+        audio_bottom_row.addWidget(self.music_volume_slider)
+        audio_bottom_row.addWidget(self.music_volume_label)
+        audio_bottom_row.addWidget(self.clear_music_button)
+        audio_bottom_row.addSpacing(10)
+        audio_bottom_row.addWidget(self.narrator_button)
+
+        audio_layout.addLayout(audio_top_row)
+        audio_layout.addLayout(audio_bottom_row)
 
         center_editor_layout.addWidget(audio_frame, 0)
 
@@ -4846,6 +4928,7 @@ class ShortsFactoryWindow(QMainWindow):
         self.suggestions_label.setText(
             "AI clips appear as purple ranges on V1. Drag IN / OUT handles to fine-tune the selected clip."
         )
+        self.update_sfx_button_state()
         self.set_selection_loop_enabled(
             False
         )
@@ -5562,6 +5645,8 @@ class ShortsFactoryWindow(QMainWindow):
             "transcript_list",
         ):
             self.update_transcript_panel()
+
+        self.update_sfx_button_state()
 
     def load_source_transcript(self):
 
@@ -6334,10 +6419,38 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
 
+    def sfx_mode_changed(
+        self,
+        value: str,
+    ):
+
+        mode = normalize_sfx_mode(
+            value
+        )
+        self.sfx_mode = mode
+        self.settings.setValue(
+            "render/sfx_mode",
+            mode,
+        )
+        self.save_render_settings()
+
+
+    def current_sfx_mode(self) -> str:
+
+        return normalize_sfx_mode(
+            getattr(
+                self,
+                "sfx_mode",
+                "AUTO",
+            )
+        )
+
+
     def save_render_settings(self):
 
         payload = {
             "edit_energy": self.current_edit_energy(),
+            "sfx_mode": self.current_sfx_mode(),
             "source_video": (
                 str(
                     self.video_path
@@ -10270,6 +10383,200 @@ class ShortsFactoryWindow(QMainWindow):
         else:
             self.render_log.append(
                 "Could not auto-open final video."
+            )
+
+
+    def update_sfx_button_state(self):
+
+        if not hasattr(
+            self,
+            "generate_sfx_button",
+        ):
+            return
+
+        running = (
+            self.sfx_process.state()
+            != QProcess.ProcessState.NotRunning
+        )
+        self.generate_sfx_button.setEnabled(
+            bool(
+                self.video_path
+                and self.end_ms > self.start_ms
+                and not running
+            )
+        )
+
+
+    def append_sfx_log(
+        self,
+        data: str,
+    ):
+
+        if not data:
+            return
+
+        self.render_log.moveCursor(
+            self.render_log.textCursor().MoveOperation.End
+        )
+        self.render_log.insertPlainText(
+            data
+        )
+        scrollbar = self.render_log.verticalScrollBar()
+        scrollbar.setValue(
+            scrollbar.maximum()
+        )
+
+
+    def read_sfx_output(self):
+
+        data = (
+            self.sfx_process
+            .readAllStandardOutput()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        self.append_sfx_log(
+            data
+        )
+
+
+    def read_sfx_error(self):
+
+        data = (
+            self.sfx_process
+            .readAllStandardError()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        self.append_sfx_log(
+            data
+        )
+
+
+    def generate_sfx(self):
+
+        if not self.video_path or self.end_ms <= self.start_ms:
+            return
+
+        if (
+            self.sfx_process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            return
+
+        sfx_script = ROOT / "app" / "sfx_engine.py"
+        if not sfx_script.exists():
+            self.render_log.append(
+                "SFX engine is not installed."
+            )
+            return
+
+        self.save_render_settings()
+        self.generate_sfx_button.setEnabled(False)
+        self.generate_sfx_button.setText("Generating...")
+
+        self.render_log.append("")
+        self.render_log.append("=== EDITOR SFX GENERATION ===")
+        self.render_log.append(
+            f"Sound FX: {self.current_sfx_mode()}"
+        )
+        self.render_log.append(
+            "Selection: "
+            f"{self.start_ms / 1000:.3f}s -> "
+            f"{self.end_ms / 1000:.3f}s"
+        )
+
+        self.sfx_process.start(
+            sys.executable,
+            [
+                str(sfx_script),
+                "--editor-plan",
+                "--selection-start",
+                f"{self.start_ms / 1000:.3f}",
+                "--selection-end",
+                f"{self.end_ms / 1000:.3f}",
+            ],
+        )
+
+
+    def sfx_finished(
+        self,
+        exit_code: int,
+        exit_status,
+    ):
+
+        del exit_status
+
+        self.generate_sfx_button.setText("Generate SFX")
+        self.update_sfx_button_state()
+
+        if exit_code != 0:
+            self.render_log.append(
+                f"SFX generation failed with exit code {exit_code}."
+            )
+            return
+
+        sfx_plan_path = ROOT / "output" / "sfx_plan.json"
+        event_count = 0
+        try:
+            payload = json.loads(
+                sfx_plan_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+            event_count = int(
+                payload.get(
+                    "event_count",
+                    0,
+                )
+                or 0
+            )
+        except (
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            event_count = 0
+
+        self.render_log.append(
+            f"SFX plan ready: {event_count} clip(s)."
+        )
+        self.suggestions_label.setText(
+            f"SFX plan ready: {event_count} clip(s). The SFX timeline lane will be restored in the next recovery batch."
+        )
+
+
+    def open_sfx_folder(self):
+
+        sfx_dir = ROOT / "assets" / "sfx"
+        try:
+            sfx_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "SFX Folder",
+                f"Could not create SFX folder:\n{exc}",
+            )
+            return
+
+        if not QDesktopServices.openUrl(
+            QUrl.fromLocalFile(
+                str(sfx_dir)
+            )
+        ):
+            QMessageBox.warning(
+                self,
+                "SFX Folder",
+                "Could not open the SFX folder.",
             )
 
 
