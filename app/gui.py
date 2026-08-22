@@ -319,7 +319,7 @@ class SuggestionSlider(QSlider):
         )
 
         self.setMinimumHeight(
-            218
+            250
         )
 
         self.setSizePolicy(
@@ -400,43 +400,119 @@ class SuggestionSlider(QSlider):
         self,
     ) -> dict[str, int]:
 
+        # Always lay lanes out inside the height Qt actually gave the
+        # timeline. QSplitter/QScrollArea can temporarily make this widget
+        # shorter than its requested minimum height; using a synthetic
+        # minimum here painted the SFX lane below the widget and clipped it.
         height = max(
-            218,
+            1,
             self.height(),
         )
-        ruler_top = 14
-        ruler_bottom = 42
-        video_top = 50
-        video_height = max(
-            36,
-            min(
-                48,
+
+        if height < 218:
+            # Compact layout: preserve all four editor lanes rather than
+            # sacrificing SFX when the center workspace is vertically tight.
+            ruler_top = 8
+            ruler_bottom = 30
+            video_top = 36
+            lane_gap = 5
+            bottom_margin = 6
+            available_lane_height = max(
+                4,
+                height
+                - video_top
+                - lane_gap * 3
+                - bottom_margin,
+            )
+            video_height = max(
+                1,
                 int(
-                    height
-                    * 0.22
+                    available_lane_height
+                    * 0.30
                 ),
-            ),
-        )
-        edit_top = video_top + video_height + 7
-        edit_height = 26
-        visual_top = edit_top + edit_height + 7
-        visual_height = max(
-            30,
-            min(
-                38,
+            )
+            edit_height = max(
+                1,
                 int(
-                    height
-                    * 0.16
+                    available_lane_height
+                    * 0.18
                 ),
-            ),
-        )
-        sfx_top = visual_top + visual_height + 7
-        sfx_height = max(
-            30,
-            height
-            - sfx_top
-            - 14,
-        )
+            )
+            visual_height = max(
+                1,
+                int(
+                    available_lane_height
+                    * 0.27
+                ),
+            )
+            sfx_height = max(
+                1,
+                available_lane_height
+                - video_height
+                - edit_height
+                - visual_height,
+            )
+        else:
+            ruler_top = 14
+            ruler_bottom = 42
+            video_top = 50
+            lane_gap = 7
+            bottom_margin = 10
+            video_height = max(
+                36,
+                min(
+                    48,
+                    int(
+                        height
+                        * 0.22
+                    ),
+                ),
+            )
+            edit_height = 26
+
+            # Give VISUALS its preferred height only when doing so still
+            # leaves a visible SFX lane inside the real widget bounds.
+            visual_top_preview = (
+                video_top
+                + video_height
+                + lane_gap
+                + edit_height
+                + lane_gap
+            )
+            preferred_visual_height = max(
+                36,
+                min(
+                    58,
+                    int(
+                        height
+                        * 0.20
+                    ),
+                ),
+            )
+            max_visual_height = max(
+                1,
+                height
+                - visual_top_preview
+                - lane_gap
+                - 24
+                - bottom_margin,
+            )
+            visual_height = min(
+                preferred_visual_height,
+                max_visual_height,
+            )
+
+        edit_top = video_top + video_height + lane_gap
+        visual_top = edit_top + edit_height + lane_gap
+        sfx_top = visual_top + visual_height + lane_gap
+
+        if height >= 218:
+            sfx_height = max(
+                1,
+                height
+                - sfx_top
+                - bottom_margin,
+            )
 
         return {
             "ruler_top": ruler_top,
@@ -1269,6 +1345,142 @@ class SuggestionSlider(QSlider):
             end_ms,
         )
 
+    def visual_clip_stack_row(
+        self,
+        clip: dict,
+    ) -> tuple[int, int]:
+
+        clip_id = str(
+            clip.get(
+                "id",
+                "",
+            )
+            or ""
+        )
+        visuals = [
+            candidate
+            for candidate in self.asset_clips
+            if isinstance(
+                candidate,
+                dict,
+            )
+            and str(
+                candidate.get(
+                    "kind",
+                    "",
+                )
+                or ""
+            ).upper() == "AI_VISUAL"
+            and not bool(
+                candidate.get(
+                    "deleted",
+                    False,
+                )
+            )
+        ]
+
+        if len(visuals) <= 1:
+            return 0, 1
+
+        visuals.sort(
+            key=lambda candidate: (
+                self.clip_time_bounds_ms(
+                    candidate
+                )[0],
+                self.clip_time_bounds_ms(
+                    candidate
+                )[1],
+                str(
+                    candidate.get(
+                        "id",
+                        "",
+                    )
+                    or ""
+                ),
+            )
+        )
+
+        target_start, target_end = self.clip_time_bounds_ms(
+            clip
+        )
+        overlapping = [
+            candidate
+            for candidate in visuals
+            if (
+                self.clip_time_bounds_ms(
+                    candidate
+                )[0]
+                < target_end
+                and self.clip_time_bounds_ms(
+                    candidate
+                )[1]
+                > target_start
+            )
+        ]
+
+        if len(overlapping) <= 1:
+            return 0, 1
+
+        rows_end = [
+            -1,
+            -1,
+            -1,
+        ]
+        row_by_id: dict[str, int] = {}
+
+        for candidate in visuals:
+            start_ms, end_ms = self.clip_time_bounds_ms(
+                candidate
+            )
+            candidate_id = str(
+                candidate.get(
+                    "id",
+                    "",
+                )
+                or ""
+            )
+
+            row = None
+            for row_index, row_end in enumerate(
+                rows_end
+            ):
+                if start_ms >= row_end:
+                    row = row_index
+                    break
+
+            if row is None:
+                row = min(
+                    range(
+                        len(
+                            rows_end
+                        )
+                    ),
+                    key=lambda index: rows_end[index],
+                )
+
+            rows_end[row] = max(
+                rows_end[row],
+                end_ms,
+            )
+            row_by_id[candidate_id] = row
+
+        return (
+            row_by_id.get(
+                clip_id,
+                0,
+            ),
+            min(
+                3,
+                max(
+                    2,
+                    len(
+                        overlapping
+                    ),
+                ),
+            ),
+        )
+
+
     def asset_clip_lane(
         self,
         clip: dict,
@@ -1293,15 +1505,54 @@ class SuggestionSlider(QSlider):
             )
 
         if kind == "AI_VISUAL":
-            return (
-                lanes["visual_top"] + 4,
-                max(
-                    18,
-                    lanes["visual_height"] - 8,
+            row, row_count = self.visual_clip_stack_row(
+                clip
+            )
+            if row_count <= 1:
+                return (
+                    lanes["visual_top"] + 4,
+                    max(
+                        18,
+                        lanes["visual_height"] - 8,
+                    ),
+                )
+
+            usable_height = max(
+                18,
+                lanes["visual_height"] - 8,
+            )
+            gap = 2
+            row_height = max(
+                14,
+                int(
+                    (
+                        usable_height
+                        - gap
+                        * (
+                            row_count
+                            - 1
+                        )
+                    )
+                    / row_count
                 ),
+            )
+            row = min(
+                row,
+                row_count - 1,
+            )
+            return (
+                lanes["visual_top"]
+                + 4
+                + row
+                * (
+                    row_height
+                    + gap
+                ),
+                row_height,
             )
 
         return None
+
 
     def asset_clip_geometry(
         self,
@@ -4154,6 +4405,30 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.analysis_stage: str | None = None
 
+        # Background source-transcript preparation. This uses the same
+        # subtitles.py cache path/quality rules as Find Best Clips, but runs
+        # as soon as a source is loaded so later analysis can reuse it.
+        self.transcript_preload_process = QProcess(self)
+        self.transcript_preload_process.setWorkingDirectory(
+            str(ROOT)
+        )
+        self.transcript_preload_process.setProcessEnvironment(
+            process_env
+        )
+        self.transcript_preload_process.readyReadStandardOutput.connect(
+            self.read_transcript_preload_output
+        )
+        self.transcript_preload_process.readyReadStandardError.connect(
+            self.read_transcript_preload_error
+        )
+        self.transcript_preload_process.finished.connect(
+            self.transcript_preload_finished
+        )
+        self.transcript_preload_source = ""
+        self.transcript_preload_quality = ""
+        self.transcript_preload_output = ""
+        self.pending_find_best_after_preload = False
+
         self.visual_process = QProcess(self)
 
         self.visual_process.setWorkingDirectory(
@@ -4177,6 +4452,11 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.visual_plan_slots: list[dict] = []
+        self.visual_deleted_slots: list[dict] = []
+        self.pending_visual_replan_mode = "replace"
+        self.pending_visual_preserved_slots: list[dict] = []
+        self.pending_visual_preserved_deleted_slots: list[dict] = []
+        self.pending_visual_selected_slot_id: str | None = None
         self.editor_asset_plan: dict = load_editor_asset_plan()
         self.selected_sfx_clip_id: str | None = None
         self.sfx_preview_triggered: set[str] = set()
@@ -4184,6 +4464,11 @@ class ShortsFactoryWindow(QMainWindow):
         self.active_visual_preview_signature: tuple | None = None
         self.active_visual_preview_layout_signature: tuple | None = None
         self.active_visual_preview_pixmap = QPixmap()
+        self.visual_preview_dragging = False
+        self.visual_preview_drag_origin = QPoint()
+        self.visual_preview_drag_start_geometry = None
+        self.visual_preview_drag_start_x = 0.0
+        self.visual_preview_drag_start_y = 0.0
 
         self.visual_asset_process = QProcess(self)
 
@@ -4468,6 +4753,13 @@ class ShortsFactoryWindow(QMainWindow):
         self.update_image_ai_indicator()
         self.load_selected_visual_into_inspector()
         self.load_editor_asset_plan_state()
+        # image_backend_status.py already owns the Forge launch lock. Start
+        # the asynchronous status/autolaunch probe only after the Qt event
+        # loop begins so ShortsFactory never blocks while Forge boots.
+        QTimer.singleShot(
+            350,
+            self.check_image_ai,
+        )
 
     def build_ui(self):
 
@@ -4671,7 +4963,14 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.ai_visual_preview_overlay.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
+            False,
+        )
+        self.ai_visual_preview_overlay.setMouseTracking(True)
+        self.ai_visual_preview_overlay.setCursor(
+            Qt.CursorShape.OpenHandCursor
+        )
+        self.ai_visual_preview_overlay.setToolTip(
+            "Drag the active image to reposition it in the Short."
         )
         self.ai_visual_preview_overlay.hide()
 
@@ -4742,7 +5041,13 @@ class ShortsFactoryWindow(QMainWindow):
 
         timeline_panel = QWidget()
         timeline_panel.setObjectName("TimelinePanel")
-        timeline_panel.setMinimumHeight(260)
+        # Reserve enough parent geometry for the timeline widget, its toolbar,
+        # and the full-source navigator. If the panel itself is shorter than
+        # those children, Qt clips the bottom of the timeline even though the
+        # timeline still reports its larger height; the SFX lane then exists
+        # off-screen. The center column is scrollable, so protect the editor
+        # lanes here instead of clipping them.
+        timeline_panel.setMinimumHeight(350)
         timeline_panel_layout = QVBoxLayout(timeline_panel)
         timeline_panel_layout.setContentsMargins(0, 0, 0, 0)
         timeline_panel_layout.setSpacing(8)
@@ -4835,8 +5140,10 @@ class ShortsFactoryWindow(QMainWindow):
         self.preview_timeline_splitter.addWidget(timeline_panel)
         self.preview_timeline_splitter.setStretchFactor(0, 1)
         self.preview_timeline_splitter.setStretchFactor(1, 0)
-        self.preview_timeline_splitter.setMinimumHeight(560)
-        self.preview_timeline_splitter.setSizes([330, 300])
+        # Give the protected timeline panel real space inside the splitter.
+        # Extra height scrolls in CenterScroll instead of cutting off SFX.
+        self.preview_timeline_splitter.setMinimumHeight(690)
+        self.preview_timeline_splitter.setSizes([330, 360])
 
         preview_layout.addLayout(preview_header)
         preview_layout.addWidget(self.preview_timeline_splitter, 1)
@@ -5184,8 +5491,8 @@ class ShortsFactoryWindow(QMainWindow):
             "QuietButton"
         )
         self.plan_visuals_button.setToolTip(
-            "Use the local AI to propose 0-2 sparse B-roll / AI visual cutaways "
-            "for the current selected clip."
+            "Add 0-2 new AI visual entities for the current selected clip. "
+            "Existing image entities stay until you delete them."
         )
         self.plan_visuals_button.setEnabled(
             False
@@ -5348,7 +5655,7 @@ class ShortsFactoryWindow(QMainWindow):
             "TranscriptList"
         )
         self.visual_slots_list.setMinimumHeight(
-            120
+            190
         )
         self.visual_slots_list.itemClicked.connect(
             self.visual_slot_clicked
@@ -5372,7 +5679,7 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.visual_inspector_title = QLabel(
-            "SELECT VISUAL SLOT"
+            "SELECT IMAGE ENTITY"
         )
         self.visual_inspector_title.setObjectName(
             "SectionTitle"
@@ -5436,6 +5743,46 @@ class ShortsFactoryWindow(QMainWindow):
             "MusicVolumeLabel"
         )
 
+        self.visual_x_slider = QSlider(
+            Qt.Orientation.Horizontal
+        )
+        self.visual_x_slider.setObjectName(
+            "MusicVolumeSlider"
+        )
+        self.visual_x_slider.setRange(
+            -100,
+            100,
+        )
+        self.visual_x_slider.setValue(
+            0
+        )
+        self.visual_x_label = QLabel(
+            "0"
+        )
+        self.visual_x_label.setObjectName(
+            "MusicVolumeLabel"
+        )
+
+        self.visual_y_slider = QSlider(
+            Qt.Orientation.Horizontal
+        )
+        self.visual_y_slider.setObjectName(
+            "MusicVolumeSlider"
+        )
+        self.visual_y_slider.setRange(
+            -100,
+            100,
+        )
+        self.visual_y_slider.setValue(
+            0
+        )
+        self.visual_y_label = QLabel(
+            "0"
+        )
+        self.visual_y_label.setObjectName(
+            "MusicVolumeLabel"
+        )
+
         self.visual_label_edit.editingFinished.connect(
             self.visual_inspector_fields_changed
         )
@@ -5453,6 +5800,12 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.visual_scale_slider.valueChanged.connect(
             self.visual_scale_changed
+        )
+        self.visual_x_slider.valueChanged.connect(
+            self.visual_position_slider_changed
+        )
+        self.visual_y_slider.valueChanged.connect(
+            self.visual_position_slider_changed
         )
 
         inspector_grid.addWidget(
@@ -5528,9 +5881,43 @@ class ShortsFactoryWindow(QMainWindow):
             4,
             3,
         )
+        inspector_grid.addWidget(
+            QLabel("X"),
+            5,
+            0,
+        )
+        inspector_grid.addWidget(
+            self.visual_x_slider,
+            5,
+            1,
+            1,
+            2,
+        )
+        inspector_grid.addWidget(
+            self.visual_x_label,
+            5,
+            3,
+        )
+        inspector_grid.addWidget(
+            QLabel("Y"),
+            6,
+            0,
+        )
+        inspector_grid.addWidget(
+            self.visual_y_slider,
+            6,
+            1,
+            1,
+            2,
+        )
+        inspector_grid.addWidget(
+            self.visual_y_label,
+            6,
+            3,
+        )
 
         self.visual_reason_label = QLabel(
-            "Select a planned visual to inspect it."
+            "Select an image thumbnail or green timeline block to edit it."
         )
         self.visual_reason_label.setObjectName(
             "HintLabel"
@@ -5584,82 +5971,17 @@ class ShortsFactoryWindow(QMainWindow):
             self.regenerate_selected_visual_asset
         )
 
-        self.keep_visual_variant_button = QPushButton(
-            "KEEP"
-        )
-        self.keep_visual_variant_button.setObjectName(
-            "QuietButton"
-        )
-        self.keep_visual_variant_button.setToolTip(
-            "Preserve the active image variant so future generation cannot overwrite it."
-        )
-        self.keep_visual_variant_button.clicked.connect(
-            self.keep_selected_visual_variant
-        )
-
         self.generate_more_visual_button = QPushButton(
-            "GENERATE MORE"
+            "GENERATE NEW IMAGE"
         )
         self.generate_more_visual_button.setObjectName(
             "QuietButton"
         )
         self.generate_more_visual_button.setToolTip(
-            "Generate another image variant without replacing kept images."
+            "Create another independent image entity with its own timeline clip and properties."
         )
         self.generate_more_visual_button.clicked.connect(
             self.generate_more_selected_visual_variant
-        )
-
-        variant_nav = QHBoxLayout()
-        variant_nav.setSpacing(
-            4
-        )
-
-        self.previous_visual_variant_button = QPushButton(
-            "<"
-        )
-        self.previous_visual_variant_button.setObjectName(
-            "TinyButton"
-        )
-        self.previous_visual_variant_button.setToolTip(
-            "Previous image variant"
-        )
-        self.previous_visual_variant_button.clicked.connect(
-            self.previous_visual_variant
-        )
-
-        self.visual_variant_label = QLabel(
-            "0/0"
-        )
-        self.visual_variant_label.setObjectName(
-            "MicroLabel"
-        )
-        self.visual_variant_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-
-        self.next_visual_variant_button = QPushButton(
-            ">"
-        )
-        self.next_visual_variant_button.setObjectName(
-            "TinyButton"
-        )
-        self.next_visual_variant_button.setToolTip(
-            "Next image variant"
-        )
-        self.next_visual_variant_button.clicked.connect(
-            self.next_visual_variant
-        )
-
-        variant_nav.addWidget(
-            self.previous_visual_variant_button
-        )
-        variant_nav.addWidget(
-            self.visual_variant_label,
-            1,
-        )
-        variant_nav.addWidget(
-            self.next_visual_variant_button
         )
 
         self.disable_visual_button = QPushButton(
@@ -5686,13 +6008,7 @@ class ShortsFactoryWindow(QMainWindow):
             self.regenerate_visual_button
         )
         action_column.addWidget(
-            self.keep_visual_variant_button
-        )
-        action_column.addWidget(
             self.generate_more_visual_button
-        )
-        action_column.addLayout(
-            variant_nav
         )
         action_column.addWidget(
             self.disable_visual_button
@@ -5849,6 +6165,13 @@ class ShortsFactoryWindow(QMainWindow):
         path: Path,
     ):
 
+        path = Path(path).resolve()
+        if not path.exists():
+            self.report_playback_message(
+                f"source file does not exist: {path}"
+            )
+            return
+
         self.cancel_paused_seek_refresh()
         self.hide_ai_visual_preview_overlay()
         self.play_request_counter += 1
@@ -5858,6 +6181,16 @@ class ShortsFactoryWindow(QMainWindow):
             path.name
         )
 
+        # Reset the Windows media backend completely when loading a source.
+        # Leaving an old/native media surface attached can produce a black
+        # preview after background analysis seeks before the first playback.
+        self.player.stop()
+        self.player.setSource(
+            QUrl()
+        )
+        self.player.setVideoOutput(
+            self.video_widget
+        )
         self.player.setSource(
             QUrl.fromLocalFile(
                 str(path)
@@ -5871,6 +6204,17 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.play_button.setText(
             "LOADING"
+        )
+
+        # Prime a real frame once Qt has had a chance to load the local file,
+        # then recover Play even if the backend lingers in a buffering status.
+        QTimer.singleShot(
+            250,
+            self.prime_preview_frame,
+        )
+        QTimer.singleShot(
+            900,
+            self.ensure_preview_playable,
         )
 
         self.start_ms = 0
@@ -5904,6 +6248,8 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.ai_candidates = []
         self.visual_plan_slots = []
+        self.visual_deleted_slots = []
+        self.reset_pending_visual_replan_state()
 
         if hasattr(
             self,
@@ -5946,11 +6292,99 @@ class ShortsFactoryWindow(QMainWindow):
         self.set_selection_loop_enabled(
             False
         )
+        self.start_transcript_preload()
+
+    def prime_preview_frame(self):
+
+        if not self.video_path:
+            return
+
+        if (
+            self.player.error()
+            != QMediaPlayer.Error.NoError
+        ):
+            return
+
+        if (
+            self.player.mediaStatus()
+            == QMediaPlayer.MediaStatus.NoMedia
+        ):
+            return
+
+        self.player.setPosition(
+            0
+        )
+
+        if (
+            self.player.duration() > 0
+            and self.player.playbackState()
+            == QMediaPlayer.PlaybackState.StoppedState
+            and not self.paused_seek_refresh_pending
+        ):
+            # Some Windows Qt multimedia backends do not paint the first frame
+            # until playback advances briefly. Do that muted, then pause.
+            self.paused_seek_refresh_pending = True
+            self.audio_output.setMuted(
+                True
+            )
+            self.player.play()
+            QTimer.singleShot(
+                55,
+                self.finish_paused_seek,
+            )
+
+    def ensure_preview_playable(self):
+
+        if not self.video_path:
+            return
+
+        if not hasattr(
+            self,
+            "play_button",
+        ):
+            return
+
+        if (
+            self.player.error()
+            != QMediaPlayer.Error.NoError
+        ):
+            return
+
+        if (
+            self.player.mediaStatus()
+            == QMediaPlayer.MediaStatus.InvalidMedia
+        ):
+            return
+
+        self.play_button.setEnabled(
+            True
+        )
+        self.update_play_button(
+            self.player.playbackState()
+        )
 
     def toggle_playback(self):
 
         if not self.video_path:
             return
+
+        # Recover if the Windows media backend dropped the source while
+        # background transcription/analysis was running.
+        if (
+            self.player.mediaStatus()
+            == QMediaPlayer.MediaStatus.NoMedia
+        ):
+            self.player.setVideoOutput(
+                self.video_widget
+            )
+            self.player.setSource(
+                QUrl.fromLocalFile(
+                    str(self.video_path)
+                )
+            )
+            self.player.setPosition(
+                0
+            )
 
         refresh_playback = self.paused_seek_refresh_pending
 
@@ -6115,6 +6549,20 @@ class ShortsFactoryWindow(QMainWindow):
         self,
         duration: int,
     ):
+
+        if duration > 0:
+            # Duration arrival proves Qt has loaded enough media to play even
+            # if the ideal LoadedMedia/BufferedMedia signal never arrived.
+            self.ensure_preview_playable()
+            if (
+                self.player.playbackState()
+                == QMediaPlayer.PlaybackState.StoppedState
+                and self.player.position() <= 0
+            ):
+                QTimer.singleShot(
+                    0,
+                    self.prime_preview_frame,
+                )
 
         self.timeline.setRange(
             0,
@@ -6433,16 +6881,18 @@ class ShortsFactoryWindow(QMainWindow):
         if status in {
             QMediaPlayer.MediaStatus.LoadedMedia,
             QMediaPlayer.MediaStatus.BufferedMedia,
+            QMediaPlayer.MediaStatus.BufferingMedia,
+            QMediaPlayer.MediaStatus.StalledMedia,
         }:
-            if hasattr(
-                self,
-                "play_button",
-            ):
-                self.play_button.setEnabled(
-                    self.video_path is not None
-                )
-                self.update_play_button(
-                    self.player.playbackState()
+            self.ensure_preview_playable()
+
+            if status in {
+                QMediaPlayer.MediaStatus.LoadedMedia,
+                QMediaPlayer.MediaStatus.BufferedMedia,
+            }:
+                QTimer.singleShot(
+                    0,
+                    self.prime_preview_frame,
                 )
 
             return
@@ -6739,6 +7189,255 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.update_sfx_button_state()
 
+    def transcript_json_matches_current_source(
+        self,
+        data: dict,
+    ) -> bool:
+
+        if not self.video_path or not isinstance(
+            data,
+            dict,
+        ):
+            return False
+
+        source_path = str(
+            data.get(
+                "source_video_path",
+                "",
+            )
+            or ""
+        ).strip()
+        if not source_path:
+            return False
+
+        try:
+            return (
+                Path(source_path).resolve()
+                == self.video_path.resolve()
+            )
+        except OSError:
+            return False
+
+
+    def cached_transcript_ready_for_current_source(self) -> bool:
+
+        transcript_path = (
+            ROOT
+            / "output"
+            / "subtitles.json"
+        )
+        if not transcript_path.exists():
+            return False
+
+        try:
+            data = json.loads(
+                transcript_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ):
+            return False
+
+        if not self.transcript_json_matches_current_source(
+            data
+        ):
+            return False
+
+        quality = str(
+            data.get(
+                "quality",
+                "",
+            )
+            or ""
+        ).upper()
+        return quality == self.current_transcription_quality()
+
+
+    def start_transcript_preload(self):
+
+        if not self.video_path:
+            return
+
+        if self.cached_transcript_ready_for_current_source():
+            self.load_source_transcript()
+            self.transcript_status_label.setText(
+                "TRANSCRIPT CACHE HIT"
+            )
+            return
+
+        if (
+            self.transcript_preload_process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            if (
+                self.transcript_preload_source
+                == str(self.video_path)
+                and self.transcript_preload_quality
+                == self.current_transcription_quality()
+            ):
+                return
+
+            # A different source/quality was selected while a background
+            # Whisper job was running. Kill it before starting the new job;
+            # its completion is additionally guarded by source identity.
+            self.transcript_preload_source = ""
+            self.pending_find_best_after_preload = False
+            self.transcript_preload_process.kill()
+            self.transcript_preload_process.waitForFinished(
+                250
+            )
+
+        subtitles_script = (
+            ROOT
+            / "app"
+            / "subtitles.py"
+        )
+        if not subtitles_script.exists():
+            self.transcript_status_label.setText(
+                "Transcript engine is not installed."
+            )
+            return
+
+        self.transcript_preload_source = str(
+            self.video_path
+        )
+        self.transcript_preload_quality = (
+            self.current_transcription_quality()
+        )
+        self.transcript_preload_output = ""
+        self.transcript_status_label.setText(
+            "TRANSCRIBING..."
+        )
+        self.render_log.append(
+            ""
+        )
+        self.render_log.append(
+            "=== BACKGROUND TRANSCRIPT PRELOAD ==="
+        )
+        self.render_log.append(
+            f"Source: {self.video_path.name}"
+        )
+
+        self.transcript_preload_process.start(
+            sys.executable,
+            [
+                str(subtitles_script),
+                "--quality",
+                self.transcript_preload_quality,
+                str(self.video_path),
+            ],
+        )
+
+
+    def read_transcript_preload_output(self):
+
+        data = (
+            self.transcript_preload_process
+            .readAllStandardOutput()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        self.transcript_preload_output += data
+
+        if "Transcript cache HIT" in data:
+            self.transcript_status_label.setText(
+                "TRANSCRIPT CACHE HIT"
+            )
+        elif "Transcript cache MISS" in data:
+            self.transcript_status_label.setText(
+                "TRANSCRIBING..."
+            )
+
+
+    def read_transcript_preload_error(self):
+
+        data = (
+            self.transcript_preload_process
+            .readAllStandardError()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        self.transcript_preload_output += data
+
+
+    def transcript_preload_finished(
+        self,
+        exit_code: int,
+        exit_status,
+    ):
+
+        del exit_status
+
+        finished_source = self.transcript_preload_source
+        current_source = (
+            str(self.video_path)
+            if self.video_path
+            else ""
+        )
+        self.transcript_preload_source = ""
+        self.transcript_preload_quality = ""
+
+        # Never attach a stale background result to a subsequently imported
+        # source video.
+        if finished_source != current_source:
+            return
+
+        if exit_code != 0:
+            self.transcript_status_label.setText(
+                "TRANSCRIPT FAILED"
+            )
+            if self.pending_find_best_after_preload:
+                self.pending_find_best_after_preload = False
+                self.find_clips_button.setEnabled(
+                    self.video_path is not None
+                )
+                self.find_clips_button.setText(
+                    "✦ Find Best Clips"
+                )
+                self.generate_button.setEnabled(
+                    self.video_path is not None
+                )
+            return
+
+        if not self.cached_transcript_ready_for_current_source():
+            self.transcript_status_label.setText(
+                "TRANSCRIPT STALE"
+            )
+            if self.pending_find_best_after_preload:
+                self.pending_find_best_after_preload = False
+                self.find_clips_button.setEnabled(
+                    self.video_path is not None
+                )
+                self.find_clips_button.setText(
+                    "✦ Find Best Clips"
+                )
+                self.generate_button.setEnabled(
+                    self.video_path is not None
+                )
+            return
+
+        self.load_source_transcript()
+        self.transcript_status_label.setText(
+            "TRANSCRIPT CACHE HIT"
+            if "Transcript cache HIT"
+            in self.transcript_preload_output
+            else "TRANSCRIPT READY"
+        )
+
+        if self.pending_find_best_after_preload:
+            self.pending_find_best_after_preload = False
+            self.start_clip_analyzer()
+
+
     def load_source_transcript(self):
 
         transcript_path = (
@@ -6776,6 +7475,15 @@ class ShortsFactoryWindow(QMainWindow):
                 "Could not read the source transcript."
             )
 
+            self.transcript_list.clear()
+            return
+
+        if not self.transcript_json_matches_current_source(
+            data
+        ):
+            self.transcript_status_label.setText(
+                "Transcript belongs to a different source."
+            )
             self.transcript_list.clear()
             return
 
@@ -7105,6 +7813,8 @@ class ShortsFactoryWindow(QMainWindow):
 
         text_by_state = {
             "not_checked": "● IMAGE AI NOT CHECKED",
+            "starting": "● IMAGE AI STARTING",
+            "loading_model": "● IMAGE AI LOADING MODEL",
             "offline": "● IMAGE AI OFFLINE",
             "connected_no_model": "● IMAGE AI CONNECTED - NO MODEL",
             "ready": "● IMAGE AI READY",
@@ -7174,18 +7884,24 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         if set_model:
+            self.image_ai_state = "loading_model"
             self.visual_status_label.setText(
                 "Changing image model..."
             )
         else:
+            self.image_ai_state = "starting"
             self.visual_status_label.setText(
-                "Checking Image AI..."
+                "Starting or checking Image AI..."
             )
+        self.update_image_ai_indicator()
 
         args = [
             str(
                 status_script
             ),
+            "--autolaunch",
+            "--wait-seconds",
+            "180",
         ]
 
         if set_model:
@@ -7461,6 +8177,9 @@ class ShortsFactoryWindow(QMainWindow):
             quality,
         )
 
+        if self.video_path:
+            self.start_transcript_preload()
+
 
     def current_transcription_quality(self) -> str:
 
@@ -7597,15 +8316,19 @@ class ShortsFactoryWindow(QMainWindow):
 
     def ensure_visual_slot_defaults(self):
 
-        for index, slot in enumerate(
+        normalized_slots: list[dict] = []
+
+        for index, raw_slot in enumerate(
             self.visual_plan_slots,
             start=1,
         ):
             if not isinstance(
-                slot,
+                raw_slot,
                 dict,
             ):
                 continue
+
+            slot = raw_slot
 
             if not slot.get(
                 "slot_id"
@@ -7648,6 +8371,14 @@ class ShortsFactoryWindow(QMainWindow):
                 "scale",
                 1.0,
             )
+            slot.setdefault(
+                "position_x",
+                0.0,
+            )
+            slot.setdefault(
+                "position_y",
+                0.0,
+            )
 
             try:
                 start = float(
@@ -7676,6 +8407,227 @@ class ShortsFactoryWindow(QMainWindow):
             ):
                 pass
 
+            variants = slot.get(
+                "variants",
+                [],
+            )
+            variants = [
+                dict(
+                    variant
+                )
+                for variant in variants
+                if isinstance(
+                    variant,
+                    dict,
+                )
+                and str(
+                    variant.get(
+                        "path",
+                        "",
+                    )
+                    or ""
+                ).strip()
+            ] if isinstance(
+                variants,
+                list,
+            ) else []
+
+            # KEEP is no longer part of the visual model. Every image entity
+            # persists until the user deletes it. Older saved variants are
+            # migrated into independent visual entities below.
+            for variant in variants:
+                variant["saved"] = False
+            slot.pop(
+                "saved_variant",
+                None,
+            )
+
+            if len(
+                variants
+            ) <= 1:
+                if variants:
+                    variant = variants[0]
+                    slot["variants"] = [
+                        variant
+                    ]
+                    slot["active_variant_id"] = str(
+                        variant.get(
+                            "variant_id",
+                            "variant_001",
+                        )
+                        or "variant_001"
+                    )
+                    if variant.get(
+                        "path"
+                    ):
+                        slot["asset_path"] = str(
+                            variant.get(
+                                "path"
+                            )
+                        )
+                    slot["state"] = str(
+                        variant.get(
+                            "state",
+                            slot.get(
+                                "state",
+                                "READY",
+                            ),
+                        )
+                        or slot.get(
+                            "state",
+                            "READY",
+                        )
+                    )
+                    slot["provider"] = str(
+                        variant.get(
+                            "provider",
+                            slot.get(
+                                "provider",
+                                "",
+                            ),
+                        )
+                        or ""
+                    )
+                    slot["generated"] = bool(
+                        variant.get(
+                            "generated",
+                            slot.get(
+                                "generated",
+                                False,
+                            ),
+                        )
+                    )
+                normalized_slots.append(
+                    slot
+                )
+                continue
+
+            base_id = str(
+                slot.get(
+                    "slot_id",
+                    f"visual_{index:02d}",
+                )
+                or f"visual_{index:02d}"
+            )
+            active_variant_id = str(
+                slot.get(
+                    "active_variant_id",
+                    "",
+                )
+                or ""
+            )
+
+            ordered_variants = sorted(
+                variants,
+                key=lambda variant: (
+                    0
+                    if str(
+                        variant.get(
+                            "variant_id",
+                            "",
+                        )
+                        or ""
+                    ) == active_variant_id
+                    else 1,
+                    str(
+                        variant.get(
+                            "variant_id",
+                            "",
+                        )
+                        or ""
+                    ),
+                ),
+            )
+
+            for variant_index, variant in enumerate(
+                ordered_variants
+            ):
+                entity = self.clone_visual_slot(
+                    slot
+                )
+                variant_id = str(
+                    variant.get(
+                        "variant_id",
+                        f"variant_{variant_index + 1:03d}",
+                    )
+                    or f"variant_{variant_index + 1:03d}"
+                )
+                entity["slot_id"] = (
+                    base_id
+                    if variant_index == 0
+                    else f"{base_id}__{variant_id}"
+                )
+                if variant_index > 0:
+                    entity["label"] = (
+                        str(
+                            slot.get(
+                                "label",
+                                "AI Visual",
+                            )
+                            or "AI Visual"
+                        )
+                        + f" ALT {variant_index + 1}"
+                    )
+                entity["variants"] = [
+                    variant
+                ]
+                entity["enabled"] = (
+                    bool(
+                        slot.get(
+                            "enabled",
+                            True,
+                        )
+                    )
+                    if variant_index == 0
+                    else False
+                )
+                entity["active_variant_id"] = variant_id
+                entity["asset_path"] = str(
+                    variant.get(
+                        "path",
+                        "",
+                    )
+                    or ""
+                )
+                entity["state"] = str(
+                    variant.get(
+                        "state",
+                        entity.get(
+                            "state",
+                            "READY",
+                        ),
+                    )
+                    or entity.get(
+                        "state",
+                        "READY",
+                    )
+                )
+                entity["provider"] = str(
+                    variant.get(
+                        "provider",
+                        entity.get(
+                            "provider",
+                            "",
+                        ),
+                    )
+                    or ""
+                )
+                entity["generated"] = bool(
+                    variant.get(
+                        "generated",
+                        entity.get(
+                            "generated",
+                            False,
+                        ),
+                    )
+                )
+                entity["user_modified"] = True
+                normalized_slots.append(
+                    entity
+                )
+
+        self.visual_plan_slots = normalized_slots
+
 
     def visual_clip_id(self, slot: dict, index: int) -> str:
         slot_id = str(slot.get("slot_id", "") or "")
@@ -7683,19 +8635,42 @@ class ShortsFactoryWindow(QMainWindow):
 
 
     def visual_slot_asset_path_text(self, slot: dict) -> str:
-        variants = slot.get("variants", [])
-        active_id = str(slot.get("active_variant_id", "") or "")
-        if isinstance(variants, list):
+
+        direct_path = str(
+            slot.get(
+                "asset_path",
+                "",
+            )
+            or ""
+        ).strip()
+        if direct_path:
+            return direct_path
+
+        variants = slot.get(
+            "variants",
+            [],
+        )
+        if isinstance(
+            variants,
+            list,
+        ):
             for variant in variants:
-                if not isinstance(variant, dict):
+                if not isinstance(
+                    variant,
+                    dict,
+                ):
                     continue
-                variant_id = str(variant.get("variant_id", "") or "")
-                if active_id and variant_id != active_id:
-                    continue
-                path = str(variant.get("path", "") or "")
+                path = str(
+                    variant.get(
+                        "path",
+                        "",
+                    )
+                    or ""
+                ).strip()
                 if path:
                     return path
-        return str(slot.get("asset_path", "") or "")
+
+        return ""
 
 
     def visual_slot_to_editor_clip(self, slot: dict, index: int) -> dict:
@@ -7729,6 +8704,18 @@ class ShortsFactoryWindow(QMainWindow):
             "label": str(slot.get("label", f"Visual {index + 1}") or f"Visual {index + 1}"),
             "display_mode": display_mode,
             "scale": round(scale, 2),
+            "position_x": round(
+                self.coerce_visual_position(
+                    slot.get("position_x", 0.0)
+                ),
+                3,
+            ),
+            "position_y": round(
+                self.coerce_visual_position(
+                    slot.get("position_y", 0.0)
+                ),
+                3,
+            ),
             "source_type": str(slot.get("source_type", "ai_generated") or "ai_generated"),
             "slot_id": str(slot.get("slot_id", "") or ""),
             "variant_id": str(slot.get("active_variant_id", "") or ""),
@@ -7776,6 +8763,14 @@ class ShortsFactoryWindow(QMainWindow):
                     slot["scale"] = float(clip["scale"])
                 except (TypeError, ValueError):
                     pass
+            if clip.get("position_x") is not None:
+                slot["position_x"] = self.coerce_visual_position(
+                    clip.get("position_x", 0.0)
+                )
+            if clip.get("position_y") is not None:
+                slot["position_y"] = self.coerce_visual_position(
+                    clip.get("position_y", 0.0)
+                )
             slot["user_modified"] = True
             self.user_visual_edits = True
 
@@ -7796,11 +8791,15 @@ class ShortsFactoryWindow(QMainWindow):
             for index, slot in enumerate(self.visual_plan_slots)
             if isinstance(slot, dict)
         ]
+        # visual_plan_slots is the authoritative entity list. Replacing this
+        # kind exactly prevents stale/duplicate clips from surviving while
+        # also guaranteeing that every existing entity remains until the user
+        # explicitly deletes it from visual_plan_slots.
         self.editor_asset_plan = replace_kind_clips(
             self.editor_asset_plan,
             "AI_VISUAL",
             clips,
-            preserve_manual=preserve_manual,
+            preserve_manual=False,
         )
         self.save_editor_asset_plan_state()
         self.refresh_editor_asset_timeline()
@@ -7825,7 +8824,9 @@ class ShortsFactoryWindow(QMainWindow):
         if self.user_visual_edits:
             return True
 
-        return any(
+        return bool(
+            self.visual_deleted_slots
+        ) or any(
             bool(
                 slot.get(
                     "user_modified"
@@ -7839,35 +8840,394 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
 
-    def confirm_replace_visual_plan(self) -> bool:
+    def clone_visual_slot(self, slot: dict) -> dict:
 
-        if not self.visual_plan_has_user_edits():
+        try:
+            return json.loads(
+                json.dumps(
+                    slot,
+                    ensure_ascii=False,
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return dict(slot)
+
+
+    def visual_slot_time_bounds(
+        self,
+        slot: dict,
+    ) -> tuple[float, float]:
+
+        try:
+            start = float(
+                slot.get(
+                    "start",
+                    0.0,
+                )
+                or 0.0
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            start = 0.0
+
+        try:
+            end = float(
+                slot.get(
+                    "end",
+                    start,
+                )
+                or start
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            end = start
+
+        return (
+            start,
+            max(
+                start,
+                end,
+            ),
+        )
+
+
+    def visual_slots_conflict(
+        self,
+        first: dict,
+        second: dict,
+        padding: float = 1.25,
+    ) -> bool:
+
+        first_id = str(
+            first.get(
+                "slot_id",
+                "",
+            )
+            or ""
+        )
+        second_id = str(
+            second.get(
+                "slot_id",
+                "",
+            )
+            or ""
+        )
+
+        if (
+            first_id
+            and second_id
+            and first_id == second_id
+        ):
             return True
 
-        box = QMessageBox(self)
-        box.setWindowTitle(
-            "Replace Visual Plan?"
+        first_start, first_end = self.visual_slot_time_bounds(
+            first
         )
-        box.setText(
-            (
-                "This clip has visual edits you made by hand. "
-                "Keep them or replace them with a new AI plan?"
-            )
+        second_start, second_end = self.visual_slot_time_bounds(
+            second
         )
-        keep_button = box.addButton(
-            "KEEP MY VISUALS",
-            QMessageBox.ButtonRole.RejectRole,
-        )
-        replace_button = box.addButton(
-            "REPLACE WITH NEW AI PLAN",
-            QMessageBox.ButtonRole.AcceptRole,
-        )
-        box.setDefaultButton(
-            keep_button
-        )
-        box.exec()
 
-        return box.clickedButton() == replace_button
+        if (
+            first_end + padding >= second_start
+            and second_end + padding >= first_start
+        ):
+            return True
+
+        first_center = (
+            first_start
+            + first_end
+        ) / 2.0
+        second_center = (
+            second_start
+            + second_end
+        ) / 2.0
+
+        return abs(
+            first_center
+            - second_center
+        ) <= max(
+            2.25,
+            padding,
+        )
+
+
+    def unique_visual_entity_id(
+        self,
+        preferred: str,
+        existing_ids: set[str],
+    ) -> str:
+
+        base = str(
+            preferred
+            or "visual"
+        ).strip() or "visual"
+
+        if base not in existing_ids:
+            existing_ids.add(
+                base
+            )
+            return base
+
+        suffix = 2
+        while True:
+            candidate = f"{base}__{suffix:02d}"
+            if candidate not in existing_ids:
+                existing_ids.add(
+                    candidate
+                )
+                return candidate
+            suffix += 1
+
+
+    def place_new_visual_entity(
+        self,
+        slot: dict,
+        existing: list[dict],
+    ) -> dict:
+
+        candidate = self.clone_visual_slot(
+            slot
+        )
+        start, end = self.visual_slot_time_bounds(
+            candidate
+        )
+        duration = max(
+            0.8,
+            end - start,
+        )
+        selection_start = self.start_ms / 1000
+        selection_end = self.end_ms / 1000
+
+        def conflicts(
+            proposed_start: float,
+            proposed_end: float,
+        ) -> bool:
+            return any(
+                proposed_start
+                < self.visual_slot_time_bounds(
+                    item
+                )[1]
+                and proposed_end
+                > self.visual_slot_time_bounds(
+                    item
+                )[0]
+                for item in existing
+                if isinstance(
+                    item,
+                    dict,
+                )
+                and item.get(
+                    "enabled",
+                    True,
+                ) is not False
+            )
+
+        if not conflicts(
+            start,
+            end,
+        ):
+            return candidate
+
+        cursor = max(
+            selection_start,
+            start,
+        )
+        sorted_existing = sorted(
+            [
+                item
+                for item in existing
+                if isinstance(
+                    item,
+                    dict,
+                )
+            ],
+            key=lambda item: self.visual_slot_time_bounds(
+                item
+            )[0],
+        )
+
+        for item in sorted_existing:
+            item_start, item_end = self.visual_slot_time_bounds(
+                item
+            )
+            if item_end <= cursor:
+                continue
+            if cursor + duration <= item_start:
+                break
+            cursor = max(
+                cursor,
+                item_end + 0.15,
+            )
+
+        if cursor + duration <= selection_end:
+            candidate["start"] = round(
+                cursor,
+                3,
+            )
+            candidate["end"] = round(
+                cursor + duration,
+                3,
+            )
+            candidate["duration"] = round(
+                duration,
+                3,
+            )
+            return candidate
+
+        cursor = min(
+            selection_end - duration,
+            start,
+        )
+        for item in reversed(
+            sorted_existing
+        ):
+            item_start, item_end = self.visual_slot_time_bounds(
+                item
+            )
+            if item_start >= cursor + duration:
+                continue
+            if item_end <= cursor:
+                break
+            cursor = min(
+                cursor,
+                item_start - duration - 0.15,
+            )
+
+        if (
+            cursor >= selection_start
+            and cursor + duration <= selection_end
+        ):
+            candidate["start"] = round(
+                cursor,
+                3,
+            )
+            candidate["end"] = round(
+                cursor + duration,
+                3,
+            )
+            candidate["duration"] = round(
+                duration,
+                3,
+            )
+
+        return candidate
+
+
+    def merge_visual_plan_with_preserved_changes(
+        self,
+        planned_slots: list[dict],
+    ) -> list[dict]:
+
+        merged = [
+            self.clone_visual_slot(
+                slot
+            )
+            for slot in self.pending_visual_preserved_slots
+            if isinstance(
+                slot,
+                dict,
+            )
+        ]
+
+        existing_ids = {
+            str(
+                slot.get(
+                    "slot_id",
+                    "",
+                )
+                or ""
+            )
+            for slot in merged
+            if isinstance(
+                slot,
+                dict,
+            )
+            and str(
+                slot.get(
+                    "slot_id",
+                    "",
+                )
+                or ""
+            )
+        }
+
+        for planned in planned_slots:
+            if not isinstance(
+                planned,
+                dict,
+            ):
+                continue
+
+            entity = self.place_new_visual_entity(
+                planned,
+                merged,
+            )
+            preferred_id = str(
+                entity.get(
+                    "slot_id",
+                    "visual",
+                )
+                or "visual"
+            )
+            entity["slot_id"] = self.unique_visual_entity_id(
+                preferred_id,
+                existing_ids,
+            )
+            entity["user_modified"] = False
+            entity.pop(
+                "saved_variant",
+                None,
+            )
+            variants = entity.get(
+                "variants",
+                [],
+            )
+            if isinstance(
+                variants,
+                list,
+            ):
+                for variant in variants:
+                    if isinstance(
+                        variant,
+                        dict,
+                    ):
+                        variant["saved"] = False
+
+            merged.append(
+                entity
+            )
+
+        merged.sort(
+            key=lambda slot: self.visual_slot_time_bounds(
+                slot
+            )[0]
+        )
+
+        return merged
+
+
+    def visual_replan_mode(self) -> str:
+
+        return (
+            "append"
+            if self.visual_plan_slots
+            else "replace"
+        )
+
+
+    def reset_pending_visual_replan_state(self):
+
+        self.pending_visual_replan_mode = "replace"
+        self.pending_visual_preserved_slots = []
+        self.pending_visual_preserved_deleted_slots = []
+        self.pending_visual_selected_slot_id = None
 
 
     def save_ai_visual_plan(self):
@@ -7931,6 +9291,7 @@ class ShortsFactoryWindow(QMainWindow):
         )
         payload["user_modified"] = self.visual_plan_has_user_edits()
         payload["slots"] = self.visual_plan_slots
+        payload["deleted_slots"] = self.visual_deleted_slots
 
         try:
             output_path.write_text(
@@ -8022,16 +9383,17 @@ class ShortsFactoryWindow(QMainWindow):
             ):
                 continue
 
-            asset = by_id.get(
-                str(
-                    slot.get(
-                        "slot_id",
-                        "",
-                    )
-                    or ""
+            slot_id = str(
+                slot.get(
+                    "slot_id",
+                    "",
                 )
+                or ""
             )
-            if asset is None:
+            asset = by_id.get(
+                slot_id
+            )
+            if asset is None and not slot_id:
                 asset = by_index.get(
                     index
                 )
@@ -8043,21 +9405,18 @@ class ShortsFactoryWindow(QMainWindow):
                 slot.get(
                     "user_modified"
                 )
-                and str(
+                and (
                     slot.get(
-                        "prompt",
-                        "",
+                        "asset_path"
                     )
-                    or ""
-                )
-                != str(
-                    asset.get(
-                        "prompt",
-                        "",
+                    or self.visual_variants(
+                        slot
                     )
-                    or ""
                 )
             ):
+                # Manual visual choices are authoritative. The manifest can
+                # populate automatic slots, but must not silently switch a
+                # user's kept/selected image or variant.
                 continue
 
             slot["asset_path"] = str(
@@ -8249,8 +9608,8 @@ class ShortsFactoryWindow(QMainWindow):
             Qt.AlignmentFlag.AlignCenter
         )
         thumb.setFixedSize(
-            48,
-            66,
+            64,
+            86,
         )
 
         state_text = self.visual_slot_state_text(
@@ -8270,8 +9629,8 @@ class ShortsFactoryWindow(QMainWindow):
                 thumb.setPixmap(
                     pixmap.scaled(
                         QSize(
-                            48,
-                            66,
+                            64,
+                            86,
                         ),
                         Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                         Qt.TransformationMode.SmoothTransformation,
@@ -8358,26 +9717,12 @@ class ShortsFactoryWindow(QMainWindow):
                 * 100
             )
         )
-        variant_number, variant_count, variant_saved = (
-            self.visual_variant_state(
-                slot
-            )
-        )
-        variant_text = (
-            f"    VAR {variant_number}/{variant_count}"
-            if variant_count
-            else ""
-        )
-        if variant_saved:
-            variant_text += " KEEP"
-
         meta = QLabel(
             (
                 f"{format_time(int(start * 1000))} -> "
                 f"{format_time(int(end * 1000))}    "
                 f"{state_text}    "
                 f"{display_mode} / {scale_percent}%"
-                f"{variant_text}"
             )
         )
         meta.setObjectName(
@@ -8481,7 +9826,7 @@ class ShortsFactoryWindow(QMainWindow):
             item.setSizeHint(
                 QSize(
                     120,
-                    82,
+                    102,
                 )
             )
             item.setToolTip(
@@ -8635,10 +9980,7 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_type_edit,
             self.visual_display_mode_combo,
             self.visual_prompt_edit,
-            self.keep_visual_variant_button,
             self.generate_more_visual_button,
-            self.previous_visual_variant_button,
-            self.next_visual_variant_button,
             self.disable_visual_button,
             self.delete_visual_button,
         ):
@@ -8647,6 +9989,12 @@ class ShortsFactoryWindow(QMainWindow):
             )
 
         self.visual_scale_slider.setEnabled(
+            enabled
+        )
+        self.visual_x_slider.setEnabled(
+            enabled
+        )
+        self.visual_y_slider.setEnabled(
             enabled
         )
 
@@ -8696,6 +10044,30 @@ class ShortsFactoryWindow(QMainWindow):
             0.6,
             min(
                 1.4,
+                number,
+            ),
+        )
+
+
+    def coerce_visual_position(
+        self,
+        value,
+    ) -> float:
+
+        try:
+            number = float(
+                value
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            number = 0.0
+
+        return max(
+            -1.0,
+            min(
+                1.0,
                 number,
             ),
         )
@@ -9015,42 +10387,121 @@ class ShortsFactoryWindow(QMainWindow):
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
         self.visual_status_label.setText(
-            "Active image variant kept. Future generation will preserve it."
+            "Image entity updated."
         )
 
 
     def generate_more_selected_visual_variant(self):
 
-        slot = self.selected_visual_slot()
-        if slot is None:
+        source_slot = self.selected_visual_slot()
+        if source_slot is None:
             return
-
 
         if self.image_ai_state != "ready":
             self.visual_status_label.setText(
-                "Image AI is offline. Existing variants are preserved."
+                "Image AI is offline. Existing image entities are unchanged."
             )
             return
 
         self.visual_inspector_fields_changed()
-        slot = self.selected_visual_slot()
-        if slot is None:
+        source_slot = self.selected_visual_slot()
+        if source_slot is None:
             return
 
-        slot["force_new_variant"] = True
-        self.mark_visual_slot_modified(
-            slot
-        )
-        self.save_ai_visual_plan()
-        self.start_visual_asset_generation(
+        existing_ids = {
             str(
                 slot.get(
                     "slot_id",
                     "",
                 )
                 or ""
-            ),
-            new_variant=True,
+            )
+            for slot in self.visual_plan_slots
+            if isinstance(
+                slot,
+                dict,
+            )
+        }
+        base_id = str(
+            source_slot.get(
+                "slot_id",
+                "visual",
+            )
+            or "visual"
+        )
+        entity_id = self.unique_visual_entity_id(
+            f"{base_id}__image",
+            existing_ids,
+        )
+
+        entity = self.clone_visual_slot(
+            source_slot
+        )
+        entity["slot_id"] = entity_id
+        entity["label"] = (
+            str(
+                source_slot.get(
+                    "label",
+                    "AI Visual",
+                )
+                or "AI Visual"
+            )
+            + " ALT"
+        )
+        entity["asset_path"] = ""
+        entity["variants"] = []
+        entity["active_variant_id"] = ""
+        entity["state"] = "PLANNED"
+        entity["generated"] = False
+        entity["provider"] = ""
+        entity.pop(
+            "error",
+            None,
+        )
+        entity.pop(
+            "saved_variant",
+            None,
+        )
+        entity["user_modified"] = True
+
+        entity = self.place_new_visual_entity(
+            entity,
+            [
+                slot
+                for slot in self.visual_plan_slots
+                if isinstance(
+                    slot,
+                    dict,
+                )
+            ],
+        )
+
+        insert_index = (
+            self.selected_visual_slot_index + 1
+            if self.selected_visual_slot_index is not None
+            else len(
+                self.visual_plan_slots
+            )
+        )
+        self.visual_plan_slots.insert(
+            insert_index,
+            entity,
+        )
+        self.selected_visual_slot_index = insert_index
+        self.user_visual_edits = True
+
+        self.save_ai_visual_plan()
+        self.sync_visual_slots_to_editor_asset_plan(
+            preserve_manual=True
+        )
+        self.refresh_visual_plan_display()
+        self.load_selected_visual_into_inspector()
+        self.visual_status_label.setText(
+            "Created a new independent image entity. Generating its image..."
+        )
+        self.start_visual_asset_generation(
+            entity_id,
+            new_variant=False,
         )
 
 
@@ -9061,6 +10512,32 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.visual_scale_label.setText(
             f"{int(value)}%"
+        )
+
+        if self.updating_visual_inspector:
+            return
+
+        self.visual_inspector_fields_changed()
+
+
+    def visual_position_slider_changed(
+        self,
+        _value: int,
+    ):
+
+        self.visual_x_label.setText(
+            str(
+                int(
+                    self.visual_x_slider.value()
+                )
+            )
+        )
+        self.visual_y_label.setText(
+            str(
+                int(
+                    self.visual_y_slider.value()
+                )
+            )
         )
 
         if self.updating_visual_inspector:
@@ -9082,7 +10559,7 @@ class ShortsFactoryWindow(QMainWindow):
 
         if slot is None:
             self.visual_inspector_title.setText(
-                "SELECT VISUAL SLOT"
+                "SELECT IMAGE ENTITY"
             )
             self.visual_label_edit.setText("")
             self.visual_start_edit.setText("")
@@ -9097,14 +10574,20 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_scale_label.setText(
                 "100%"
             )
-            self.visual_variant_label.setText(
-                "0/0"
+            self.visual_x_slider.setValue(
+                0
             )
-            self.keep_visual_variant_button.setText(
-                "KEEP"
+            self.visual_y_slider.setValue(
+                0
+            )
+            self.visual_x_label.setText(
+                "0"
+            )
+            self.visual_y_label.setText(
+                "0"
             )
             self.visual_reason_label.setText(
-                "Select a planned visual to inspect it."
+                "Select an image thumbnail or green timeline block to edit it."
             )
             self.visual_prompt_edit.setPlainText("")
             self.visual_preview_label.setPixmap(
@@ -9121,7 +10604,7 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.visual_inspector_title.setText(
             (
-                "VISUAL SLOT "
+                "IMAGE ENTITY "
                 f"{self.selected_visual_slot_index + 1:02d}"
             )
         )
@@ -9175,26 +10658,45 @@ class ShortsFactoryWindow(QMainWindow):
             f"{visual_scale_percent}%"
         )
 
-        variant_number, variant_count, variant_saved = (
-            self.visual_variant_state(
-                slot
-            )
-        )
-        self.visual_variant_label.setText(
-            (
-                f"{variant_number}/{variant_count}"
-                + (
-                    "  KEPT"
-                    if variant_saved
-                    else ""
+        visual_x_percent = int(
+            round(
+                self.coerce_visual_position(
+                    slot.get(
+                        "position_x",
+                        0.0,
+                    )
                 )
+                * 100
             )
         )
-        self.keep_visual_variant_button.setText(
-            "KEPT"
-            if variant_saved
-            else "KEEP"
+        visual_y_percent = int(
+            round(
+                self.coerce_visual_position(
+                    slot.get(
+                        "position_y",
+                        0.0,
+                    )
+                )
+                * 100
+            )
         )
+        self.visual_x_slider.setValue(
+            visual_x_percent
+        )
+        self.visual_y_slider.setValue(
+            visual_y_percent
+        )
+        self.visual_x_label.setText(
+            str(
+                visual_x_percent
+            )
+        )
+        self.visual_y_label.setText(
+            str(
+                visual_y_percent
+            )
+        )
+
         self.visual_reason_label.setText(
             (
                 "Why AI suggested this: "
@@ -9372,6 +10874,20 @@ class ShortsFactoryWindow(QMainWindow):
             ),
             2,
         )
+        slot["position_x"] = round(
+            self.coerce_visual_position(
+                self.visual_x_slider.value()
+                / 100.0
+            ),
+            3,
+        )
+        slot["position_y"] = round(
+            self.coerce_visual_position(
+                self.visual_y_slider.value()
+                / 100.0
+            ),
+            3,
+        )
 
         if old_prompt != str(
             slot.get(
@@ -9392,6 +10908,14 @@ class ShortsFactoryWindow(QMainWindow):
             )
         self.refresh_visual_plan_display()
         self.load_selected_visual_into_inspector()
+
+        # Inspector sliders/fields should update the live monitor immediately,
+        # not only after the playhead moves again.
+        self.active_visual_preview_signature = None
+        self.active_visual_preview_layout_signature = None
+        self.update_ai_visual_preview_overlay(
+            self.player.position()
+        )
 
 
     def visual_prompt_changed(self):
@@ -9455,39 +10979,16 @@ class ShortsFactoryWindow(QMainWindow):
             )
         ) if slot else False
 
-        variants = (
-            self.visual_variants(
-                slot
-            )
-            if selected
-            else []
-        )
-
         self.regenerate_visual_button.setEnabled(
             selected
             and enabled
             and self.image_ai_state == "ready"
             and not running
         )
-        self.keep_visual_variant_button.setEnabled(
-            selected
-            and bool(variants)
-            and not running
-        )
         self.generate_more_visual_button.setEnabled(
             selected
             and enabled
             and self.image_ai_state == "ready"
-            and not running
-        )
-        self.previous_visual_variant_button.setEnabled(
-            selected
-            and len(variants) > 1
-            and not running
-        )
-        self.next_visual_variant_button.setEnabled(
-            selected
-            and len(variants) > 1
             and not running
         )
         self.disable_visual_button.setEnabled(
@@ -9850,7 +11351,7 @@ class ShortsFactoryWindow(QMainWindow):
 
         if self.image_ai_state != "ready":
             self.visual_status_label.setText(
-                "Image AI is offline. Existing assets are preserved."
+                "Image AI is offline. Existing image entities are unchanged."
             )
             return
 
@@ -9930,6 +11431,47 @@ class ShortsFactoryWindow(QMainWindow):
             )
             else ""
         )
+
+        if isinstance(
+            deleted_slot,
+            dict,
+        ):
+            tombstone = self.clone_visual_slot(
+                deleted_slot
+            )
+            tombstone["deleted"] = True
+            tombstone["enabled"] = False
+            tombstone["user_modified"] = True
+
+            tombstone_id = str(
+                tombstone.get(
+                    "slot_id",
+                    "",
+                )
+                or ""
+            )
+            self.visual_deleted_slots = [
+                existing
+                for existing in self.visual_deleted_slots
+                if not (
+                    isinstance(
+                        existing,
+                        dict,
+                    )
+                    and tombstone_id
+                    and str(
+                        existing.get(
+                            "slot_id",
+                            "",
+                        )
+                        or ""
+                    )
+                    == tombstone_id
+                )
+            ]
+            self.visual_deleted_slots.append(
+                tombstone
+            )
 
         del self.visual_plan_slots[
             deleted_index
@@ -10111,59 +11653,94 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         if not planner_script.exists():
-
             self.visual_status_label.setText(
                 "ai_visual_planner.py is not installed."
             )
             return
 
-        if not self.confirm_replace_visual_plan():
-            self.visual_status_label.setText(
-                "Kept your existing visual plan."
-            )
-            return
+        self.apply_editor_visual_overrides_to_slots()
+        self.ensure_visual_slot_defaults()
 
-        self.ensure_current_editor_asset_context(
-            clear_on_change=True
-        )
-        self.editor_asset_plan["clips"] = [
-            clip
-            for clip in self.editor_asset_plan.get(
-                "clips",
-                [],
-            )
-            if not (
-                isinstance(
-                    clip,
+        replan_mode = self.visual_replan_mode()
+        self.pending_visual_replan_mode = replan_mode
+        self.pending_visual_preserved_slots = []
+        self.pending_visual_preserved_deleted_slots = []
+        self.pending_visual_selected_slot_id = None
+
+        selected_slot = self.selected_visual_slot()
+        if isinstance(
+            selected_slot,
+            dict,
+        ):
+            self.pending_visual_selected_slot_id = str(
+                selected_slot.get(
+                    "slot_id",
+                    "",
+                )
+                or ""
+            ) or None
+
+        if replan_mode == "append":
+            # Every existing image is an independent persistent entity.
+            # Planning adds new entities; it never needs a KEEP flag.
+            self.pending_visual_preserved_slots = [
+                self.clone_visual_slot(
+                    slot
+                )
+                for slot in self.visual_plan_slots
+                if isinstance(
+                    slot,
                     dict,
                 )
-                and str(
-                    clip.get(
-                        "kind",
-                        "",
-                    )
-                    or ""
-                ).upper()
-                == "AI_VISUAL"
+            ]
+            self.ensure_current_editor_asset_context(
+                clear_on_change=False
             )
-        ]
-        self.save_editor_asset_plan_state()
-        self.user_visual_edits = False
-        self.selected_visual_slot_index = None
-
-        self.clear_visual_plan_display()
+            self.save_ai_visual_plan()
+        else:
+            self.ensure_current_editor_asset_context(
+                clear_on_change=True
+            )
+            self.editor_asset_plan["clips"] = [
+                clip
+                for clip in self.editor_asset_plan.get(
+                    "clips",
+                    [],
+                )
+                if not (
+                    isinstance(
+                        clip,
+                        dict,
+                    )
+                    and str(
+                        clip.get(
+                            "kind",
+                            "",
+                        )
+                        or ""
+                    ).upper()
+                    == "AI_VISUAL"
+                )
+            ]
+            self.save_editor_asset_plan_state()
+            self.selected_visual_slot_index = None
+            self.clear_visual_plan_display()
 
         self.plan_visuals_button.setEnabled(
             False
         )
-
         self.plan_visuals_button.setText(
             "Planning..."
         )
 
-        self.visual_status_label.setText(
-            "Local AI is choosing sparse visual cutaway moments..."
-        )
+        if replan_mode == "append":
+            self.visual_status_label.setText(
+                "AI is adding new visual entities. Existing images will stay until you delete them."
+            )
+        else:
+            self.visual_status_label.setText(
+                "Local AI is choosing sparse visual cutaway moments..."
+            )
 
         self.save_manual_edit_plan()
         self.save_transcript_corrections()
@@ -10296,7 +11873,7 @@ class ShortsFactoryWindow(QMainWindow):
         ):
             slots = []
 
-        self.visual_plan_slots = [
+        planned_slots = [
             slot
             for slot in slots
             if isinstance(
@@ -10305,17 +11882,73 @@ class ShortsFactoryWindow(QMainWindow):
             )
         ]
 
-        self.user_visual_edits = bool(
-            data.get(
-                "user_modified",
-                False,
+        if self.pending_visual_replan_mode == "append":
+            self.visual_plan_slots = (
+                self.merge_visual_plan_with_preserved_changes(
+                    planned_slots
+                )
             )
-        )
+            self.visual_deleted_slots = []
+            self.user_visual_edits = bool(
+                self.pending_visual_preserved_slots
+                or data.get(
+                    "user_modified",
+                    False,
+                )
+            )
+        else:
+            self.visual_plan_slots = planned_slots
+            deleted_slots = data.get(
+                "deleted_slots",
+                [],
+            )
+            self.visual_deleted_slots = [
+                slot
+                for slot in deleted_slots
+                if isinstance(
+                    slot,
+                    dict,
+                )
+            ] if isinstance(
+                deleted_slots,
+                list,
+            ) else []
+            self.user_visual_edits = bool(
+                data.get(
+                    "user_modified",
+                    False,
+                )
+            )
+
         self.selected_visual_slot_index = (
             0
             if self.visual_plan_slots
             else None
         )
+
+        if (
+            self.pending_visual_replan_mode == "append"
+            and self.pending_visual_selected_slot_id
+        ):
+            for index, slot in enumerate(
+                self.visual_plan_slots
+            ):
+                if (
+                    isinstance(
+                        slot,
+                        dict,
+                    )
+                    and str(
+                        slot.get(
+                            "slot_id",
+                            "",
+                        )
+                        or ""
+                    )
+                    == self.pending_visual_selected_slot_id
+                ):
+                    self.selected_visual_slot_index = index
+                    break
         self.ensure_visual_slot_defaults()
         self.refresh_visual_assets_from_manifest()
         self.apply_editor_visual_overrides_to_slots()
@@ -10328,6 +11961,26 @@ class ShortsFactoryWindow(QMainWindow):
 
         if self.visual_plan_slots:
 
+            preserved_count = (
+                len(
+                    self.pending_visual_preserved_slots
+                )
+                if self.pending_visual_replan_mode == "append"
+                else 0
+            )
+            preserved_suffix = (
+                (
+                    f" Preserved {preserved_count} existing visual "
+                    + (
+                        "entity."
+                        if preserved_count == 1
+                        else "entities."
+                    )
+                )
+                if preserved_count
+                else ""
+            )
+
             self.visual_status_label.setText(
                 (
                     f"{len(self.visual_plan_slots)} proposed cutaway"
@@ -10336,7 +11989,9 @@ class ShortsFactoryWindow(QMainWindow):
                         if len(self.visual_plan_slots) == 1
                         else "s"
                     )
-                    + ". Click one to inspect, seek, and select its range."
+                    + "."
+                    + preserved_suffix
+                    + " Click a thumbnail or green timeline block to edit that image entity."
                 )
             )
 
@@ -10367,13 +12022,19 @@ class ShortsFactoryWindow(QMainWindow):
 
         if exit_code != 0:
 
-            self.visual_status_label.setText(
-                "Visual planning failed. See the render log."
-            )
+            if self.pending_visual_replan_mode == "append":
+                self.visual_status_label.setText(
+                    "Visual planning failed. Your existing image entities are unchanged."
+                )
+            else:
+                self.visual_status_label.setText(
+                    "Visual planning failed. See the render log."
+                )
 
             self.render_log.append(
                 f"✕ VISUAL PLANNER FAILED (exit code {exit_code})"
             )
+            self.reset_pending_visual_replan_state()
 
             return
 
@@ -10390,8 +12051,16 @@ class ShortsFactoryWindow(QMainWindow):
             self.render_log.append(
                 f"Could not display visual plan: {exc}"
             )
+            self.reset_pending_visual_replan_state()
 
             return
+
+        preserved_count = len(
+            self.pending_visual_preserved_slots
+        )
+        deleted_count = len(
+            self.pending_visual_preserved_deleted_slots
+        )
 
         self.render_log.append(
             ""
@@ -10400,9 +12069,19 @@ class ShortsFactoryWindow(QMainWindow):
         self.render_log.append(
             (
                 f"✓ AI visual plan ready: "
-                f"{len(self.visual_plan_slots)} slot(s)."
+                f"{len(self.visual_plan_slots)} image entity/ies."
             )
         )
+
+        if preserved_count or deleted_count:
+            self.render_log.append(
+                (
+                    "Preserved visual entities: "
+                    f"{preserved_count} existing image(s)."
+                )
+            )
+
+        self.reset_pending_visual_replan_state()
 
 
     def read_visual_asset_output(self):
@@ -11873,7 +13552,7 @@ class ShortsFactoryWindow(QMainWindow):
                 )
             )
 
-        self.player.setPosition(
+        self.seek_video(
             start_ms
         )
 
@@ -13661,6 +15340,144 @@ class ShortsFactoryWindow(QMainWindow):
         return max(0.6, min(1.4, scale))
 
 
+    def ai_visual_preview_position(
+        self,
+        clip: dict,
+    ) -> tuple[float, float]:
+        return (
+            self.coerce_visual_position(
+                clip.get(
+                    "position_x",
+                    0.0,
+                )
+            ),
+            self.coerce_visual_position(
+                clip.get(
+                    "position_y",
+                    0.0,
+                )
+            ),
+        )
+
+
+    def ai_visual_preview_canvas_rect(
+        self,
+    ) -> tuple[int, int, int, int]:
+        width = max(
+            1,
+            self.video_widget.width(),
+        )
+        height = max(
+            1,
+            self.video_widget.height(),
+        )
+        canvas_height = height
+        canvas_width = max(
+            1,
+            int(
+                round(
+                    canvas_height
+                    * 9
+                    / 16
+                )
+            ),
+        )
+        if canvas_width > width:
+            canvas_width = width
+            canvas_height = max(
+                1,
+                int(
+                    round(
+                        canvas_width
+                        * 16
+                        / 9
+                    )
+                ),
+            )
+        canvas_x = max(
+            0,
+            (width - canvas_width) // 2,
+        )
+        canvas_y = max(
+            0,
+            (height - canvas_height) // 2,
+        )
+        return (
+            canvas_x,
+            canvas_y,
+            canvas_width,
+            canvas_height,
+        )
+
+
+    def visual_axis_position(
+        self,
+        base: int,
+        minimum: int,
+        maximum: int,
+        position: float,
+    ) -> int:
+        position = self.coerce_visual_position(
+            position
+        )
+        if position >= 0.0:
+            return int(
+                round(
+                    base
+                    + (
+                        maximum
+                        - base
+                    )
+                    * position
+                )
+            )
+        return int(
+            round(
+                base
+                + (
+                    base
+                    - minimum
+                )
+                * position
+            )
+        )
+
+
+    def visual_axis_position_from_pixel(
+        self,
+        base: int,
+        minimum: int,
+        maximum: int,
+        value: int,
+    ) -> float:
+        value = max(
+            min(
+                int(value),
+                max(
+                    minimum,
+                    maximum,
+                ),
+            ),
+            min(
+                minimum,
+                maximum,
+            ),
+        )
+        if value >= base:
+            span = maximum - base
+            if span == 0:
+                return 0.0
+            return self.coerce_visual_position(
+                (value - base) / span
+            )
+        span = base - minimum
+        if span == 0:
+            return 0.0
+        return self.coerce_visual_position(
+            (value - base) / span
+        )
+
+
     def repolish_ai_visual_preview(self, widget):
         style = widget.style()
         style.unpolish(widget)
@@ -13672,27 +15489,38 @@ class ShortsFactoryWindow(QMainWindow):
         self,
         clip: dict,
     ):
-        if not hasattr(self, "ai_visual_preview_overlay"):
+        if not hasattr(
+            self,
+            "ai_visual_preview_overlay",
+        ):
             return
 
-        width = max(1, self.video_widget.width())
-        height = max(1, self.video_widget.height())
-        mode = self.ai_visual_preview_display_mode(clip)
-        scale = self.ai_visual_preview_scale(clip)
+        width = max(
+            1,
+            self.video_widget.width(),
+        )
+        height = max(
+            1,
+            self.video_widget.height(),
+        )
+        mode = self.ai_visual_preview_display_mode(
+            clip
+        )
+        scale = self.ai_visual_preview_scale(
+            clip
+        )
+        position_x, position_y = (
+            self.ai_visual_preview_position(
+                clip
+            )
+        )
 
-        # The exported Short is always a 9:16 canvas. The preview widget is
-        # usually much wider because it shows the uncropped source, so sizing
-        # an overlay from the whole widget makes a card look like a banner.
-        # Build a centered virtual 9:16 output canvas and size visual overlays
-        # from that instead. This keeps preview geometry representative of the
-        # final 1080x1920 render.
-        canvas_height = height
-        canvas_width = max(1, int(round(canvas_height * 9 / 16)))
-        if canvas_width > width:
-            canvas_width = width
-            canvas_height = max(1, int(round(canvas_width * 16 / 9)))
-        canvas_x = max(0, (width - canvas_width) // 2)
-        canvas_y = max(0, (height - canvas_height) // 2)
+        (
+            canvas_x,
+            canvas_y,
+            canvas_width,
+            canvas_height,
+        ) = self.ai_visual_preview_canvas_rect()
 
         layout_signature = (
             self.active_visual_preview_signature,
@@ -13702,10 +15530,23 @@ class ShortsFactoryWindow(QMainWindow):
             canvas_y,
             canvas_width,
             canvas_height,
+            round(
+                position_x,
+                3,
+            ),
+            round(
+                position_y,
+                3,
+            ),
         )
-        if layout_signature == self.active_visual_preview_layout_signature:
+        if (
+            layout_signature
+            == self.active_visual_preview_layout_signature
+        ):
             return
-        self.active_visual_preview_layout_signature = layout_signature
+        self.active_visual_preview_layout_signature = (
+            layout_signature
+        )
 
         self.ai_visual_preview_dim.setGeometry(
             canvas_x,
@@ -13713,95 +15554,379 @@ class ShortsFactoryWindow(QMainWindow):
             canvas_width,
             canvas_height,
         )
-        if self.ai_visual_preview_dim.property("displayMode") != mode:
-            self.ai_visual_preview_dim.setProperty("displayMode", mode)
-            self.repolish_ai_visual_preview(self.ai_visual_preview_dim)
+        if (
+            self.ai_visual_preview_dim.property(
+                "displayMode"
+            )
+            != mode
+        ):
+            self.ai_visual_preview_dim.setProperty(
+                "displayMode",
+                mode,
+            )
+            self.repolish_ai_visual_preview(
+                self.ai_visual_preview_dim
+            )
 
         overlay = self.ai_visual_preview_overlay
-        if overlay.property("displayMode") != mode:
-            overlay.setProperty("displayMode", mode)
-            self.repolish_ai_visual_preview(overlay)
+        if overlay.property(
+            "displayMode"
+        ) != mode:
+            overlay.setProperty(
+                "displayMode",
+                mode,
+            )
+            self.repolish_ai_visual_preview(
+                overlay
+            )
 
-        source_pixmap = self.active_visual_preview_pixmap
+        source_pixmap = (
+            self.active_visual_preview_pixmap
+        )
+        preview_pixmap = QPixmap()
 
         if mode == "OVERLAY_CARD":
-            # Mirror apply_ai_visuals.py: 842x882 on a 1080x1920 output.
-            # Using the same proportions here prevents the live preview card
-            # from becoming an ultra-wide banner on a landscape source.
-            card_width = max(1, int(round(canvas_width * (842 / 1080) * scale)))
-            card_height = max(1, int(round(canvas_height * (882 / 1920) * scale)))
-            card_width = min(canvas_width, card_width)
-            card_height = min(canvas_height, card_height)
-            x = canvas_x + max(0, (canvas_width - card_width) // 2)
-            y_offset = max(
-                int(round(canvas_height * (110 / 1920))),
-                int(round((canvas_height - card_height) * 0.22)),
+            card_width = max(
+                1,
+                int(
+                    round(
+                        canvas_width
+                        * (
+                            842
+                            / 1080
+                        )
+                        * scale
+                    )
+                ),
             )
-            y = canvas_y + min(
-                max(0, y_offset),
-                max(0, canvas_height - card_height),
+            card_height = max(
+                1,
+                int(
+                    round(
+                        canvas_height
+                        * (
+                            882
+                            / 1920
+                        )
+                        * scale
+                    )
+                ),
             )
-            overlay.setGeometry(x, y, card_width, card_height)
-            # Overlay cards behave like cropped cutaways rather than
-            # letterboxed images with blank side bands.
-            transform = Qt.AspectRatioMode.KeepAspectRatioByExpanding
-            target_size = overlay.size()
-        elif mode == "FULL_FRAME_CONTAIN":
-            overlay.setGeometry(
-                canvas_x,
-                canvas_y,
+            card_width = min(
                 canvas_width,
+                card_width,
+            )
+            card_height = min(
                 canvas_height,
+                card_height,
             )
-            transform = Qt.AspectRatioMode.KeepAspectRatio
-            target_size = QSize(
-                max(1, int(round(canvas_width * scale))),
-                max(1, int(round(canvas_height * scale))),
-            )
-        else:
-            overlay.setGeometry(
-                canvas_x,
-                canvas_y,
-                canvas_width,
-                canvas_height,
-            )
-            transform = Qt.AspectRatioMode.KeepAspectRatioByExpanding
-            target_size = overlay.size()
 
-        if not source_pixmap.isNull():
-            overlay.setText("")
-            preview_pixmap = source_pixmap.scaled(
-                target_size,
-                transform,
-                Qt.TransformationMode.SmoothTransformation,
+            base_x = (
+                canvas_x
+                + max(
+                    0,
+                    (
+                        canvas_width
+                        - card_width
+                    )
+                    // 2,
+                )
             )
-            if transform == Qt.AspectRatioMode.KeepAspectRatioByExpanding:
-                # QPixmap.scaled(...ByExpanding) may be larger than the label.
-                # Crop it explicitly so the live preview matches a real
-                # crop-to-fill render rather than showing blank side bands.
-                crop_width = min(target_size.width(), preview_pixmap.width())
-                crop_height = min(target_size.height(), preview_pixmap.height())
-                crop_x = max(0, (preview_pixmap.width() - crop_width) // 2)
-                crop_y = max(0, (preview_pixmap.height() - crop_height) // 2)
+            base_y_offset = max(
+                int(
+                    round(
+                        canvas_height
+                        * (
+                            110
+                            / 1920
+                        )
+                    )
+                ),
+                int(
+                    round(
+                        (
+                            canvas_height
+                            - card_height
+                        )
+                        * 0.22
+                    )
+                ),
+            )
+            base_y = (
+                canvas_y
+                + min(
+                    max(
+                        0,
+                        base_y_offset,
+                    ),
+                    max(
+                        0,
+                        canvas_height
+                        - card_height,
+                    ),
+                )
+            )
+
+            x = self.visual_axis_position(
+                base_x,
+                canvas_x,
+                canvas_x
+                + canvas_width
+                - card_width,
+                position_x,
+            )
+            y = self.visual_axis_position(
+                base_y,
+                canvas_y,
+                canvas_y
+                + canvas_height
+                - card_height,
+                position_y,
+            )
+            overlay.setGeometry(
+                x,
+                y,
+                card_width,
+                card_height,
+            )
+
+            if not source_pixmap.isNull():
+                preview_pixmap = source_pixmap.scaled(
+                    overlay.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                crop_width = min(
+                    overlay.width(),
+                    preview_pixmap.width(),
+                )
+                crop_height = min(
+                    overlay.height(),
+                    preview_pixmap.height(),
+                )
+                crop_x = max(
+                    0,
+                    (
+                        preview_pixmap.width()
+                        - crop_width
+                    )
+                    // 2,
+                )
+                crop_y = max(
+                    0,
+                    (
+                        preview_pixmap.height()
+                        - crop_height
+                    )
+                    // 2,
+                )
                 preview_pixmap = preview_pixmap.copy(
                     crop_x,
                     crop_y,
                     crop_width,
                     crop_height,
                 )
-            overlay.setPixmap(preview_pixmap)
+
+        elif mode == "FULL_FRAME_CONTAIN":
+            bounding_size = QSize(
+                max(
+                    1,
+                    int(
+                        round(
+                            canvas_width
+                            * scale
+                        )
+                    ),
+                ),
+                max(
+                    1,
+                    int(
+                        round(
+                            canvas_height
+                            * scale
+                        )
+                    ),
+                ),
+            )
+
+            if not source_pixmap.isNull():
+                preview_pixmap = source_pixmap.scaled(
+                    bounding_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                image_width = max(
+                    1,
+                    preview_pixmap.width(),
+                )
+                image_height = max(
+                    1,
+                    preview_pixmap.height(),
+                )
+            else:
+                image_width = bounding_size.width()
+                image_height = bounding_size.height()
+
+            base_x = (
+                canvas_x
+                + (
+                    canvas_width
+                    - image_width
+                )
+                // 2
+            )
+            base_y = (
+                canvas_y
+                + (
+                    canvas_height
+                    - image_height
+                )
+                // 2
+            )
+
+            if image_width <= canvas_width:
+                min_x = canvas_x
+                max_x = (
+                    canvas_x
+                    + canvas_width
+                    - image_width
+                )
+            else:
+                min_x = (
+                    canvas_x
+                    + canvas_width
+                    - image_width
+                )
+                max_x = canvas_x
+
+            if image_height <= canvas_height:
+                min_y = canvas_y
+                max_y = (
+                    canvas_y
+                    + canvas_height
+                    - image_height
+                )
+            else:
+                min_y = (
+                    canvas_y
+                    + canvas_height
+                    - image_height
+                )
+                max_y = canvas_y
+
+            x = self.visual_axis_position(
+                base_x,
+                min_x,
+                max_x,
+                position_x,
+            )
+            y = self.visual_axis_position(
+                base_y,
+                min_y,
+                max_y,
+                position_y,
+            )
+            overlay.setGeometry(
+                x,
+                y,
+                image_width,
+                image_height,
+            )
+
+        else:
+            overlay.setGeometry(
+                canvas_x,
+                canvas_y,
+                canvas_width,
+                canvas_height,
+            )
+
+            if not source_pixmap.isNull():
+                cover_scale = max(
+                    1.0,
+                    scale,
+                )
+                expanded_size = QSize(
+                    max(
+                        1,
+                        int(
+                            round(
+                                canvas_width
+                                * cover_scale
+                            )
+                        ),
+                    ),
+                    max(
+                        1,
+                        int(
+                            round(
+                                canvas_height
+                                * cover_scale
+                            )
+                        ),
+                    ),
+                )
+                preview_pixmap = source_pixmap.scaled(
+                    expanded_size,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                crop_width = min(
+                    canvas_width,
+                    preview_pixmap.width(),
+                )
+                crop_height = min(
+                    canvas_height,
+                    preview_pixmap.height(),
+                )
+                max_crop_x = max(
+                    0,
+                    preview_pixmap.width()
+                    - crop_width,
+                )
+                max_crop_y = max(
+                    0,
+                    preview_pixmap.height()
+                    - crop_height,
+                )
+                crop_x = int(
+                    round(
+                        max_crop_x
+                        * (
+                            1.0
+                            - position_x
+                        )
+                        / 2.0
+                    )
+                )
+                crop_y = int(
+                    round(
+                        max_crop_y
+                        * (
+                            1.0
+                            - position_y
+                        )
+                        / 2.0
+                    )
+                )
+                preview_pixmap = preview_pixmap.copy(
+                    crop_x,
+                    crop_y,
+                    crop_width,
+                    crop_height,
+                )
+
+        if not preview_pixmap.isNull():
+            overlay.setText("")
+            overlay.setPixmap(
+                preview_pixmap
+            )
 
         overlay.raise_()
-        if mode in {"OVERLAY_CARD", "FULL_FRAME_COVER"}:
-            # Do not place a full-frame dim label over an overlay card. On
-            # QVideoWidget that can obscure the native video surface, making
-            # the cutaway look like it is floating on black instead of over
-            # the source clip.
-            self.ai_visual_preview_dim.hide()
-        else:
-            self.ai_visual_preview_dim.show()
-            self.ai_visual_preview_dim.raise_()
-            overlay.raise_()
+
+        # Do not put a gray/dim matte around scaled images. The source video
+        # remains visible behind overlay-card and contain modes.
+        self.ai_visual_preview_dim.hide()
 
 
     def update_ai_visual_preview_overlay(
@@ -13828,12 +15953,18 @@ class ShortsFactoryWindow(QMainWindow):
             except OSError:
                 asset_stamp = None
 
+        position_x, position_y = self.ai_visual_preview_position(
+            active_clip
+        )
+
         signature = (
             clip_id,
             str(asset_path or ""),
             asset_stamp,
             mode,
             round(scale, 3),
+            round(position_x, 3),
+            round(position_y, 3),
         )
 
         if signature != self.active_visual_preview_signature:
@@ -13858,6 +15989,305 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.layout_ai_visual_preview_overlay(active_clip)
         self.ai_visual_preview_overlay.show()
+
+
+    def select_visual_preview_clip(
+        self,
+        clip_id: str,
+    ):
+        normalized_id = str(
+            clip_id
+            or ""
+        )
+        for index, slot in enumerate(
+            self.visual_plan_slots
+        ):
+            if not isinstance(
+                slot,
+                dict,
+            ):
+                continue
+            if self.visual_clip_id(
+                slot,
+                index,
+            ) != normalized_id:
+                continue
+            self.selected_visual_slot_index = index
+            self.selected_sfx_clip_id = None
+            self.timeline.set_selected_asset_clip(
+                normalized_id
+            )
+            self.refresh_visual_plan_display()
+            self.load_selected_visual_into_inspector()
+            return
+
+
+    def begin_visual_preview_drag(
+        self,
+        event,
+    ) -> bool:
+        active_clip = self.active_ai_visual_preview_clip(
+            self.player.position()
+        )
+        if active_clip is None:
+            return False
+
+        clip_id = str(
+            active_clip.get(
+                "id",
+                "",
+            )
+            or ""
+        )
+        if clip_id:
+            self.select_visual_preview_clip(
+                clip_id
+            )
+
+        self.visual_preview_dragging = True
+        self.visual_preview_drag_origin = (
+            event.globalPosition().toPoint()
+        )
+        self.visual_preview_drag_start_geometry = (
+            self.ai_visual_preview_overlay.geometry()
+        )
+        (
+            self.visual_preview_drag_start_x,
+            self.visual_preview_drag_start_y,
+        ) = self.ai_visual_preview_position(
+            active_clip
+        )
+        self.ai_visual_preview_overlay.setCursor(
+            Qt.CursorShape.ClosedHandCursor
+        )
+        return True
+
+
+    def update_visual_preview_drag(
+        self,
+        event,
+    ):
+        if not self.visual_preview_dragging:
+            return
+
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return
+
+        clip_id = self.visual_clip_id(
+            slot,
+            self.selected_visual_slot_index
+            if self.selected_visual_slot_index is not None
+            else 0,
+        )
+        clip = self.find_editor_clip(
+            "AI_VISUAL",
+            clip_id,
+        )
+        if clip is None:
+            return
+
+        delta = (
+            event.globalPosition().toPoint()
+            - self.visual_preview_drag_origin
+        )
+        mode = self.ai_visual_preview_display_mode(
+            clip
+        )
+
+        (
+            canvas_x,
+            canvas_y,
+            canvas_width,
+            canvas_height,
+        ) = self.ai_visual_preview_canvas_rect()
+
+        if (
+            mode != "FULL_FRAME_COVER"
+            and self.visual_preview_drag_start_geometry
+            is not None
+        ):
+            geometry = (
+                self.visual_preview_drag_start_geometry
+            )
+            target_x = geometry.x() + delta.x()
+            target_y = geometry.y() + delta.y()
+
+            # Recompute the zero-position geometry for the active mode by
+            # temporarily laying out a neutral-position copy.
+            neutral_clip = dict(
+                clip
+            )
+            neutral_clip["position_x"] = 0.0
+            neutral_clip["position_y"] = 0.0
+
+            saved_signature = (
+                self.active_visual_preview_layout_signature
+            )
+            self.active_visual_preview_layout_signature = None
+            self.layout_ai_visual_preview_overlay(
+                neutral_clip
+            )
+            neutral_geometry = (
+                self.ai_visual_preview_overlay.geometry()
+            )
+
+            image_width = neutral_geometry.width()
+            image_height = neutral_geometry.height()
+            base_x = neutral_geometry.x()
+            base_y = neutral_geometry.y()
+
+            if image_width <= canvas_width:
+                min_x = canvas_x
+                max_x = (
+                    canvas_x
+                    + canvas_width
+                    - image_width
+                )
+            else:
+                min_x = (
+                    canvas_x
+                    + canvas_width
+                    - image_width
+                )
+                max_x = canvas_x
+
+            if image_height <= canvas_height:
+                min_y = canvas_y
+                max_y = (
+                    canvas_y
+                    + canvas_height
+                    - image_height
+                )
+            else:
+                min_y = (
+                    canvas_y
+                    + canvas_height
+                    - image_height
+                )
+                max_y = canvas_y
+
+            position_x = (
+                self.visual_axis_position_from_pixel(
+                    base_x,
+                    min_x,
+                    max_x,
+                    target_x,
+                )
+            )
+            position_y = (
+                self.visual_axis_position_from_pixel(
+                    base_y,
+                    min_y,
+                    max_y,
+                    target_y,
+                )
+            )
+            self.active_visual_preview_layout_signature = (
+                saved_signature
+            )
+        else:
+            position_x = (
+                self.visual_preview_drag_start_x
+                + (
+                    delta.x()
+                    / max(
+                        1.0,
+                        canvas_width
+                        / 2.0,
+                    )
+                )
+            )
+            position_y = (
+                self.visual_preview_drag_start_y
+                + (
+                    delta.y()
+                    / max(
+                        1.0,
+                        canvas_height
+                        / 2.0,
+                    )
+                )
+            )
+            position_x = self.coerce_visual_position(
+                position_x
+            )
+            position_y = self.coerce_visual_position(
+                position_y
+            )
+
+        slot["position_x"] = round(
+            position_x,
+            3,
+        )
+        slot["position_y"] = round(
+            position_y,
+            3,
+        )
+        clip["position_x"] = slot["position_x"]
+        clip["position_y"] = slot["position_y"]
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.mark_visual_slot_modified(
+            slot
+        )
+
+        self.updating_visual_inspector = True
+        self.visual_x_slider.setValue(
+            int(
+                round(
+                    position_x
+                    * 100
+                )
+            )
+        )
+        self.visual_y_slider.setValue(
+            int(
+                round(
+                    position_y
+                    * 100
+                )
+            )
+        )
+        self.visual_x_label.setText(
+            str(
+                self.visual_x_slider.value()
+            )
+        )
+        self.visual_y_label.setText(
+            str(
+                self.visual_y_slider.value()
+            )
+        )
+        self.updating_visual_inspector = False
+
+        self.active_visual_preview_signature = None
+        self.active_visual_preview_layout_signature = None
+        self.update_ai_visual_preview_overlay(
+            self.player.position()
+        )
+
+
+    def finish_visual_preview_drag(self):
+        if not self.visual_preview_dragging:
+            return
+
+        self.visual_preview_dragging = False
+        self.ai_visual_preview_overlay.setCursor(
+            Qt.CursorShape.OpenHandCursor
+        )
+
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return
+
+        self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
+        self.refresh_visual_plan_display()
+        self.load_selected_visual_into_inspector()
 
 
     def update_sfx_button_state(self):
@@ -14612,6 +17042,33 @@ class ShortsFactoryWindow(QMainWindow):
             "Analyzing the source video..."
         )
 
+        self.pending_find_best_after_preload = False
+
+        if self.cached_transcript_ready_for_current_source():
+            self.load_source_transcript()
+            self.render_log.append(
+                "Stage 1/2: Reusing the prepared transcript."
+            )
+            self.start_clip_analyzer()
+            return
+
+        if (
+            self.transcript_preload_process.state()
+            != QProcess.ProcessState.NotRunning
+            and self.transcript_preload_source
+            == str(self.video_path)
+            and self.transcript_preload_quality
+            == transcription_quality
+        ):
+            self.pending_find_best_after_preload = True
+            self.render_log.append(
+                "Stage 1/2: Waiting for background transcript preload..."
+            )
+            self.transcript_status_label.setText(
+                "TRANSCRIBING..."
+            )
+            return
+
         subtitles_script = (
             ROOT
             / "app"
@@ -14879,7 +17336,7 @@ class ShortsFactoryWindow(QMainWindow):
         self.selected_sfx_clip_id = None
         self.refresh_editor_asset_timeline()
 
-        self.player.setPosition(
+        self.seek_video(
             best_start
         )
 
@@ -14989,8 +17446,64 @@ class ShortsFactoryWindow(QMainWindow):
         event,
     ):
 
+        overlay = getattr(
+            self,
+            "ai_visual_preview_overlay",
+            None,
+        )
+        video_widget = getattr(
+            self,
+            "video_widget",
+            None,
+        )
+
+        # QVideoWidget can use a native video surface on Windows, so mouse
+        # events do not always arrive on the child QLabel overlay. Accept the
+        # drag from either the overlay itself or the video widget when the
+        # pointer is over the visible image geometry, then keep tracking by
+        # global mouse position until release.
         if (
-            watched is getattr(self, "video_widget", None)
+            overlay is not None
+            and event.type()
+            == QEvent.Type.MouseButtonPress
+            and event.button()
+            == Qt.MouseButton.LeftButton
+        ):
+            should_begin = watched is overlay
+            if watched is video_widget and overlay.isVisible():
+                try:
+                    should_begin = overlay.geometry().contains(
+                        event.position().toPoint()
+                    )
+                except Exception:
+                    should_begin = False
+
+            if should_begin and self.begin_visual_preview_drag(
+                event
+            ):
+                event.accept()
+                return True
+
+        if (
+            self.visual_preview_dragging
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_visual_preview_drag(
+                event
+            )
+            event.accept()
+            return True
+
+        if (
+            self.visual_preview_dragging
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_visual_preview_drag()
+            event.accept()
+            return True
+
+        if (
+            watched is video_widget
             and event.type() == QEvent.Type.Resize
             and hasattr(self, "ai_visual_preview_overlay")
         ):
@@ -15071,11 +17584,27 @@ class ShortsFactoryWindow(QMainWindow):
             QApplication.activeModalWidget() is None
             and key == Qt.Key.Key_Backspace
             and modifiers == Qt.KeyboardModifier.NoModifier
-            and self.selected_sfx_clip() is not None
         ):
-            self.delete_selected_sfx_clip()
-            event.accept()
-            return True
+            if self.selected_sfx_clip() is not None:
+                self.delete_selected_sfx_clip()
+                event.accept()
+                return True
+
+            selected_visual = self.selected_visual_slot()
+            if selected_visual is not None:
+                visual_index = self.selected_visual_slot_index
+                if visual_index is not None:
+                    visual_clip_id = self.visual_clip_id(
+                        selected_visual,
+                        visual_index,
+                    )
+                    if str(
+                        self.timeline.selected_asset_clip_id
+                        or ""
+                    ) == visual_clip_id:
+                        self.delete_selected_visual()
+                        event.accept()
+                        return True
 
         if (
             key == Qt.Key.Key_Space

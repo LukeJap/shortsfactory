@@ -80,7 +80,7 @@ CARD_MAX_HEIGHT = 882
 CARD_BORDER = 12
 CARD_Y_FACTOR = 0.22
 CARD_DIM_ALPHA = 0.0
-CONTAIN_DIM_ALPHA = 0.24
+CONTAIN_DIM_ALPHA = 0.0
 
 
 def load_json(
@@ -443,6 +443,29 @@ def coerce_scale(
     )
 
 
+def coerce_position(
+    value: Any,
+) -> float:
+
+    try:
+        number = float(
+            value
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        number = 0.0
+
+    return max(
+        -1.0,
+        min(
+            1.0,
+            number,
+        ),
+    )
+
+
 def scale_opacity(
     mode: str,
 ) -> float:
@@ -488,15 +511,59 @@ def build_filter(
                 1.0,
             )
         )
+        position_x = coerce_position(
+            asset.get(
+                "position_x",
+                0.0,
+            )
+        )
+        position_y = coerce_position(
+            asset.get(
+                "position_y",
+                0.0,
+            )
+        )
         dim_alpha = 0.0
 
         if mode == "FULL_FRAME_COVER":
+            cover_scale = max(
+                1.0,
+                scale,
+            )
+            cover_width = max(
+                FRAME_WIDTH,
+                int(
+                    round(
+                        FRAME_WIDTH
+                        * cover_scale
+                    )
+                ),
+            )
+            cover_height = max(
+                FRAME_HEIGHT,
+                int(
+                    round(
+                        FRAME_HEIGHT
+                        * cover_scale
+                    )
+                ),
+            )
+            crop_x_factor = (
+                1.0
+                - position_x
+            ) / 2.0
+            crop_y_factor = (
+                1.0
+                - position_y
+            ) / 2.0
             chains.append(
                 (
                     f"[{index}:v]"
-                    f"scale={FRAME_WIDTH}:{FRAME_HEIGHT}:"
+                    f"scale={cover_width}:{cover_height}:"
                     "force_original_aspect_ratio=increase,"
-                    f"crop={FRAME_WIDTH}:{FRAME_HEIGHT},"
+                    f"crop={FRAME_WIDTH}:{FRAME_HEIGHT}:"
+                    f"x='(iw-ow)*{crop_x_factor:.6f}':"
+                    f"y='(ih-oh)*{crop_y_factor:.6f}',"
                     "setsar=1"
                     f"[vis{index}]"
                 )
@@ -533,22 +600,28 @@ def build_filter(
             )
             dim_alpha = CONTAIN_DIM_ALPHA
         else:
-            overlay_width = max(
-                280,
-                int(
-                    round(
-                        CARD_MAX_WIDTH
-                        * scale
-                    )
+            overlay_width = min(
+                FRAME_WIDTH,
+                max(
+                    280,
+                    int(
+                        round(
+                            CARD_MAX_WIDTH
+                            * scale
+                        )
+                    ),
                 ),
             )
-            overlay_height = max(
-                280,
-                int(
-                    round(
-                        CARD_MAX_HEIGHT
-                        * scale
-                    )
+            overlay_height = min(
+                FRAME_HEIGHT,
+                max(
+                    280,
+                    int(
+                        round(
+                            CARD_MAX_HEIGHT
+                            * scale
+                        )
+                    ),
                 ),
             )
             chains.append(
@@ -589,11 +662,32 @@ def build_filter(
             x_expr = "0"
             y_expr = "0"
         elif mode == "FULL_FRAME_CONTAIN":
-            x_expr = "(W-w)/2"
-            y_expr = "(H-h)/2"
+            x_expr = (
+                "(W-w)/2"
+                f"+({position_x:.6f})*abs(W-w)/2"
+            )
+            y_expr = (
+                "(H-h)/2"
+                f"+({position_y:.6f})*abs(H-h)/2"
+            )
         else:
-            x_expr = "(W-w)/2"
-            y_expr = f"max(110,(H-h)*{CARD_Y_FACTOR:.3f})"
+            x_expr = (
+                f"(W-w)*(0.5+0.5*({position_x:.6f}))"
+            )
+            base_y = (
+                f"max(110,(H-h)*{CARD_Y_FACTOR:.3f})"
+            )
+            if position_y >= 0.0:
+                y_expr = (
+                    f"({base_y})"
+                    f"+({position_y:.6f})"
+                    f"*((H-h)-({base_y}))"
+                )
+            else:
+                y_expr = (
+                    f"({base_y})"
+                    f"*(1+({position_y:.6f}))"
+                )
 
         chains.append(
             (
@@ -853,6 +947,14 @@ def main() -> int:
                     "scale",
                     1.0,
                 ),
+                "position_x": clip.get(
+                    "position_x",
+                    0.0,
+                ),
+                "position_y": clip.get(
+                    "position_y",
+                    0.0,
+                ),
                 "source_type": clip.get(
                     "source_type",
                     "ai_generated",
@@ -1030,6 +1132,24 @@ def main() -> int:
                     ),
                     2,
                 ),
+                "position_x": round(
+                    coerce_position(
+                        slot.get(
+                            "position_x",
+                            0.0,
+                        )
+                    ),
+                    3,
+                ),
+                "position_y": round(
+                    coerce_position(
+                        slot.get(
+                            "position_y",
+                            0.0,
+                        )
+                    ),
+                    3,
+                ),
                 "source_type": str(
                     slot.get(
                         "source_type",
@@ -1095,6 +1215,14 @@ def main() -> int:
                         "scale": asset.get(
                             "scale",
                             1.0,
+                        ),
+                        "position_x": asset.get(
+                            "position_x",
+                            0.0,
+                        ),
+                        "position_y": asset.get(
+                            "position_y",
+                            0.0,
                         ),
                         "source_type": asset.get(
                             "source_type",

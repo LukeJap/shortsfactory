@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -219,6 +220,45 @@ def component_target_for(
     return COMPONENTS_DIR / f"{stem}_old{suffix}"
 
 
+def move_component_with_retry(
+    path: Path,
+    target: Path,
+    attempts: int = 8,
+    delay_seconds: float = 0.25,
+) -> bool:
+
+    last_error: OSError | None = None
+
+    for attempt in range(
+        max(
+            1,
+            int(attempts),
+        )
+    ):
+        try:
+            path.replace(
+                target
+            )
+            return True
+        except OSError as exc:
+            last_error = exc
+
+            if attempt + 1 < attempts:
+                time.sleep(
+                    max(
+                        0.0,
+                        float(delay_seconds),
+                    )
+                )
+
+    print(
+        "WARNING: Could not move rendered component "
+        f"{path.name} into _components after {attempts} attempts: "
+        f"{last_error}. Leaving it in place."
+    )
+    return False
+
+
 def organize_rendered_output() -> None:
 
     if not CAPTION_OUTPUT_PATH.exists():
@@ -229,7 +269,14 @@ def organize_rendered_output() -> None:
         exist_ok=True,
     )
 
+    print()
+    print(
+        "=== STEP 11: Organizing rendered output ==="
+    )
+    print()
+
     moved: list[str] = []
+    skipped: list[str] = []
 
     for path in sorted(
         OUTPUT_DIR.iterdir(),
@@ -249,19 +296,20 @@ def organize_rendered_output() -> None:
             path
         )
 
-        path.replace(
-            target
-        )
+        if move_component_with_retry(
+            path,
+            target,
+        ):
+            moved.append(
+                path.name
+            )
+        else:
+            # Render-folder organization is housekeeping only. A temporary
+            # Windows lock must never turn a finished Short into a failed render.
+            skipped.append(
+                path.name
+            )
 
-        moved.append(
-            path.name
-        )
-
-    print()
-    print(
-        "=== STEP 11: Organizing rendered output ==="
-    )
-    print()
     print(
         f"Final video kept here: {CAPTION_OUTPUT_PATH}"
     )
@@ -273,6 +321,13 @@ def organize_rendered_output() -> None:
     else:
         print(
             "No extra rendered artifacts needed to be moved."
+        )
+
+    if skipped:
+        print(
+            "WARNING: Left "
+            f"{len(skipped)} locked/unavailable component file(s) "
+            "in output/rendered. The final Short is still valid."
         )
 
 
