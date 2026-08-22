@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,26 +34,34 @@ DEFAULT_ASSET_DIR = (
 EVENT_PREFIX = "SF_VISUAL_EVENT "
 
 QUALITY_PRESETS = {
+    # Keep FAST usable on lower-VRAM cards, but avoid the extremely small
+    # 512x896 request that made fine detail noticeably worse in Forge.
     "FAST": {
-        "width": 512,
-        "height": 896,
-        "steps": 14,
-        "cfg_scale": 5.8,
-        "sampler_name": "Euler a",
-    },
-    "BALANCED": {
         "width": 576,
         "height": 1024,
-        "steps": 24,
-        "cfg_scale": 6.5,
+        "steps": 20,
+        "cfg_scale": 5.5,
         "sampler_name": "DPM++ 2M",
+        "scheduler": "Karras",
     },
-    "HIGH": {
+    # BALANCED is the editor default. Give it roughly an SDXL-native pixel
+    # budget so the app is not quietly asking Forge for a much lower-detail
+    # image than users commonly generate in the browser UI.
+    "BALANCED": {
         "width": 768,
         "height": 1344,
         "steps": 30,
-        "cfg_scale": 6.8,
+        "cfg_scale": 6.0,
         "sampler_name": "DPM++ 2M",
+        "scheduler": "Karras",
+    },
+    "HIGH": {
+        "width": 832,
+        "height": 1472,
+        "steps": 36,
+        "cfg_scale": 6.0,
+        "sampler_name": "DPM++ 2M",
+        "scheduler": "Karras",
     },
 }
 
@@ -80,6 +89,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "auto",
             "a1111",
+            "openai",
             "preview",
         ],
         default="auto",
@@ -204,6 +214,43 @@ def enabled_slot(
     )
 
 
+def normalized_image_source(
+    slot: dict[str, Any],
+) -> str:
+    value = str(
+        slot.get(
+            "image_source",
+            slot.get(
+                "provider",
+                "FORGE",
+            ),
+        )
+        or "FORGE"
+    ).strip().upper().replace(
+        "-",
+        "_",
+    ).replace(
+        " ",
+        "_",
+    )
+
+    if value in {
+        "WEB",
+        "WEB_SEARCH",
+        "WEB_SOURCED",
+        "OPENVERSE",
+        "WIKIMEDIA",
+    }:
+        return "WEB"
+    if value in {
+        "CHATGPT",
+        "OPENAI",
+        "OPENAI_IMAGE",
+    }:
+        return "CHATGPT"
+    return "FORGE"
+
+
 def asset_key(
     item: dict[str, Any],
 ) -> str:
@@ -285,45 +332,162 @@ def existing_asset_map(
     return result
 
 
+def forge_prompt_suffix(
+    visual_type: str,
+) -> str:
+    normalized = str(
+        visual_type
+        or "ai_recreation"
+    ).strip().lower()
+
+    suffixes = {
+        "object_detail": (
+            "professional editorial object photography, realistic materials "
+            "and texture, crisp subject detail, natural depth of field"
+        ),
+        "environment": (
+            "professional environmental photography, believable spatial "
+            "depth, natural lighting, detailed surroundings"
+        ),
+        "graphic_explainer": (
+            "clean editorial graphic, strong visual hierarchy, simple "
+            "coherent composition, polished professional design"
+        ),
+        "archival_style": (
+            "authentic documentary archival aesthetic, period-appropriate "
+            "materials and lighting, subtle natural film texture"
+        ),
+        "ai_recreation": (
+            "cinematic realistic recreation, believable lighting and "
+            "materials, coherent anatomy, natural documentary framing"
+        ),
+    }
+
+    return suffixes.get(
+        normalized,
+        suffixes["ai_recreation"],
+    )
+
+
+def forge_negative_prompt(
+    visual_type: str,
+) -> str:
+    common = (
+        "text, captions, subtitles, logos, watermark, UI, interface, "
+        "low resolution, blurry, out of focus, jpeg artifacts, noisy image, "
+        "bad anatomy, deformed anatomy, malformed hands, extra fingers, "
+        "missing fingers, extra limbs, duplicated people, duplicated objects, "
+        "distorted face, crossed eyes, plastic skin, oversharpened"
+    )
+
+    normalized = str(
+        visual_type
+        or ""
+    ).strip().lower()
+
+    if normalized in {
+        "ai_recreation",
+        "object_detail",
+        "environment",
+        "archival_style",
+    }:
+        return (
+            common
+            + ", cheap 3d render, obvious CGI, video game screenshot, "
+            "generic stock illustration"
+        )
+
+    return common
+
+
+def build_forge_payload(
+    prompt: str,
+    visual_type: str,
+    preset: dict[str, Any],
+) -> dict[str, Any]:
+    clean_prompt = " ".join(
+        str(
+            prompt
+            or ""
+        ).split()
+    ).strip()
+
+    if not clean_prompt:
+        raise RuntimeError(
+            "Visual prompt is empty."
+        )
+
+    styled_prompt = (
+        clean_prompt
+        + ", vertical 9:16 composition, strong focal subject, "
+        + forge_prompt_suffix(
+            visual_type
+        )
+    )
+
+    return {
+        "prompt": styled_prompt,
+        "negative_prompt": forge_negative_prompt(
+            visual_type
+        ),
+        "steps": int(
+            preset["steps"]
+        ),
+        "cfg_scale": float(
+            preset["cfg_scale"]
+        ),
+        "width": int(
+            preset["width"]
+        ),
+        "height": int(
+            preset["height"]
+        ),
+        "sampler_name": str(
+            preset["sampler_name"]
+        ),
+        "scheduler": str(
+            preset.get(
+                "scheduler",
+                "Karras",
+            )
+            or "Karras"
+        ),
+        "seed": -1,
+        "batch_size": 1,
+        "n_iter": 1,
+        "restore_faces": False,
+        "tiling": False,
+    }
+
+
 def generate_a1111(
     api: str,
     prompt: str,
+    visual_type: str,
     output_path: Path,
     preset: dict[str, Any],
 ) -> None:
-    negative_prompt = (
-        "text, captions, subtitles, logos, watermark, UI, interface, "
-        "deformed anatomy, extra limbs, duplicated objects, low resolution"
+    payload = build_forge_payload(
+        prompt,
+        visual_type,
+        preset,
+    )
+
+    print(
+        (
+            "Forge request: "
+            f"{payload['width']}x{payload['height']}, "
+            f"{payload['steps']} steps, "
+            f"CFG {payload['cfg_scale']}, "
+            f"{payload['sampler_name']} / {payload['scheduler']}"
+        ),
+        flush=True,
     )
 
     response = requests.post(
         api.rstrip("/")
         + "/sdapi/v1/txt2img",
-        json={
-            "prompt": (
-                prompt
-                + ", vertical 9:16 composition, high visual clarity, "
-                "cinematic documentary illustration"
-            ),
-            "negative_prompt": negative_prompt,
-            "steps": int(
-                preset["steps"]
-            ),
-            "cfg_scale": float(
-                preset["cfg_scale"]
-            ),
-            "width": int(
-                preset["width"]
-            ),
-            "height": int(
-                preset["height"]
-            ),
-            "sampler_name": str(
-                preset["sampler_name"]
-            ),
-            "batch_size": 1,
-            "n_iter": 1,
-        },
+        json=payload,
         timeout=360,
     )
 
@@ -352,6 +516,231 @@ def generate_a1111(
         base64.b64decode(
             encoded
         )
+    )
+
+
+
+
+OPENAI_IMAGE_API = os.getenv(
+    "SHORTSFACTORY_OPENAI_IMAGE_API",
+    "https://api.openai.com/v1/images/generations",
+)
+
+OPENAI_IMAGE_MODEL = os.getenv(
+    "SHORTSFACTORY_OPENAI_IMAGE_MODEL",
+    "gpt-image-2",
+)
+
+
+def build_openai_prompt(
+    prompt: str,
+    visual_type: str,
+) -> str:
+    clean_prompt = " ".join(
+        str(
+            prompt
+            or ""
+        ).split()
+    ).strip()
+    if not clean_prompt:
+        raise RuntimeError(
+            "Visual prompt is empty."
+        )
+
+    normalized_type = str(
+        visual_type
+        or "ai_recreation"
+    ).strip().lower()
+    type_guidance = {
+        "object_detail": (
+            "Make the subject visually specific, realistic, and easy to read "
+            "at phone size."
+        ),
+        "environment": (
+            "Make the location/environment believable, detailed, and visually "
+            "clear at phone size."
+        ),
+        "graphic_explainer": (
+            "Use a clean editorial graphic style with strong hierarchy and no "
+            "unrequested text."
+        ),
+        "archival_style": (
+            "Use a convincing documentary/archive-inspired treatment while "
+            "keeping the depicted scene coherent."
+        ),
+        "ai_recreation": (
+            "Create a believable cinematic recreation with coherent anatomy, "
+            "materials, lighting, and spatial relationships."
+        ),
+    }.get(
+        normalized_type,
+        "Create a polished, coherent visual with a strong focal subject.",
+    )
+
+    return (
+        clean_prompt
+        + "\n\n"
+        + type_guidance
+        + " Compose vertically for a 9:16 short-form video. "
+        + "Do not add captions, subtitles, watermarks, logos, UI, borders, "
+        + "or readable text unless the prompt explicitly requires text."
+    )
+
+
+def openai_quality_for(
+    quality: str,
+) -> str:
+    return {
+        "FAST": "low",
+        "BALANCED": "medium",
+        "HIGH": "high",
+    }.get(
+        str(quality or "BALANCED").upper(),
+        "medium",
+    )
+
+
+def generate_openai_image(
+    api_key: str,
+    prompt: str,
+    visual_type: str,
+    output_path: Path,
+    quality: str,
+) -> None:
+    key = str(
+        api_key
+        or ""
+    ).strip()
+    if not key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Set it in Windows and restart ShortsFactory."
+        )
+
+    payload = {
+        "model": OPENAI_IMAGE_MODEL,
+        "prompt": build_openai_prompt(
+            prompt,
+            visual_type,
+        ),
+        "size": "1024x1536",
+        "quality": openai_quality_for(
+            quality
+        ),
+        "n": 1,
+    }
+
+    print(
+        (
+            "OpenAI image request: "
+            f"{OPENAI_IMAGE_MODEL}, "
+            f"{payload['size']}, "
+            f"quality={payload['quality']}"
+        ),
+        flush=True,
+    )
+
+    response = requests.post(
+        OPENAI_IMAGE_API,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=420,
+    )
+
+    if not response.ok:
+        message = ""
+        try:
+            error_payload = response.json()
+            if isinstance(
+                error_payload,
+                dict,
+            ):
+                error_data = error_payload.get(
+                    "error",
+                    {},
+                )
+                if isinstance(
+                    error_data,
+                    dict,
+                ):
+                    message = str(
+                        error_data.get(
+                            "message",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+        except Exception:
+            message = ""
+        if message:
+            raise RuntimeError(
+                f"OpenAI image generation failed: {message}"
+            )
+        response.raise_for_status()
+
+    data = response.json()
+    items = data.get(
+        "data",
+        [],
+    ) if isinstance(
+        data,
+        dict,
+    ) else []
+    if not isinstance(
+        items,
+        list,
+    ) or not items or not isinstance(
+        items[0],
+        dict,
+    ):
+        raise RuntimeError(
+            "OpenAI returned no generated image."
+        )
+
+    first = items[0]
+    encoded = str(
+        first.get(
+            "b64_json",
+            "",
+        )
+        or ""
+    ).strip()
+    image_url = str(
+        first.get(
+            "url",
+            "",
+        )
+        or ""
+    ).strip()
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    if encoded:
+        output_path.write_bytes(
+            base64.b64decode(
+                encoded
+            )
+        )
+        return
+
+    if image_url:
+        image_response = requests.get(
+            image_url,
+            timeout=120,
+        )
+        image_response.raise_for_status()
+        output_path.write_bytes(
+            image_response.content
+        )
+        return
+
+    raise RuntimeError(
+        "OpenAI returned an image response without image data."
     )
 
 
@@ -819,31 +1208,38 @@ def main() -> int:
     )
 
     provider = args.provider
-    backend = WebUIImageProvider(
-        args.api
-    )
-    backend_status = status_with_optional_launch(
-        backend,
-        autolaunch=bool(
-            args.autolaunch
-            and provider
-            in {
-                "auto",
-                "a1111",
-            }
-        ),
-        wait_seconds=180.0,
-    )
+    backend_status: dict[str, Any] = {}
 
-    if provider == "auto":
-        provider = (
-            "a1111"
-            if backend_status.get(
-                "state"
-            )
-            == "ready"
-            else "preview"
+    if provider in {
+        "auto",
+        "a1111",
+        "preview",
+    }:
+        backend = WebUIImageProvider(
+            args.api
         )
+        backend_status = status_with_optional_launch(
+            backend,
+            autolaunch=bool(
+                args.autolaunch
+                and provider
+                in {
+                    "auto",
+                    "a1111",
+                }
+            ),
+            wait_seconds=180.0,
+        )
+
+        if provider == "auto":
+            provider = (
+                "a1111"
+                if backend_status.get(
+                    "state"
+                )
+                == "ready"
+                else "preview"
+            )
 
     if provider == "a1111":
         if backend_status.get(
@@ -884,6 +1280,14 @@ def main() -> int:
             ),
             flush=True,
         )
+    elif provider == "openai":
+        print(
+            (
+                "OpenAI image generation selected. "
+                f"Model: {OPENAI_IMAGE_MODEL}."
+            ),
+            flush=True,
+        )
     elif provider == "preview":
         print(
             (
@@ -920,6 +1324,18 @@ def main() -> int:
         if not enabled_slot(
             slot
         ):
+            continue
+
+        # Each acquisition backend only touches entities assigned to it.
+        # Web-sourced entities are handled by web_image_sources.py and are
+        # always left alone here.
+        slot_source = normalized_image_source(
+            slot
+        )
+        if provider == "openai":
+            if slot_source != "CHATGPT":
+                continue
+        elif slot_source != "FORGE":
             continue
 
         enabled_count += 1
@@ -1058,6 +1474,72 @@ def main() -> int:
                     flush=True,
                 )
 
+        elif provider == "openai":
+            output_path, variant_id = variant_output_path(
+                asset_dir,
+                slot_index,
+                slot,
+                ".png",
+                force_new=force_new_variant,
+            )
+            print(
+                f"Generating ChatGPT/OpenAI visual {slot_index}: {label}",
+                flush=True,
+            )
+            try:
+                generate_openai_image(
+                    os.getenv(
+                        "OPENAI_API_KEY",
+                        "",
+                    ),
+                    prompt,
+                    visual_type,
+                    output_path,
+                    quality,
+                )
+                asset = build_asset(
+                    slot=slot,
+                    slot_index=slot_index,
+                    slot_id=slot_id,
+                    label=label,
+                    visual_type=visual_type,
+                    prompt=prompt,
+                    path=output_path,
+                    provider="openai",
+                    generated=True,
+                    state="READY",
+                    quality=quality,
+                    variant_id=variant_id,
+                )
+                ready_count += 1
+            except Exception as exc:
+                message = str(
+                    exc
+                )
+                asset = build_asset(
+                    slot=slot,
+                    slot_index=slot_index,
+                    slot_id=slot_id,
+                    label=label,
+                    visual_type=visual_type,
+                    prompt=prompt,
+                    path=None,
+                    provider="openai",
+                    generated=False,
+                    state="FAILED",
+                    quality=quality,
+                    error=message,
+                    variant_id=variant_id,
+                )
+                failed_count += 1
+                print(
+                    (
+                        f"WARNING: ChatGPT/OpenAI visual {slot_index} failed: "
+                        f"{message}"
+                    ),
+                    flush=True,
+                )
+
         elif provider == "a1111":
             output_path, variant_id = variant_output_path(
                 asset_dir,
@@ -1074,6 +1556,7 @@ def main() -> int:
                 generate_a1111(
                     args.api,
                     prompt,
+                    visual_type,
                     output_path,
                     preset,
                 )

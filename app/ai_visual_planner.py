@@ -456,7 +456,8 @@ def build_prompt(
                     "ai_recreation | object_detail | environment | "
                     "graphic_explainer | archival_style"
                 ),
-                "prompt": "specific 9:16 generation prompt",
+                "search_query": "2-8 concrete search terms for real web images",
+                "prompt": "specific AI image-generation prompt",
             }
         ]
     }
@@ -489,16 +490,29 @@ RULES:
 6. Every slot MUST stay entirely inside the selected source range.
 7. Use only timestamps that overlap transcript content shown above.
 8. Do not invent facts beyond the transcript.
-9. The generation prompt must visually describe the exact idea being discussed.
-10. Do not write generic prompts such as "cinematic scene" or "interesting visual."
-11. If the source references a real copyrighted movie/TV scene or a real person,
+9. Produce TWO different descriptions for each slot:
+   - search_query: a short literal web-image search query. Use 2-8 concrete words,
+     prioritizing nouns, proper nouns, places, objects, and visible actions. Example:
+     "vintage arcade cabinet 1980s". Do NOT include words such as cinematic,
+     photorealistic, vertical, 9:16, illustration, high quality, dramatic lighting,
+     shot, camera, composition, or other image-generation jargon.
+   - prompt: a concise AI image-generation description of what should actually be
+     visible. Lead with the concrete subject, action, and setting. One focused scene
+     is better than a long collection of style buzzwords.
+10. The AI generation prompt should usually be one or two sentences. Do not pad it
+    with generic phrases such as "cinematic scene", "highly detailed", "masterpiece",
+    "interesting visual", or repeated camera/quality adjectives.
+11. Do not put aspect-ratio instructions such as "vertical 9:16" into either field;
+    the image backend handles canvas shape separately.
+12. If the source references a real copyrighted movie/TV scene or a real person,
     do not request a deceptive photorealistic duplicate of that exact copyrighted
     frame. Use an illustrative, documentary-style, graphic, object-detail,
     environment, or clearly recreated interpretation when appropriate.
-12. The prompt should assume a vertical 9:16 image/video.
 13. Do not put captions, logos, UI, or readable text in the generated visual unless
     the concept specifically requires a graphic explainer.
-14. Return JSON only.
+14. search_query and prompt must describe the SAME core subject so switching image
+    sources does not change the editorial idea.
+15. Return JSON only.
 
 Return exactly this shape:
 
@@ -680,6 +694,24 @@ def normalize_slot(
         or ""
     ).strip()
 
+    search_query = str(
+        raw.get(
+            "search_query",
+            "",
+        )
+        or ""
+    ).strip()
+
+    # Older/simpler planner responses may omit search_query. The short label is
+    # intentionally a better web-search fallback than the generation prompt,
+    # which can contain style/composition language that search engines dislike.
+    if not search_query:
+        search_query = label
+
+    search_query = " ".join(
+        search_query.split()[:10]
+    ).strip()
+
     visual_type = str(
         raw.get(
             "visual_type",
@@ -708,6 +740,7 @@ def normalize_slot(
         "label": label[:60],
         "reason": reason,
         "visual_type": visual_type,
+        "search_query": search_query,
         "prompt": prompt,
     }
 

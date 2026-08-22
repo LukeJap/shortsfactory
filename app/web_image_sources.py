@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,7 @@ def search_openverse_images(
     query: str,
     *,
     page_size: int = 8,
+    page: int = 1,
     timeout: int = 20,
 ) -> list[dict[str, Any]]:
 
@@ -207,7 +209,24 @@ def search_openverse_images(
         OPENVERSE_API,
         params={
             "q": text,
-            "page_size": page_size,
+            # Openverse rejects anonymous requests with page_size > 20.
+            # Keep each API request inside the public anonymous limit and
+            # paginate when the editor needs a wider candidate pool.
+            "page_size": max(
+                1,
+                min(
+                    20,
+                    int(
+                        page_size
+                    ),
+                ),
+            ),
+            "page": max(
+                1,
+                int(
+                    page
+                ),
+            ),
         },
         headers={
             "User-Agent": USER_AGENT,
@@ -411,3 +430,456 @@ def download_result_image(
         else "",
         "source_type": "web_sourced",
     }
+
+# ============================================================
+# COMMAND-LINE BRIDGE FOR THE DESKTOP EDITOR
+# ============================================================
+
+WEB_IMAGE_EVENT_PREFIX = "SF_WEB_IMAGE_EVENT "
+DEFAULT_SEARCH_RESULTS = WEB_CACHE_DIR / "search_results.json"
+DEFAULT_SELECTION_RESULT = WEB_CACHE_DIR / "selected_result.json"
+COMMERCIAL_LICENSES = {
+    "cc0",
+    "pdm",
+    "by",
+    "by-sa",
+}
+
+
+def commercial_use_allowed(
+    result: dict[str, Any],
+) -> bool:
+
+    license_name = str(
+        result.get(
+            "license_name",
+            "",
+        )
+        or ""
+    ).strip().lower()
+
+    return license_name in COMMERCIAL_LICENSES
+
+
+def search_and_cache_openverse_images(
+    query: str,
+    *,
+    page_size: int = 10,
+) -> list[dict[str, Any]]:
+
+    requested_count = max(
+        1,
+        int(
+            page_size
+        ),
+    )
+
+    # Openverse's public anonymous API accepts at most 20 results per request.
+    # Pull a few small pages only when needed so license filtering still has a
+    # useful candidate pool without triggering Openverse's 401 protection.
+    api_page_size = 20
+    max_pages = 3
+    results: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for page in range(
+        1,
+        max_pages + 1,
+    ):
+        raw_results = search_openverse_images(
+            query,
+            page_size=api_page_size,
+            page=page,
+        )
+        if not raw_results:
+            break
+
+        for result in raw_results:
+            if not commercial_use_allowed(
+                result
+            ):
+                continue
+
+            source_url = str(
+                result.get(
+                    "source_url",
+                    "",
+                )
+                or ""
+            ).strip()
+            if (
+                source_url
+                and source_url in seen_urls
+            ):
+                continue
+            if source_url:
+                seen_urls.add(
+                    source_url
+                )
+
+            enriched = dict(
+                result
+            )
+            try:
+                thumb_path = cache_thumbnail(
+                    enriched
+                )
+            except Exception as exc:
+                thumb_path = None
+                enriched["thumbnail_error"] = str(
+                    exc
+                )
+
+            enriched["thumbnail_path"] = (
+                str(
+                    thumb_path
+                )
+                if thumb_path is not None
+                else ""
+            )
+            results.append(
+                enriched
+            )
+            if len(
+                results
+            ) >= requested_count:
+                return results
+
+        # If Openverse returned fewer than a full page, there is no next page.
+        if len(
+            raw_results
+        ) < api_page_size:
+            break
+
+    return results
+
+
+def write_json_file(
+    path: Path,
+    data: dict[str, Any],
+) -> None:
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    path.write_text(
+        json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def emit_web_event(
+    **payload: Any,
+) -> None:
+
+    print(
+        WEB_IMAGE_EVENT_PREFIX
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
+def parse_cli_args():
+
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="ShortsFactory openly licensed web-image helper.",
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+    )
+
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Search Openverse and cache candidate thumbnails.",
+    )
+    search_parser.add_argument(
+        "--query",
+        required=True,
+    )
+    search_parser.add_argument(
+        "--page-size",
+        type=int,
+        default=8,
+    )
+    search_parser.add_argument(
+        "--fallback-query",
+        action="append",
+        default=[],
+        help=(
+            "Optional shorter query to try if the primary search has no "
+            "commercial-use-compatible results. May be supplied more than once."
+        ),
+    )
+    search_parser.add_argument(
+        "--output",
+        default=str(
+            DEFAULT_SEARCH_RESULTS
+        ),
+    )
+
+    download_parser = subparsers.add_parser(
+        "download",
+        help="Download one result from a prior search.",
+    )
+    download_parser.add_argument(
+        "--results",
+        default=str(
+            DEFAULT_SEARCH_RESULTS
+        ),
+    )
+    download_parser.add_argument(
+        "--index",
+        type=int,
+        required=True,
+    )
+    download_parser.add_argument(
+        "--slot-id",
+        required=True,
+    )
+    download_parser.add_argument(
+        "--output",
+        default=str(
+            DEFAULT_SELECTION_RESULT
+        ),
+    )
+
+    return parser.parse_args()
+
+
+def cli_main() -> int:
+
+    args = parse_cli_args()
+
+    if args.command == "search":
+        query = str(
+            args.query
+            or ""
+        ).strip()
+        if not query:
+            print(
+                "ERROR: Web image search query is empty.",
+                flush=True,
+            )
+            return 1
+
+        page_size = max(
+            1,
+            min(
+                20,
+                int(
+                    args.page_size
+                ),
+            ),
+        )
+
+        candidate_queries: list[str] = []
+        for candidate in [
+            query,
+            *list(
+                args.fallback_query
+                or []
+            ),
+        ]:
+            normalized = " ".join(
+                str(
+                    candidate
+                    or ""
+                ).split()
+            ).strip()
+            if (
+                normalized
+                and normalized.casefold() not in {
+                    item.casefold()
+                    for item in candidate_queries
+                }
+            ):
+                candidate_queries.append(
+                    normalized
+                )
+
+        results: list[dict[str, Any]] = []
+        query_used = query
+        queries_tried: list[str] = []
+        try:
+            for candidate in candidate_queries:
+                queries_tried.append(
+                    candidate
+                )
+                print(
+                    f"Openverse query: {candidate}",
+                    flush=True,
+                )
+                results = search_and_cache_openverse_images(
+                    candidate,
+                    page_size=page_size,
+                )
+                if results:
+                    query_used = candidate
+                    break
+        except Exception as exc:
+            print(
+                f"ERROR: Web image search failed: {exc}",
+                flush=True,
+            )
+            return 1
+
+        output_path = Path(
+            args.output
+        ).resolve()
+        write_json_file(
+            output_path,
+            {
+                "provider": "openverse",
+                "query": query_used,
+                "requested_query": query,
+                "queries_tried": queries_tried,
+                "commercial_use_filter": True,
+                "result_count": len(
+                    results
+                ),
+                "results": results,
+            },
+        )
+        emit_web_event(
+            operation="search",
+            state="READY",
+            result_count=len(
+                results
+            ),
+            output=str(
+                output_path
+            ),
+        )
+        print(
+            (
+                f"Web image search ready: {len(results)} commercially usable "
+                "Openverse result(s)."
+            ),
+            flush=True,
+        )
+        return 0
+
+    if args.command == "download":
+        results_path = Path(
+            args.results
+        ).resolve()
+        try:
+            data = json.loads(
+                results_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ) as exc:
+            print(
+                f"ERROR: Could not read web image results: {exc}",
+                flush=True,
+            )
+            return 1
+
+        results = data.get(
+            "results",
+            [],
+        )
+        if not isinstance(
+            results,
+            list,
+        ):
+            results = []
+
+        index = int(
+            args.index
+        )
+        if not (
+            0
+            <= index
+            < len(
+                results
+            )
+        ):
+            print(
+                "ERROR: Selected web image result is no longer available.",
+                flush=True,
+            )
+            return 1
+
+        result = results[index]
+        if not isinstance(
+            result,
+            dict,
+        ):
+            print(
+                "ERROR: Selected web image result is invalid.",
+                flush=True,
+            )
+            return 1
+
+        try:
+            selected = download_result_image(
+                result,
+                slot_id=str(
+                    args.slot_id
+                ),
+            )
+        except Exception as exc:
+            print(
+                f"ERROR: Could not download selected web image: {exc}",
+                flush=True,
+            )
+            return 1
+
+        output_path = Path(
+            args.output
+        ).resolve()
+        write_json_file(
+            output_path,
+            {
+                "provider": "openverse",
+                "slot_id": str(
+                    args.slot_id
+                ),
+                "selected_index": index,
+                "result": selected,
+            },
+        )
+        emit_web_event(
+            operation="download",
+            state="READY",
+            slot_id=str(
+                args.slot_id
+            ),
+            path=selected.get(
+                "local_path",
+                "",
+            ),
+            output=str(
+                output_path
+            ),
+        )
+        print(
+            "Selected web image downloaded.",
+            flush=True,
+        )
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        cli_main()
+    )

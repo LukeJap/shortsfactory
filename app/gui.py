@@ -13,6 +13,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -4283,7 +4284,7 @@ class DropZone(QFrame):
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Choose Video",
-            str(ROOT),
+            str(ROOT / "input"),
             (
                 "Video Files "
                 "(*.mp4 *.mov *.mkv *.avi *.webm *.m4v)"
@@ -4351,7 +4352,7 @@ class ShortsFactoryWindow(QMainWindow):
 
         self.start_ms = 0
         self.end_ms = 0
-        
+
         self.render_process = QProcess(self)
 
         self.render_process.setWorkingDirectory(
@@ -4492,6 +4493,44 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_asset_finished
         )
 
+        # Openly licensed web-image search/download runs out-of-process so
+        # network activity never freezes the editor. The selected image is
+        # imported back into the same persistent visual entity.
+        self.web_image_process = QProcess(self)
+        self.web_image_process.setWorkingDirectory(
+            str(ROOT)
+        )
+        self.web_image_process.setProcessEnvironment(
+            process_env
+        )
+        self.web_image_process.readyReadStandardOutput.connect(
+            self.read_web_image_output
+        )
+        self.web_image_process.readyReadStandardError.connect(
+            self.read_web_image_error
+        )
+        self.web_image_process.finished.connect(
+            self.web_image_finished
+        )
+        self.web_image_operation = ""
+        self.web_image_target_slot_id = ""
+        self.web_image_output_buffer = ""
+        self.web_image_search_results: list[dict] = []
+        self.web_image_results_path = (
+            ROOT
+            / "output"
+            / "ai_visual_assets"
+            / "web"
+            / "search_results.json"
+        )
+        self.web_image_selection_path = (
+            ROOT
+            / "output"
+            / "ai_visual_assets"
+            / "web"
+            / "selected_result.json"
+        )
+
         self.image_status_process = QProcess(self)
 
         self.image_status_process.setWorkingDirectory(
@@ -4578,6 +4617,7 @@ class ShortsFactoryWindow(QMainWindow):
         self.updating_image_model_combo = False
         self.image_quality = "BALANCED"
         self.visual_asset_output_buffer = ""
+        self.visual_asset_provider = "auto"
         self.selected_visual_slot_index: int | None = None
         self.updating_visual_inspector = False
         self.user_visual_edits = False
@@ -4686,6 +4726,20 @@ class ShortsFactoryWindow(QMainWindow):
             self.update_render_progress
         )
 
+        # Always-on footer activity polling. Render progress remains
+        # determinate; every other QProcess-backed generation task is shown
+        # as an indeterminate busy bar so the user never has to scroll to see
+        # whether ShortsFactory is still working.
+        self.global_progress_timer = QTimer(
+            self
+        )
+        self.global_progress_timer.setInterval(
+            250
+        )
+        self.global_progress_timer.timeout.connect(
+            self.update_global_progress
+        )
+
         self.setWindowTitle(
             "ShortsFactory"
         )
@@ -4753,6 +4807,8 @@ class ShortsFactoryWindow(QMainWindow):
         self.update_image_ai_indicator()
         self.load_selected_visual_into_inspector()
         self.load_editor_asset_plan_state()
+        self.global_progress_timer.start()
+        self.update_global_progress()
         # image_backend_status.py already owns the Forge launch lock. Start
         # the asynchronous status/autolaunch probe only after the Qt event
         # loop begins so ShortsFactory never blocks while Forge boots.
@@ -5360,16 +5416,8 @@ class ShortsFactoryWindow(QMainWindow):
         log_title = QLabel("RENDER STATUS")
         log_title.setObjectName("SectionTitle")
 
-        self.render_progress_time_label = QLabel("Idle")
-        self.render_progress_time_label.setObjectName("RenderProgressTime")
-        self.render_progress_time_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight
-            | Qt.AlignmentFlag.AlignVCenter
-        )
-
         log_header.addWidget(log_title)
         log_header.addStretch()
-        log_header.addWidget(self.render_progress_time_label)
 
         self.render_log = QTextEdit()
         self.render_log.setReadOnly(True)
@@ -5380,26 +5428,8 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.render_log.setPlaceholderText("Render progress will appear here...")
 
-        progress_row = QHBoxLayout()
-        progress_row.setSpacing(10)
-
-        self.render_progress_stage_label = QLabel("WAITING")
-        self.render_progress_stage_label.setObjectName("RenderProgressStage")
-        self.render_progress_stage_label.setMinimumWidth(120)
-
-        self.render_progress_bar = QProgressBar()
-        self.render_progress_bar.setObjectName("RenderProgressBar")
-        self.render_progress_bar.setRange(0, 100)
-        self.render_progress_bar.setValue(0)
-        self.render_progress_bar.setTextVisible(False)
-        self.render_progress_bar.setMinimumHeight(16)
-
-        progress_row.addWidget(self.render_progress_stage_label)
-        progress_row.addWidget(self.render_progress_bar, 1)
-
         log_layout.addLayout(log_header)
         log_layout.addWidget(self.render_log, 1)
-        log_layout.addLayout(progress_row)
 
         center_column.addWidget(
             center_editor_stack,
@@ -5710,6 +5740,29 @@ class ShortsFactoryWindow(QMainWindow):
             "CompactLineEdit"
         )
 
+        # Image acquisition is separate from the visual entity itself.
+        # Every entity keeps its timing/transform/asset while this preference
+        # decides which backend should supply its next image.
+        self.visual_image_source_combo = QComboBox()
+        self.visual_image_source_combo.setObjectName(
+            "CompactCombo"
+        )
+        self.visual_image_source_combo.addItem(
+            "FORGE · LOCAL AI",
+            "FORGE",
+        )
+        self.visual_image_source_combo.addItem(
+            "WEB IMAGE SEARCH",
+            "WEB",
+        )
+        self.visual_image_source_combo.addItem(
+            "CHATGPT IMAGE",
+            "CHATGPT",
+        )
+        self.visual_image_source_combo.setToolTip(
+            "Choose where the selected visual entity should get its next image."
+        )
+
         self.visual_display_mode_combo = QComboBox()
         self.visual_display_mode_combo.setObjectName(
             "CompactCombo"
@@ -5795,6 +5848,9 @@ class ShortsFactoryWindow(QMainWindow):
         self.visual_type_edit.editingFinished.connect(
             self.visual_inspector_fields_changed
         )
+        self.visual_image_source_combo.currentIndexChanged.connect(
+            self.visual_inspector_fields_changed
+        )
         self.visual_display_mode_combo.currentTextChanged.connect(
             self.visual_inspector_fields_changed
         )
@@ -5853,66 +5909,78 @@ class ShortsFactoryWindow(QMainWindow):
             3,
         )
         inspector_grid.addWidget(
-            QLabel("Mode"),
+            QLabel("Source"),
             3,
             0,
         )
         inspector_grid.addWidget(
-            self.visual_display_mode_combo,
+            self.visual_image_source_combo,
             3,
+            1,
+            1,
+            3,
+        )
+        inspector_grid.addWidget(
+            QLabel("Mode"),
+            4,
+            0,
+        )
+        inspector_grid.addWidget(
+            self.visual_display_mode_combo,
+            4,
             1,
             1,
             3,
         )
         inspector_grid.addWidget(
             QLabel("Scale"),
-            4,
+            5,
             0,
         )
         inspector_grid.addWidget(
             self.visual_scale_slider,
-            4,
+            5,
             1,
             1,
             2,
         )
         inspector_grid.addWidget(
             self.visual_scale_label,
-            4,
+            5,
             3,
         )
         inspector_grid.addWidget(
             QLabel("X"),
-            5,
+            6,
             0,
         )
         inspector_grid.addWidget(
             self.visual_x_slider,
-            5,
+            6,
             1,
             1,
             2,
         )
         inspector_grid.addWidget(
             self.visual_x_label,
-            5,
+            6,
             3,
         )
         inspector_grid.addWidget(
             QLabel("Y"),
-            6,
+            7,
             0,
         )
         inspector_grid.addWidget(
             self.visual_y_slider,
-            6,
+            7,
             1,
             1,
             2,
         )
         inspector_grid.addWidget(
             self.visual_y_label,
-            6,
+            7,
             3,
         )
 
@@ -6159,6 +6227,93 @@ class ShortsFactoryWindow(QMainWindow):
         workspace.setSizes([280, 760, 440])
 
         main_layout.addWidget(workspace, 1)
+
+        # ----------------------------------------------------
+        # PINNED GLOBAL ACTIVITY / PROGRESS STRIP
+        # ----------------------------------------------------
+        # This lives outside every scroll area and splitter, so it remains
+        # visible at the bottom of the application at all times.
+        self.global_progress_frame = QFrame()
+        self.global_progress_frame.setObjectName(
+            "GlobalProgressPanel"
+        )
+        self.global_progress_frame.setMinimumHeight(
+            42
+        )
+        self.global_progress_frame.setMaximumHeight(
+            48
+        )
+
+        global_progress_layout = QHBoxLayout(
+            self.global_progress_frame
+        )
+        global_progress_layout.setContentsMargins(
+            12,
+            7,
+            12,
+            7,
+        )
+        global_progress_layout.setSpacing(
+            10
+        )
+
+        self.render_progress_stage_label = QLabel(
+            "READY"
+        )
+        self.render_progress_stage_label.setObjectName(
+            "RenderProgressStage"
+        )
+        self.render_progress_stage_label.setMinimumWidth(
+            150
+        )
+
+        self.render_progress_bar = QProgressBar()
+        self.render_progress_bar.setObjectName(
+            "RenderProgressBar"
+        )
+        self.render_progress_bar.setRange(
+            0,
+            100,
+        )
+        self.render_progress_bar.setValue(
+            0
+        )
+        self.render_progress_bar.setTextVisible(
+            False
+        )
+        self.render_progress_bar.setMinimumHeight(
+            16
+        )
+
+        self.render_progress_time_label = QLabel(
+            "Idle"
+        )
+        self.render_progress_time_label.setObjectName(
+            "RenderProgressTime"
+        )
+        self.render_progress_time_label.setMinimumWidth(
+            170
+        )
+        self.render_progress_time_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight
+            | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        global_progress_layout.addWidget(
+            self.render_progress_stage_label
+        )
+        global_progress_layout.addWidget(
+            self.render_progress_bar,
+            1,
+        )
+        global_progress_layout.addWidget(
+            self.render_progress_time_label
+        )
+
+        main_layout.addWidget(
+            self.global_progress_frame,
+            0,
+        )
 
     def load_video(
         self,
@@ -8379,6 +8534,15 @@ class ShortsFactoryWindow(QMainWindow):
                 "position_y",
                 0.0,
             )
+            slot["image_source"] = self.normalize_visual_image_source(
+                slot.get(
+                    "image_source",
+                    slot.get(
+                        "provider",
+                        "FORGE",
+                    ),
+                )
+            )
 
             try:
                 start = float(
@@ -8717,6 +8881,15 @@ class ShortsFactoryWindow(QMainWindow):
                 3,
             ),
             "source_type": str(slot.get("source_type", "ai_generated") or "ai_generated"),
+            "image_source": self.normalize_visual_image_source(
+                slot.get(
+                    "image_source",
+                    slot.get(
+                        "provider",
+                        "FORGE",
+                    ),
+                )
+            ),
             "slot_id": str(slot.get("slot_id", "") or ""),
             "variant_id": str(slot.get("active_variant_id", "") or ""),
             "active": bool(slot.get("enabled", True)),
@@ -8758,6 +8931,13 @@ class ShortsFactoryWindow(QMainWindow):
                 slot["active_variant_id"] = str(clip["variant_id"])
             if clip.get("display_mode"):
                 slot["display_mode"] = str(clip["display_mode"])
+            if clip.get("image_source") is not None:
+                slot["image_source"] = self.normalize_visual_image_source(
+                    clip.get(
+                        "image_source",
+                        "FORGE",
+                    )
+                )
             if clip.get("scale") is not None:
                 try:
                     slot["scale"] = float(clip["scale"])
@@ -9978,6 +10158,7 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_start_edit,
             self.visual_end_edit,
             self.visual_type_edit,
+            self.visual_image_source_combo,
             self.visual_display_mode_combo,
             self.visual_prompt_edit,
             self.generate_more_visual_button,
@@ -9998,11 +10179,85 @@ class ShortsFactoryWindow(QMainWindow):
             enabled
         )
 
+        slot = self.selected_visual_slot()
+        image_source = self.normalize_visual_image_source(
+            slot.get(
+                "image_source",
+                slot.get(
+                    "provider",
+                    "FORGE",
+                ),
+            )
+            if slot
+            else "FORGE"
+        )
+        source_available = (
+            image_source == "WEB"
+            or (
+                image_source == "FORGE"
+                and self.image_ai_state == "ready"
+            )
+        )
         self.regenerate_visual_button.setEnabled(
             enabled
-            and self.image_ai_state == "ready"
+            and source_available
             and self.visual_asset_process.state()
             == QProcess.ProcessState.NotRunning
+            and self.web_image_process.state()
+            == QProcess.ProcessState.NotRunning
+        )
+
+
+    def normalize_visual_image_source(
+        self,
+        value,
+    ) -> str:
+
+        normalized = str(
+            value or ""
+        ).strip().upper().replace(
+            "-",
+            "_",
+        ).replace(
+            " ",
+            "_",
+        )
+
+        if normalized in {
+            "WEB",
+            "WEB_SEARCH",
+            "WEB_SOURCED",
+            "OPENVERSE",
+            "WIKIMEDIA",
+        }:
+            return "WEB"
+
+        if normalized in {
+            "CHATGPT",
+            "OPENAI",
+            "OPENAI_IMAGE",
+        }:
+            return "CHATGPT"
+
+        return "FORGE"
+
+
+    def set_visual_image_source_combo(
+        self,
+        value,
+    ):
+
+        source = self.normalize_visual_image_source(
+            value
+        )
+        index = self.visual_image_source_combo.findData(
+            source
+        )
+        self.visual_image_source_combo.setCurrentIndex(
+            max(
+                0,
+                index,
+            )
         )
 
 
@@ -10397,6 +10652,220 @@ class ShortsFactoryWindow(QMainWindow):
         if source_slot is None:
             return
 
+        image_source = self.normalize_visual_image_source(
+            source_slot.get(
+                "image_source",
+                source_slot.get(
+                    "provider",
+                    "FORGE",
+                ),
+            )
+        )
+        if image_source == "WEB":
+            self.visual_inspector_fields_changed()
+            source_slot = self.selected_visual_slot()
+            if source_slot is None:
+                return
+
+            existing_ids = {
+                str(
+                    slot.get(
+                        "slot_id",
+                        "",
+                    )
+                    or ""
+                )
+                for slot in self.visual_plan_slots
+                if isinstance(
+                    slot,
+                    dict,
+                )
+            }
+            base_id = str(
+                source_slot.get(
+                    "slot_id",
+                    "visual",
+                )
+                or "visual"
+            )
+            entity_id = self.unique_visual_entity_id(
+                f"{base_id}__web",
+                existing_ids,
+            )
+            entity = self.clone_visual_slot(
+                source_slot
+            )
+            entity["slot_id"] = entity_id
+            entity["label"] = (
+                str(
+                    source_slot.get(
+                        "label",
+                        "AI Visual",
+                    )
+                    or "AI Visual"
+                )
+                + " WEB"
+            )
+            entity["image_source"] = "WEB"
+            entity["asset_path"] = ""
+            entity["variants"] = []
+            entity["active_variant_id"] = ""
+            entity["state"] = "PLANNED"
+            entity["generated"] = False
+            entity["provider"] = ""
+            entity.pop(
+                "web_source",
+                None,
+            )
+            entity.pop(
+                "error",
+                None,
+            )
+            entity.pop(
+                "saved_variant",
+                None,
+            )
+            entity["user_modified"] = True
+            entity = self.place_new_visual_entity(
+                entity,
+                [
+                    slot
+                    for slot in self.visual_plan_slots
+                    if isinstance(
+                        slot,
+                        dict,
+                    )
+                ],
+            )
+            insert_index = (
+                self.selected_visual_slot_index + 1
+                if self.selected_visual_slot_index is not None
+                else len(
+                    self.visual_plan_slots
+                )
+            )
+            self.visual_plan_slots.insert(
+                insert_index,
+                entity,
+            )
+            self.selected_visual_slot_index = insert_index
+            self.user_visual_edits = True
+            self.save_ai_visual_plan()
+            self.sync_visual_slots_to_editor_asset_plan(
+                preserve_manual=True
+            )
+            self.refresh_visual_plan_display()
+            self.load_selected_visual_into_inspector()
+            self.start_web_image_search(
+                entity
+            )
+            return
+
+        if image_source == "CHATGPT":
+            self.visual_inspector_fields_changed()
+            source_slot = self.selected_visual_slot()
+            if source_slot is None:
+                return
+
+            existing_ids = {
+                str(
+                    slot.get(
+                        "slot_id",
+                        "",
+                    )
+                    or ""
+                )
+                for slot in self.visual_plan_slots
+                if isinstance(
+                    slot,
+                    dict,
+                )
+            }
+            base_id = str(
+                source_slot.get(
+                    "slot_id",
+                    "visual",
+                )
+                or "visual"
+            )
+            entity_id = self.unique_visual_entity_id(
+                f"{base_id}__chatgpt",
+                existing_ids,
+            )
+            entity = self.clone_visual_slot(
+                source_slot
+            )
+            entity["slot_id"] = entity_id
+            entity["label"] = (
+                str(
+                    source_slot.get(
+                        "label",
+                        "AI Visual",
+                    )
+                    or "AI Visual"
+                )
+                + " GPT"
+            )
+            entity["image_source"] = "CHATGPT"
+            entity["asset_path"] = ""
+            entity["variants"] = []
+            entity["active_variant_id"] = ""
+            entity["state"] = "PLANNED"
+            entity["generated"] = False
+            entity["provider"] = ""
+            entity.pop(
+                "web_source",
+                None,
+            )
+            entity.pop(
+                "error",
+                None,
+            )
+            entity.pop(
+                "saved_variant",
+                None,
+            )
+            entity["user_modified"] = True
+            entity = self.place_new_visual_entity(
+                entity,
+                [
+                    slot
+                    for slot in self.visual_plan_slots
+                    if isinstance(
+                        slot,
+                        dict,
+                    )
+                ],
+            )
+            insert_index = (
+                self.selected_visual_slot_index + 1
+                if self.selected_visual_slot_index is not None
+                else len(
+                    self.visual_plan_slots
+                )
+            )
+            self.visual_plan_slots.insert(
+                insert_index,
+                entity,
+            )
+            self.selected_visual_slot_index = insert_index
+            self.user_visual_edits = True
+            self.save_ai_visual_plan()
+            self.sync_visual_slots_to_editor_asset_plan(
+                preserve_manual=True
+            )
+            self.refresh_visual_plan_display()
+            self.load_selected_visual_into_inspector()
+            self.visual_status_label.setText(
+                "Created a new independent ChatGPT image entity. Generating..."
+            )
+            self.start_visual_asset_generation(
+                entity_id,
+                new_variant=False,
+                provider="openai",
+            )
+            return
+
         if self.image_ai_state != "ready":
             self.visual_status_label.setText(
                 "Image AI is offline. Existing image entities are unchanged."
@@ -10565,6 +11034,9 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_start_edit.setText("")
             self.visual_end_edit.setText("")
             self.visual_type_edit.setText("")
+            self.set_visual_image_source_combo(
+                "FORGE"
+            )
             self.visual_display_mode_combo.setCurrentText(
                 "OVERLAY_CARD"
             )
@@ -10632,6 +11104,15 @@ class ShortsFactoryWindow(QMainWindow):
                 or ""
             )
         )
+        self.set_visual_image_source_combo(
+            slot.get(
+                "image_source",
+                slot.get(
+                    "provider",
+                    "FORGE",
+                ),
+            )
+        )
         self.visual_display_mode_combo.setCurrentText(
             self.normalize_visual_display_mode(
                 slot.get(
@@ -10697,17 +11178,71 @@ class ShortsFactoryWindow(QMainWindow):
             )
         )
 
-        self.visual_reason_label.setText(
-            (
-                "Why AI suggested this: "
-                + str(
+        reason_text = (
+            "Why AI suggested this: "
+            + str(
+                slot.get(
+                    "reason",
+                    "",
+                )
+                or "No reason was recorded."
+            )
+        )
+        web_source = slot.get(
+            "web_source",
+            {},
+        )
+        if (
+            self.normalize_visual_image_source(
+                slot.get(
+                    "image_source",
                     slot.get(
-                        "reason",
-                        "",
-                    )
-                    or "No reason was recorded."
+                        "provider",
+                        "FORGE",
+                    ),
                 )
             )
+            == "WEB"
+            and isinstance(
+                web_source,
+                dict,
+            )
+            and web_source
+        ):
+            source_title = str(
+                web_source.get(
+                    "title",
+                    "Web image",
+                )
+                or "Web image"
+            )
+            source_creator = str(
+                web_source.get(
+                    "creator",
+                    "",
+                )
+                or ""
+            )
+            source_license = str(
+                web_source.get(
+                    "license",
+                    "Unknown license",
+                )
+                or "Unknown license"
+            )
+            reason_text += (
+                "\nWeb source: "
+                + source_title
+                + (
+                    f" · {source_creator}"
+                    if source_creator
+                    else ""
+                )
+                + f" · {source_license}"
+            )
+
+        self.visual_reason_label.setText(
+            reason_text
         )
         self.visual_prompt_edit.setPlainText(
             str(
@@ -10862,6 +11397,9 @@ class ShortsFactoryWindow(QMainWindow):
             self.visual_type_edit.text().strip()
             or "ai_recreation"
         )
+        slot["image_source"] = self.normalize_visual_image_source(
+            self.visual_image_source_combo.currentData()
+        )
         slot["display_mode"] = (
             self.normalize_visual_display_mode(
                 self.visual_display_mode_combo.currentText()
@@ -10970,6 +11508,8 @@ class ShortsFactoryWindow(QMainWindow):
         running = (
             self.visual_asset_process.state()
             != QProcess.ProcessState.NotRunning
+            or self.web_image_process.state()
+            != QProcess.ProcessState.NotRunning
         )
         selected = slot is not None
         enabled = bool(
@@ -10979,16 +11519,62 @@ class ShortsFactoryWindow(QMainWindow):
             )
         ) if slot else False
 
+        image_source = self.normalize_visual_image_source(
+            slot.get(
+                "image_source",
+                slot.get(
+                    "provider",
+                    "FORGE",
+                ),
+            )
+            if slot
+            else "FORGE"
+        )
+        forge_available = (
+            image_source == "FORGE"
+            and self.image_ai_state == "ready"
+        )
+
+        if image_source == "WEB":
+            self.regenerate_visual_button.setText(
+                "SEARCH WEB"
+            )
+            self.generate_more_visual_button.setText(
+                "FIND ANOTHER"
+            )
+        elif image_source == "CHATGPT":
+            self.regenerate_visual_button.setText(
+                "GENERATE CHATGPT"
+            )
+            self.generate_more_visual_button.setText(
+                "NEW CHATGPT IMAGE"
+            )
+        else:
+            self.regenerate_visual_button.setText(
+                "REGENERATE"
+            )
+            self.generate_more_visual_button.setText(
+                "GENERATE NEW IMAGE"
+            )
+
+        source_available = (
+            forge_available
+            or image_source in {
+                "WEB",
+                "CHATGPT",
+            }
+        )
+
         self.regenerate_visual_button.setEnabled(
             selected
             and enabled
-            and self.image_ai_state == "ready"
+            and source_available
             and not running
         )
         self.generate_more_visual_button.setEnabled(
             selected
             and enabled
-            and self.image_ai_state == "ready"
+            and source_available
             and not running
         )
         self.disable_visual_button.setEnabled(
@@ -11241,6 +11827,7 @@ class ShortsFactoryWindow(QMainWindow):
         self,
         slot_id: str = "",
         new_variant: bool = False,
+        provider: str = "auto",
     ):
 
         if not self.visual_plan_slots:
@@ -11273,6 +11860,10 @@ class ShortsFactoryWindow(QMainWindow):
         self.save_ai_visual_plan()
 
         self.visual_asset_output_buffer = ""
+        self.visual_asset_provider = str(
+            provider
+            or "auto"
+        ).strip().lower()
         self.generate_visual_assets_button.setEnabled(
             False
         )
@@ -11283,7 +11874,11 @@ class ShortsFactoryWindow(QMainWindow):
             False
         )
         self.visual_status_label.setText(
-            "Generating visual assets..."
+            (
+                "Generating ChatGPT image..."
+                if self.visual_asset_provider == "openai"
+                else "Generating visual assets..."
+            )
         )
         self.update_visual_inspector_buttons()
 
@@ -11309,7 +11904,7 @@ class ShortsFactoryWindow(QMainWindow):
                 / "ai_visual_assets"
             ),
             "--provider",
-            "auto",
+            self.visual_asset_provider,
             "--quality",
             self.image_quality,
         ]
@@ -11343,10 +11938,964 @@ class ShortsFactoryWindow(QMainWindow):
         self.update_visual_inspector_buttons()
 
 
+    def web_image_slot_by_id(
+        self,
+        slot_id: str,
+    ) -> tuple[int | None, dict | None]:
+
+        normalized = str(
+            slot_id
+            or ""
+        )
+        for index, slot in enumerate(
+            self.visual_plan_slots
+        ):
+            if not isinstance(
+                slot,
+                dict,
+            ):
+                continue
+            if str(
+                slot.get(
+                    "slot_id",
+                    "",
+                )
+                or ""
+            ) == normalized:
+                return index, slot
+
+        return None, None
+
+
+    def start_web_image_search(
+        self,
+        slot: dict,
+    ):
+
+        if (
+            self.web_image_process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            return
+
+        script = (
+            ROOT
+            / "app"
+            / "web_image_sources.py"
+        )
+        if not script.exists():
+            self.visual_status_label.setText(
+                "web_image_sources.py is not installed."
+            )
+            return
+
+        search_query = str(
+            slot.get(
+                "search_query",
+                "",
+            )
+            or ""
+        ).strip()
+        label = str(
+            slot.get(
+                "label",
+                "",
+            )
+            or ""
+        ).strip()
+        generation_prompt = str(
+            slot.get(
+                "prompt",
+                "",
+            )
+            or ""
+        ).strip()
+
+        # Web search needs literal search terms, not the long AI-generation
+        # description. New visual plans provide search_query explicitly; older
+        # plans intentionally fall back to the short visual label first.
+        query = search_query or label or generation_prompt
+        if not query:
+            self.visual_status_label.setText(
+                "Enter a visual subject before searching the web."
+            )
+            return
+
+        fallback_queries = []
+        if (
+            label
+            and label.casefold() != query.casefold()
+        ):
+            fallback_queries.append(
+                label
+            )
+
+        if not search_query and label:
+            slot["search_query"] = label
+            self.save_ai_visual_plan()
+
+        slot_id = str(
+            slot.get(
+                "slot_id",
+                "",
+            )
+            or ""
+        )
+        if not slot_id:
+            self.visual_status_label.setText(
+                "Selected visual entity has no stable ID."
+            )
+            return
+
+        # Do not alter the currently selected image while search is running.
+        # The visual entity changes only after the user explicitly chooses a
+        # candidate from the result gallery.
+        self.web_image_operation = "search"
+        self.web_image_target_slot_id = slot_id
+        self.web_image_output_buffer = ""
+        self.web_image_search_results = []
+        try:
+            if self.web_image_results_path.exists():
+                self.web_image_results_path.unlink()
+        except OSError:
+            pass
+
+        self.visual_status_label.setText(
+            "Searching openly licensed web images..."
+        )
+        self.render_log.append(
+            ""
+        )
+        self.render_log.append(
+            "=== WEB IMAGE SEARCH ==="
+        )
+        self.render_log.append(
+            f"Query: {query}"
+        )
+        if fallback_queries:
+            self.render_log.append(
+                "Fallback query: "
+                + " | ".join(
+                    fallback_queries
+                )
+            )
+        self.update_visual_inspector_buttons()
+
+        args = [
+            str(
+                script
+            ),
+            "search",
+            "--query",
+            query,
+            "--page-size",
+            "8",
+            "--output",
+            str(
+                self.web_image_results_path
+            ),
+        ]
+        for fallback_query in fallback_queries:
+            args.extend(
+                [
+                    "--fallback-query",
+                    fallback_query,
+                ]
+            )
+
+        self.web_image_process.start(
+            sys.executable,
+            args,
+        )
+
+
+    def start_web_image_download(
+        self,
+        slot_id: str,
+        result_index: int,
+    ):
+
+        if (
+            self.web_image_process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            return
+
+        script = (
+            ROOT
+            / "app"
+            / "web_image_sources.py"
+        )
+        if not script.exists():
+            self.visual_status_label.setText(
+                "web_image_sources.py is not installed."
+            )
+            return
+
+        self.web_image_operation = "download"
+        self.web_image_target_slot_id = str(
+            slot_id
+            or ""
+        )
+        self.web_image_output_buffer = ""
+        try:
+            if self.web_image_selection_path.exists():
+                self.web_image_selection_path.unlink()
+        except OSError:
+            pass
+
+        self.visual_status_label.setText(
+            "Downloading selected web image..."
+        )
+        self.update_visual_inspector_buttons()
+
+        self.web_image_process.start(
+            sys.executable,
+            [
+                str(
+                    script
+                ),
+                "download",
+                "--results",
+                str(
+                    self.web_image_results_path
+                ),
+                "--index",
+                str(
+                    int(
+                        result_index
+                    )
+                ),
+                "--slot-id",
+                self.web_image_target_slot_id,
+                "--output",
+                str(
+                    self.web_image_selection_path
+                ),
+            ],
+        )
+
+
+    def read_web_image_output(self):
+
+        data = (
+            self.web_image_process
+            .readAllStandardOutput()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        if not data:
+            return
+
+        self.web_image_output_buffer += data
+        visible_lines = [
+            line
+            for line in data.splitlines()
+            if not line.strip().startswith(
+                "SF_WEB_IMAGE_EVENT "
+            )
+        ]
+        if visible_lines:
+            self.render_log.append(
+                "\n".join(
+                    visible_lines
+                )
+            )
+
+
+    def read_web_image_error(self):
+
+        data = (
+            self.web_image_process
+            .readAllStandardError()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        if data:
+            self.web_image_output_buffer += data
+            self.render_log.append(
+                data.strip()
+            )
+
+
+    def show_web_image_results_dialog(
+        self,
+        slot_id: str,
+        query: str,
+    ):
+
+        results = self.web_image_search_results
+        if not results:
+            self.visual_status_label.setText(
+                "No commercially usable Openverse images matched these search terms."
+            )
+            return
+
+        dialog = QDialog(
+            self
+        )
+        dialog.setWindowTitle(
+            "Choose Web Image"
+        )
+        dialog.setMinimumSize(
+            660,
+            540,
+        )
+
+        layout = QVBoxLayout(
+            dialog
+        )
+        layout.setContentsMargins(
+            14,
+            14,
+            14,
+            14,
+        )
+        layout.setSpacing(
+            10
+        )
+
+        heading = QLabel(
+            "OPENLY LICENSED IMAGE RESULTS"
+        )
+        heading.setObjectName(
+            "SectionTitle"
+        )
+        query_label = QLabel(
+            f"Search: {query}"
+        )
+        query_label.setWordWrap(
+            True
+        )
+        license_hint = QLabel(
+            "Results are filtered to licenses compatible with commercial use. "
+            "CC BY / BY-SA images may require attribution; source and license "
+            "metadata are saved with the visual entity."
+        )
+        license_hint.setObjectName(
+            "HintLabel"
+        )
+        license_hint.setWordWrap(
+            True
+        )
+
+        result_list = QListWidget()
+        result_list.setObjectName(
+            "TranscriptList"
+        )
+
+        for index, result in enumerate(
+            results
+        ):
+            item = QListWidgetItem()
+            item.setData(
+                Qt.ItemDataRole.UserRole,
+                index,
+            )
+            item.setSizeHint(
+                QSize(
+                    560,
+                    94,
+                )
+            )
+            result_list.addItem(
+                item
+            )
+
+            row = QWidget()
+            row_layout = QHBoxLayout(
+                row
+            )
+            row_layout.setContentsMargins(
+                6,
+                5,
+                6,
+                5,
+            )
+            row_layout.setSpacing(
+                10
+            )
+
+            thumb = QLabel(
+                "NO\nTHUMB"
+            )
+            thumb.setAlignment(
+                Qt.AlignmentFlag.AlignCenter
+            )
+            thumb.setFixedSize(
+                70,
+                78,
+            )
+            thumbnail_path = Path(
+                str(
+                    result.get(
+                        "thumbnail_path",
+                        "",
+                    )
+                    or ""
+                )
+            )
+            if thumbnail_path.exists():
+                pixmap = QPixmap(
+                    str(
+                        thumbnail_path
+                    )
+                )
+                if not pixmap.isNull():
+                    thumb.setText(
+                        ""
+                    )
+                    thumb.setPixmap(
+                        pixmap.scaled(
+                            thumb.size(),
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+
+            title = str(
+                result.get(
+                    "title",
+                    "Untitled image",
+                )
+                or "Untitled image"
+            )
+            creator = str(
+                result.get(
+                    "creator",
+                    "",
+                )
+                or "Unknown creator"
+            )
+            license_name = str(
+                result.get(
+                    "license",
+                    "",
+                )
+                or "Unknown license"
+            )
+            source_name = str(
+                result.get(
+                    "provider_source",
+                    "openverse",
+                )
+                or "openverse"
+            )
+            details = QLabel(
+                f"{title}\n{creator}  •  {license_name}  •  {source_name}"
+            )
+            details.setWordWrap(
+                True
+            )
+
+            row_layout.addWidget(
+                thumb
+            )
+            row_layout.addWidget(
+                details,
+                1,
+            )
+            result_list.setItemWidget(
+                item,
+                row,
+            )
+
+        if result_list.count() > 0:
+            result_list.setCurrentRow(
+                0
+            )
+
+        action_row = QHBoxLayout()
+        open_source_button = QPushButton(
+            "OPEN SOURCE PAGE"
+        )
+        open_source_button.setObjectName(
+            "QuietButton"
+        )
+        cancel_button = QPushButton(
+            "CANCEL"
+        )
+        cancel_button.setObjectName(
+            "QuietButton"
+        )
+        use_button = QPushButton(
+            "USE SELECTED IMAGE"
+        )
+        use_button.setObjectName(
+            "GenerateButton"
+        )
+
+        open_source_button.clicked.connect(
+            lambda checked=False: self.open_selected_web_image_source(
+                result_list
+            )
+        )
+        cancel_button.clicked.connect(
+            dialog.reject
+        )
+        use_button.clicked.connect(
+            lambda checked=False: self.choose_web_image_result(
+                dialog,
+                result_list,
+                slot_id,
+            )
+        )
+        result_list.itemDoubleClicked.connect(
+            lambda item: self.choose_web_image_result(
+                dialog,
+                result_list,
+                slot_id,
+            )
+        )
+
+        action_row.addWidget(
+            open_source_button
+        )
+        action_row.addStretch()
+        action_row.addWidget(
+            cancel_button
+        )
+        action_row.addWidget(
+            use_button
+        )
+
+        layout.addWidget(
+            heading
+        )
+        layout.addWidget(
+            query_label
+        )
+        layout.addWidget(
+            license_hint
+        )
+        layout.addWidget(
+            result_list,
+            1,
+        )
+        layout.addLayout(
+            action_row
+        )
+
+        dialog.exec()
+
+
+    def selected_web_image_result(
+        self,
+        result_list: QListWidget,
+    ) -> tuple[int | None, dict | None]:
+
+        item = result_list.currentItem()
+        if item is None:
+            return None, None
+
+        try:
+            index = int(
+                item.data(
+                    Qt.ItemDataRole.UserRole
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return None, None
+
+        if not (
+            0
+            <= index
+            < len(
+                self.web_image_search_results
+            )
+        ):
+            return None, None
+
+        result = self.web_image_search_results[
+            index
+        ]
+        return (
+            index,
+            result
+            if isinstance(
+                result,
+                dict,
+            )
+            else None,
+        )
+
+
+    def open_selected_web_image_source(
+        self,
+        result_list: QListWidget,
+    ):
+
+        _index, result = self.selected_web_image_result(
+            result_list
+        )
+        if result is None:
+            return
+
+        source_url = str(
+            result.get(
+                "foreign_landing_url",
+                "",
+            )
+            or result.get(
+                "detail_url",
+                "",
+            )
+            or result.get(
+                "source_url",
+                "",
+            )
+            or ""
+        ).strip()
+        if source_url:
+            QDesktopServices.openUrl(
+                QUrl(
+                    source_url
+                )
+            )
+
+
+    def choose_web_image_result(
+        self,
+        dialog: QDialog,
+        result_list: QListWidget,
+        slot_id: str,
+    ):
+
+        index, result = self.selected_web_image_result(
+            result_list
+        )
+        if index is None or result is None:
+            self.visual_status_label.setText(
+                "Choose a web image first."
+            )
+            return
+
+        dialog.accept()
+        self.start_web_image_download(
+            slot_id,
+            index,
+        )
+
+
+    def apply_web_image_selection(self) -> bool:
+
+        try:
+            data = json.loads(
+                self.web_image_selection_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ):
+            return False
+
+        slot_id = str(
+            data.get(
+                "slot_id",
+                self.web_image_target_slot_id,
+            )
+            or self.web_image_target_slot_id
+            or ""
+        )
+        result = data.get(
+            "result",
+            {},
+        )
+        if not isinstance(
+            result,
+            dict,
+        ):
+            return False
+
+        local_path = Path(
+            str(
+                result.get(
+                    "local_path",
+                    "",
+                )
+                or ""
+            )
+        )
+        if not local_path.exists():
+            return False
+
+        index, slot = self.web_image_slot_by_id(
+            slot_id
+        )
+        if slot is None or index is None:
+            return False
+
+        title = str(
+            result.get(
+                "title",
+                "Web image",
+            )
+            or "Web image"
+        )
+        creator = str(
+            result.get(
+                "creator",
+                "",
+            )
+            or ""
+        )
+        license_name = str(
+            result.get(
+                "license",
+                "",
+            )
+            or "Unknown license"
+        )
+        landing_url = str(
+            result.get(
+                "foreign_landing_url",
+                "",
+            )
+            or result.get(
+                "detail_url",
+                "",
+            )
+            or ""
+        )
+
+        slot["asset_path"] = str(
+            local_path
+        )
+        slot["image_source"] = "WEB"
+        slot["provider"] = "openverse"
+        slot["source_type"] = "web_sourced"
+        slot["generated"] = False
+        slot["state"] = "READY"
+        slot["active_variant_id"] = "web_selected"
+        slot["variants"] = [
+            {
+                "variant_id": "web_selected",
+                "path": str(
+                    local_path
+                ),
+                "state": "READY",
+                "provider": "openverse",
+                "generated": False,
+                "saved": False,
+            }
+        ]
+        slot["web_source"] = {
+            "title": title,
+            "creator": creator,
+            "license": license_name,
+            "license_name": str(
+                result.get(
+                    "license_name",
+                    "",
+                )
+                or ""
+            ),
+            "license_version": str(
+                result.get(
+                    "license_version",
+                    "",
+                )
+                or ""
+            ),
+            "provider_source": str(
+                result.get(
+                    "provider_source",
+                    "openverse",
+                )
+                or "openverse"
+            ),
+            "source_url": str(
+                result.get(
+                    "source_url",
+                    "",
+                )
+                or ""
+            ),
+            "landing_url": landing_url,
+        }
+        slot.pop(
+            "error",
+            None,
+        )
+        self.mark_visual_slot_modified(
+            slot
+        )
+        self.selected_visual_slot_index = index
+        self.save_ai_visual_plan()
+        self.sync_visual_slot_to_editor_asset_plan(
+            index
+        )
+        self.refresh_visual_plan_display()
+        self.load_selected_visual_into_inspector()
+        self.active_visual_preview_signature = None
+        self.active_visual_preview_layout_signature = None
+        self.update_ai_visual_preview_overlay(
+            self.player.position()
+        )
+
+        attribution = (
+            f" · {creator}"
+            if creator
+            else ""
+        )
+        self.visual_status_label.setText(
+            f"Web image ready: {title}{attribution} · {license_name}"
+        )
+        return True
+
+
+    def web_image_finished(
+        self,
+        exit_code: int,
+        exit_status,
+    ):
+
+        del exit_status
+
+        operation = self.web_image_operation
+        target_slot_id = self.web_image_target_slot_id
+        self.web_image_operation = ""
+        self.update_visual_inspector_buttons()
+
+        if exit_code != 0:
+            self.visual_status_label.setText(
+                (
+                    "Web image search failed. See render log."
+                    if operation == "search"
+                    else "Web image download failed. See render log."
+                )
+            )
+            self.render_log.append(
+                f"✕ WEB IMAGE {operation.upper()} FAILED (exit code {exit_code})"
+            )
+            return
+
+        if operation == "search":
+            try:
+                data = json.loads(
+                    self.web_image_results_path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ):
+                self.visual_status_label.setText(
+                    "Could not read web image search results."
+                )
+                return
+
+            results = data.get(
+                "results",
+                [],
+            )
+            self.web_image_search_results = [
+                item
+                for item in results
+                if isinstance(
+                    item,
+                    dict,
+                )
+            ] if isinstance(
+                results,
+                list,
+            ) else []
+            query = str(
+                data.get(
+                    "query",
+                    "",
+                )
+                or ""
+            )
+            if not self.web_image_search_results:
+                self.visual_status_label.setText(
+                    "No commercially usable Openverse images matched these search terms."
+                )
+                return
+
+            self.visual_status_label.setText(
+                f"Choose from {len(self.web_image_search_results)} web image results."
+            )
+            self.show_web_image_results_dialog(
+                target_slot_id,
+                query,
+            )
+            return
+
+        if operation == "download":
+            if self.apply_web_image_selection():
+                self.render_log.append(
+                    "✓ Web image attached to visual entity."
+                )
+            else:
+                self.visual_status_label.setText(
+                    "Downloaded web image could not be attached to the visual entity."
+                )
+
     def regenerate_selected_visual_asset(self):
 
         slot = self.selected_visual_slot()
         if slot is None:
+            return
+
+        image_source = self.normalize_visual_image_source(
+            slot.get(
+                "image_source",
+                slot.get(
+                    "provider",
+                    "FORGE",
+                ),
+            )
+        )
+        if image_source == "WEB":
+            self.visual_inspector_fields_changed()
+            slot = self.selected_visual_slot()
+            if slot is None:
+                return
+            self.start_web_image_search(
+                slot
+            )
+            return
+
+        if image_source == "CHATGPT":
+            self.visual_inspector_fields_changed()
+            slot = self.selected_visual_slot()
+            if slot is None:
+                return
+
+            slot["state"] = "GENERATING"
+            slot.pop(
+                "error",
+                None,
+            )
+            self.save_ai_visual_plan()
+            if self.selected_visual_slot_index is not None:
+                self.sync_visual_slot_to_editor_asset_plan(
+                    self.selected_visual_slot_index
+                )
+            self.refresh_visual_plan_display()
+            self.start_visual_asset_generation(
+                str(
+                    slot.get(
+                        "slot_id",
+                        "",
+                    )
+                    or ""
+                ),
+                provider="openai",
+            )
             return
 
         if self.image_ai_state != "ready":
@@ -13733,6 +15282,169 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
 
+    def active_generation_processes(
+        self,
+    ) -> list[tuple[int, str]]:
+
+        activities: list[tuple[int, str]] = []
+
+        def add_if_running(
+            process,
+            priority: int,
+            label: str,
+        ):
+            if (
+                process.state()
+                != QProcess.ProcessState.NotRunning
+            ):
+                activities.append(
+                    (
+                        int(priority),
+                        str(label),
+                    )
+                )
+
+        add_if_running(
+            self.web_image_process,
+            92,
+            (
+                "DOWNLOADING WEB IMAGE"
+                if self.web_image_operation == "download"
+                else "SEARCHING WEB IMAGES"
+            ),
+        )
+        add_if_running(
+            self.visual_asset_process,
+            90,
+            (
+                "GENERATING CHATGPT IMAGE"
+                if getattr(
+                    self,
+                    "visual_asset_provider",
+                    "auto",
+                ) == "openai"
+                else "GENERATING IMAGES"
+            ),
+        )
+        add_if_running(
+            self.visual_process,
+            80,
+            "PLANNING VISUALS",
+        )
+        add_if_running(
+            self.analysis_process,
+            75,
+            (
+                "TRANSCRIBING SOURCE"
+                if self.analysis_stage == "transcribe"
+                else "FINDING BEST CLIPS"
+            ),
+        )
+        add_if_running(
+            self.sfx_process,
+            70,
+            "GENERATING SFX",
+        )
+        add_if_running(
+            self.transcript_preload_process,
+            65,
+            "TRANSCRIBING SOURCE",
+        )
+        add_if_running(
+            self.image_status_process,
+            60,
+            (
+                "LOADING IMAGE MODEL"
+                if self.pending_image_model_change
+                else "STARTING IMAGE AI"
+            ),
+        )
+        add_if_running(
+            self.reframe_process,
+            95,
+            "FRAMING",
+        )
+        add_if_running(
+            self.render_process,
+            100,
+            "RENDERING",
+        )
+        add_if_running(
+            self.music_process,
+            96,
+            "MUSIC MIX",
+        )
+
+        return activities
+
+
+    def update_global_progress(self):
+
+        if not hasattr(
+            self,
+            "render_progress_bar",
+        ):
+            return
+
+        # The render pipeline already has a useful estimated percentage and
+        # stage model. Never replace it with the generic busy animation.
+        if self.render_progress_active:
+            return
+
+        activities = self.active_generation_processes()
+
+        if activities:
+            activities.sort(
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            _priority, label = activities[0]
+
+            # QProgressBar range 0..0 is Qt's native indeterminate/busy mode.
+            # It communicates real activity without inventing fake percentages
+            # for AI/backend jobs that do not expose measurable completion.
+            self.render_progress_bar.setRange(
+                0,
+                0,
+            )
+            self.render_progress_stage_label.setText(
+                label
+            )
+            self.render_progress_time_label.setText(
+                (
+                    "Working..."
+                    if len(activities) == 1
+                    else f"Working...  •  {len(activities)} tasks active"
+                )
+            )
+            self.render_progress_stage = "background"
+            return
+
+        # Preserve a completed/failed render result until the next operation
+        # begins. All other background activity returns to a neutral READY
+        # footer as soon as its process exits.
+        if self.render_progress_stage in {
+            "complete",
+            "failed",
+        }:
+            return
+
+        self.render_progress_bar.setRange(
+            0,
+            100,
+        )
+        self.render_progress_bar.setValue(
+            0
+        )
+        self.render_progress_stage_label.setText(
+            "READY"
+        )
+        self.render_progress_time_label.setText(
+            "Idle"
+        )
+        self.render_progress_stage = "idle"
+
+
     def start_render_progress(
         self,
         clip_duration_seconds: float,
@@ -13753,6 +15465,10 @@ class ShortsFactoryWindow(QMainWindow):
             )
         )
         self.render_progress_last_value = 0
+        self.render_progress_bar.setRange(
+            0,
+            100,
+        )
         self.render_progress_bar.setValue(
             0
         )
@@ -13946,7 +15662,13 @@ class ShortsFactoryWindow(QMainWindow):
         )
         self.render_progress_active = False
 
+        self.render_progress_bar.setRange(
+            0,
+            100,
+        )
+
         if success:
+            self.render_progress_stage = "complete"
             self.render_progress_last_value = 100
             self.render_progress_bar.setValue(
                 100
@@ -13963,6 +15685,7 @@ class ShortsFactoryWindow(QMainWindow):
                 )
             )
         else:
+            self.render_progress_stage = "failed"
             self.render_progress_stage_label.setText(
                 "FAILED"
             )
@@ -14306,6 +16029,26 @@ class ShortsFactoryWindow(QMainWindow):
         if not self.editor_asset_context_matches_current_selection():
             return []
 
+        # editor_asset_plan.json survives between app sessions. A previous
+        # session can therefore contain AI_VISUAL clips whose source/range
+        # happens to match a newly selected Find Best Clips candidate. Those
+        # stale clips must not reappear before the current session has actually
+        # planned visuals. Keep the persisted data untouched, but only expose
+        # AI_VISUAL clips represented by the current in-memory visual plan.
+        current_visual_clip_ids = {
+            self.visual_clip_id(
+                slot,
+                index,
+            )
+            for index, slot in enumerate(
+                self.visual_plan_slots
+            )
+            if isinstance(
+                slot,
+                dict,
+            )
+        }
+
         clips = []
         for clip in self.editor_asset_plan.get(
             "clips",
@@ -14323,17 +16066,31 @@ class ShortsFactoryWindow(QMainWindow):
                 )
             ):
                 continue
-            if str(
+
+            kind = str(
                 clip.get(
                     "kind",
                     "",
                 )
                 or ""
-            ).upper() not in {
+            ).upper()
+            if kind not in {
                 "SFX",
                 "AI_VISUAL",
             }:
                 continue
+
+            if kind == "AI_VISUAL":
+                clip_id = str(
+                    clip.get(
+                        "id",
+                        "",
+                    )
+                    or ""
+                )
+                if clip_id not in current_visual_clip_ids:
+                    continue
+
             clips.append(
                 clip
             )
@@ -18231,6 +19988,13 @@ class ShortsFactoryWindow(QMainWindow):
                 selection-background-color: #5e2631;
                 font-family: Consolas;
                 font-size: 11px;
+            }
+
+            QFrame#GlobalProgressPanel {
+                background: #0B0B0D;
+                border: 1px solid #30292D;
+                border-top: 2px solid #741C28;
+                border-radius: 4px;
             }
 
             QLabel#RenderProgressStage {
