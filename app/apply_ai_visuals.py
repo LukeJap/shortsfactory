@@ -79,7 +79,7 @@ CARD_MAX_WIDTH = 842
 CARD_MAX_HEIGHT = 882
 CARD_BORDER = 12
 CARD_Y_FACTOR = 0.22
-CARD_DIM_ALPHA = 0.18
+CARD_DIM_ALPHA = 0.0
 CONTAIN_DIM_ALPHA = 0.24
 
 
@@ -555,13 +555,10 @@ def build_filter(
                 (
                     f"[{index}:v]"
                     f"scale={overlay_width}:{overlay_height}:"
-                    "force_original_aspect_ratio=decrease,"
+                    "force_original_aspect_ratio=increase,"
+                    f"crop={overlay_width}:{overlay_height},"
                     "setsar=1,"
                     "format=rgba,"
-                    f"pad=ceil(iw/2)*2+{CARD_BORDER}:"
-                    f"ceil(ih/2)*2+{CARD_BORDER}:"
-                    f"{CARD_BORDER // 2}:{CARD_BORDER // 2}:"
-                    "color=0xF4EFE6FF,"
                     f"colorchannelmixer=aa={scale_opacity(mode):.3f}"
                     f"[vis{index}]"
                 )

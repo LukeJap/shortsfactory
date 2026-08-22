@@ -4180,6 +4180,10 @@ class ShortsFactoryWindow(QMainWindow):
         self.editor_asset_plan: dict = load_editor_asset_plan()
         self.selected_sfx_clip_id: str | None = None
         self.sfx_preview_triggered: set[str] = set()
+        self.active_visual_preview_clip_id: str | None = None
+        self.active_visual_preview_signature: tuple | None = None
+        self.active_visual_preview_layout_signature: tuple | None = None
+        self.active_visual_preview_pixmap = QPixmap()
 
         self.visual_asset_process = QProcess(self)
 
@@ -4649,6 +4653,27 @@ class ShortsFactoryWindow(QMainWindow):
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.player.setVideoOutput(self.video_widget)
+
+        # Live AI visual preview. These labels sit above the source preview
+        # and mirror the active AI_VISUAL clip at the current source time.
+        self.ai_visual_preview_dim = QLabel(self.video_widget)
+        self.ai_visual_preview_dim.setObjectName("VisualPreviewDim")
+        self.ai_visual_preview_dim.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+        self.ai_visual_preview_dim.hide()
+
+        self.ai_visual_preview_overlay = QLabel(self.video_widget)
+        self.ai_visual_preview_overlay.setObjectName("VisualPreviewOverlay")
+        self.ai_visual_preview_overlay.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        self.ai_visual_preview_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+        self.ai_visual_preview_overlay.hide()
 
         playback = QHBoxLayout()
         playback.setSpacing(10)
@@ -5825,6 +5850,7 @@ class ShortsFactoryWindow(QMainWindow):
     ):
 
         self.cancel_paused_seek_refresh()
+        self.hide_ai_visual_preview_overlay()
         self.play_request_counter += 1
         self.video_path = path
 
@@ -6045,6 +6071,9 @@ class ShortsFactoryWindow(QMainWindow):
                     self.start_ms
                 )
             )
+            self.update_ai_visual_preview_overlay(
+                self.start_ms
+            )
             return
 
         if not self.timeline.isSliderDown():
@@ -6076,6 +6105,9 @@ class ShortsFactoryWindow(QMainWindow):
             )
 
         self.trigger_sfx_previews(
+            position
+        )
+        self.update_ai_visual_preview_overlay(
             position
         )
 
@@ -6147,6 +6179,10 @@ class ShortsFactoryWindow(QMainWindow):
                     f"{format_precise_time(self.player.duration())}"
                 )
             )
+
+        self.update_ai_visual_preview_overlay(
+            position
+        )
 
         if not was_playing and getattr(
             self.timeline,
@@ -12660,6 +12696,10 @@ class ShortsFactoryWindow(QMainWindow):
                 selected_asset_id
             )
         self.update_sfx_inspector()
+        if hasattr(self, "ai_visual_preview_overlay"):
+            self.update_ai_visual_preview_overlay(
+                self.player.position()
+            )
 
 
     def find_editor_clip(
@@ -13542,6 +13582,282 @@ class ShortsFactoryWindow(QMainWindow):
         self.sfx_preview_triggered.intersection_update(
             active_ids
         )
+
+
+    def hide_ai_visual_preview_overlay(self):
+        if hasattr(self, "ai_visual_preview_overlay"):
+            self.ai_visual_preview_overlay.hide()
+            self.ai_visual_preview_overlay.clear()
+        if hasattr(self, "ai_visual_preview_dim"):
+            self.ai_visual_preview_dim.hide()
+        self.active_visual_preview_clip_id = None
+        self.active_visual_preview_signature = None
+        self.active_visual_preview_layout_signature = None
+        self.active_visual_preview_pixmap = QPixmap()
+
+
+    def active_ai_visual_preview_clip(
+        self,
+        position_ms: int,
+    ) -> dict | None:
+        if not self.editor_asset_context_matches_current_selection():
+            return None
+
+        position_ms = int(position_ms)
+        candidates = []
+        for clip in clips_of_kind(
+            self.editor_asset_plan,
+            "AI_VISUAL",
+            active_only=True,
+        ):
+            if not isinstance(clip, dict) or bool(clip.get("deleted", False)):
+                continue
+            try:
+                start_ms = int(round(float(clip.get("start", 0.0) or 0.0) * 1000))
+                end_ms = int(round(float(clip.get("end", 0.0) or 0.0) * 1000))
+            except (TypeError, ValueError):
+                continue
+            if start_ms <= position_ms <= max(start_ms, end_ms):
+                candidates.append((start_ms, clip))
+
+        if not candidates:
+            return None
+
+        # If two visual clips overlap, prefer the one that starts latest.
+        candidates.sort(key=lambda item: item[0])
+        return candidates[-1][1]
+
+
+    def ai_visual_preview_asset_path(self, clip: dict) -> Path | None:
+        path_text = str(
+            clip.get("active_variant_path", "")
+            or clip.get("asset_path", "")
+            or ""
+        ).strip()
+        if not path_text:
+            return None
+        return Path(path_text)
+
+
+    def ai_visual_preview_display_mode(self, clip: dict) -> str:
+        mode = str(
+            clip.get("display_mode", "OVERLAY_CARD")
+            or "OVERLAY_CARD"
+        ).strip().upper()
+        if mode not in {
+            "OVERLAY_CARD",
+            "FULL_FRAME_CONTAIN",
+            "FULL_FRAME_COVER",
+        }:
+            mode = "OVERLAY_CARD"
+        return mode
+
+
+    def ai_visual_preview_scale(self, clip: dict) -> float:
+        try:
+            scale = float(clip.get("scale", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            scale = 1.0
+        return max(0.6, min(1.4, scale))
+
+
+    def repolish_ai_visual_preview(self, widget):
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+
+
+    def layout_ai_visual_preview_overlay(
+        self,
+        clip: dict,
+    ):
+        if not hasattr(self, "ai_visual_preview_overlay"):
+            return
+
+        width = max(1, self.video_widget.width())
+        height = max(1, self.video_widget.height())
+        mode = self.ai_visual_preview_display_mode(clip)
+        scale = self.ai_visual_preview_scale(clip)
+
+        # The exported Short is always a 9:16 canvas. The preview widget is
+        # usually much wider because it shows the uncropped source, so sizing
+        # an overlay from the whole widget makes a card look like a banner.
+        # Build a centered virtual 9:16 output canvas and size visual overlays
+        # from that instead. This keeps preview geometry representative of the
+        # final 1080x1920 render.
+        canvas_height = height
+        canvas_width = max(1, int(round(canvas_height * 9 / 16)))
+        if canvas_width > width:
+            canvas_width = width
+            canvas_height = max(1, int(round(canvas_width * 16 / 9)))
+        canvas_x = max(0, (width - canvas_width) // 2)
+        canvas_y = max(0, (height - canvas_height) // 2)
+
+        layout_signature = (
+            self.active_visual_preview_signature,
+            width,
+            height,
+            canvas_x,
+            canvas_y,
+            canvas_width,
+            canvas_height,
+        )
+        if layout_signature == self.active_visual_preview_layout_signature:
+            return
+        self.active_visual_preview_layout_signature = layout_signature
+
+        self.ai_visual_preview_dim.setGeometry(
+            canvas_x,
+            canvas_y,
+            canvas_width,
+            canvas_height,
+        )
+        if self.ai_visual_preview_dim.property("displayMode") != mode:
+            self.ai_visual_preview_dim.setProperty("displayMode", mode)
+            self.repolish_ai_visual_preview(self.ai_visual_preview_dim)
+
+        overlay = self.ai_visual_preview_overlay
+        if overlay.property("displayMode") != mode:
+            overlay.setProperty("displayMode", mode)
+            self.repolish_ai_visual_preview(overlay)
+
+        source_pixmap = self.active_visual_preview_pixmap
+
+        if mode == "OVERLAY_CARD":
+            # Mirror apply_ai_visuals.py: 842x882 on a 1080x1920 output.
+            # Using the same proportions here prevents the live preview card
+            # from becoming an ultra-wide banner on a landscape source.
+            card_width = max(1, int(round(canvas_width * (842 / 1080) * scale)))
+            card_height = max(1, int(round(canvas_height * (882 / 1920) * scale)))
+            card_width = min(canvas_width, card_width)
+            card_height = min(canvas_height, card_height)
+            x = canvas_x + max(0, (canvas_width - card_width) // 2)
+            y_offset = max(
+                int(round(canvas_height * (110 / 1920))),
+                int(round((canvas_height - card_height) * 0.22)),
+            )
+            y = canvas_y + min(
+                max(0, y_offset),
+                max(0, canvas_height - card_height),
+            )
+            overlay.setGeometry(x, y, card_width, card_height)
+            # Overlay cards behave like cropped cutaways rather than
+            # letterboxed images with blank side bands.
+            transform = Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            target_size = overlay.size()
+        elif mode == "FULL_FRAME_CONTAIN":
+            overlay.setGeometry(
+                canvas_x,
+                canvas_y,
+                canvas_width,
+                canvas_height,
+            )
+            transform = Qt.AspectRatioMode.KeepAspectRatio
+            target_size = QSize(
+                max(1, int(round(canvas_width * scale))),
+                max(1, int(round(canvas_height * scale))),
+            )
+        else:
+            overlay.setGeometry(
+                canvas_x,
+                canvas_y,
+                canvas_width,
+                canvas_height,
+            )
+            transform = Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            target_size = overlay.size()
+
+        if not source_pixmap.isNull():
+            overlay.setText("")
+            preview_pixmap = source_pixmap.scaled(
+                target_size,
+                transform,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            if transform == Qt.AspectRatioMode.KeepAspectRatioByExpanding:
+                # QPixmap.scaled(...ByExpanding) may be larger than the label.
+                # Crop it explicitly so the live preview matches a real
+                # crop-to-fill render rather than showing blank side bands.
+                crop_width = min(target_size.width(), preview_pixmap.width())
+                crop_height = min(target_size.height(), preview_pixmap.height())
+                crop_x = max(0, (preview_pixmap.width() - crop_width) // 2)
+                crop_y = max(0, (preview_pixmap.height() - crop_height) // 2)
+                preview_pixmap = preview_pixmap.copy(
+                    crop_x,
+                    crop_y,
+                    crop_width,
+                    crop_height,
+                )
+            overlay.setPixmap(preview_pixmap)
+
+        overlay.raise_()
+        if mode in {"OVERLAY_CARD", "FULL_FRAME_COVER"}:
+            # Do not place a full-frame dim label over an overlay card. On
+            # QVideoWidget that can obscure the native video surface, making
+            # the cutaway look like it is floating on black instead of over
+            # the source clip.
+            self.ai_visual_preview_dim.hide()
+        else:
+            self.ai_visual_preview_dim.show()
+            self.ai_visual_preview_dim.raise_()
+            overlay.raise_()
+
+
+    def update_ai_visual_preview_overlay(
+        self,
+        position_ms: int,
+    ):
+        if not hasattr(self, "ai_visual_preview_overlay"):
+            return
+
+        active_clip = self.active_ai_visual_preview_clip(position_ms)
+        if active_clip is None:
+            self.hide_ai_visual_preview_overlay()
+            return
+
+        clip_id = str(active_clip.get("id", "") or "")
+        mode = self.ai_visual_preview_display_mode(active_clip)
+        scale = self.ai_visual_preview_scale(active_clip)
+        asset_path = self.ai_visual_preview_asset_path(active_clip)
+
+        asset_stamp = None
+        if asset_path is not None and asset_path.exists():
+            try:
+                asset_stamp = asset_path.stat().st_mtime_ns
+            except OSError:
+                asset_stamp = None
+
+        signature = (
+            clip_id,
+            str(asset_path or ""),
+            asset_stamp,
+            mode,
+            round(scale, 3),
+        )
+
+        if signature != self.active_visual_preview_signature:
+            self.active_visual_preview_signature = signature
+            self.active_visual_preview_layout_signature = None
+            self.active_visual_preview_clip_id = clip_id
+            self.active_visual_preview_pixmap = QPixmap()
+            self.ai_visual_preview_overlay.clear()
+
+            if asset_path is not None and asset_path.exists():
+                pixmap = QPixmap(str(asset_path))
+                if not pixmap.isNull():
+                    self.active_visual_preview_pixmap = pixmap
+                else:
+                    self.ai_visual_preview_overlay.setText("IMAGE PREVIEW ERROR")
+            elif asset_path is None:
+                self.ai_visual_preview_overlay.setText(
+                    str(active_clip.get("label", "AI VISUAL") or "AI VISUAL")
+                )
+            else:
+                self.ai_visual_preview_overlay.setText("MISSING VISUAL")
+
+        self.layout_ai_visual_preview_overlay(active_clip)
+        self.ai_visual_preview_overlay.show()
 
 
     def update_sfx_button_state(self):
@@ -14674,6 +14990,18 @@ class ShortsFactoryWindow(QMainWindow):
     ):
 
         if (
+            watched is getattr(self, "video_widget", None)
+            and event.type() == QEvent.Type.Resize
+            and hasattr(self, "ai_visual_preview_overlay")
+        ):
+            QTimer.singleShot(
+                0,
+                lambda: self.update_ai_visual_preview_overlay(
+                    self.player.position()
+                ),
+            )
+
+        if (
             event.type()
             == QEvent.Type.KeyPress
             and self.handle_editor_shortcut(
@@ -15174,6 +15502,34 @@ class ShortsFactoryWindow(QMainWindow):
                 color: #83c99d;
                 font-size: 10px;
                 font-weight: 800;
+            }
+
+            QLabel#VisualPreviewDim {
+                border: none;
+                background: transparent;
+            }
+
+            QLabel#VisualPreviewDim[displayMode="OVERLAY_CARD"] {
+                background: rgba(0, 0, 0, 46);
+            }
+
+            QLabel#VisualPreviewDim[displayMode="FULL_FRAME_CONTAIN"] {
+                background: rgba(0, 0, 0, 61);
+            }
+
+            QLabel#VisualPreviewOverlay {
+                color: #DFF8E7;
+                background: transparent;
+                border: none;
+                font-size: 13px;
+                font-weight: 900;
+            }
+
+            QLabel#VisualPreviewOverlay[displayMode="OVERLAY_CARD"] {
+                background: #F4EFE6;
+                border: 3px solid #F4EFE6;
+                border-radius: 5px;
+                color: #111111;
             }
 
             QVideoWidget#VideoPreview {
