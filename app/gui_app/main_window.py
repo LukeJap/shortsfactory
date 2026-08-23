@@ -533,13 +533,9 @@ class ShortsFactoryWindow(
         self.load_editor_asset_plan_state()
         self.global_progress_timer.start()
         self.update_global_progress()
-        # image_backend_status.py already owns the Forge launch lock. Start
-        # the asynchronous status/autolaunch probe only after the Qt event
-        # loop begins so ShortsFactory never blocks while Forge boots.
-        QTimer.singleShot(
-            350,
-            self.check_image_ai,
-        )
+        # Do not probe or auto-launch Forge when ShortsFactory starts.
+        # Image AI remains available only when the user explicitly invokes
+        # an Image AI action later.
 
     def build_ui(self):
 
