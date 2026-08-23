@@ -16,6 +16,8 @@ class AIVisualPreviewMixin:
             self.ai_visual_preview_overlay.clear()
         if hasattr(self, "ai_visual_preview_dim"):
             self.ai_visual_preview_dim.hide()
+        if hasattr(self, "ai_visual_preview_full_frame_tag"):
+            self.ai_visual_preview_full_frame_tag.hide()
         self.active_visual_preview_clip_id = None
         self.active_visual_preview_signature = None
         self.active_visual_preview_layout_signature = None
@@ -675,6 +677,23 @@ class AIVisualPreviewMixin:
         # remains visible behind overlay-card and contain modes.
         self.ai_visual_preview_dim.hide()
 
+        # FULL_FRAME_COVER always fills the whole canvas by design -- there
+        # is no bounding box to move, only the crop window within it (still
+        # draggable, panning which part of the image is visible). Tag it so
+        # that isn't mistaken for a broken drag.
+        if hasattr(self, "ai_visual_preview_full_frame_tag"):
+            if mode == "FULL_FRAME_COVER":
+                tag = self.ai_visual_preview_full_frame_tag
+                tag.adjustSize()
+                tag.move(
+                    canvas_x + 10,
+                    canvas_y + 10,
+                )
+                tag.raise_()
+                tag.show()
+            else:
+                self.ai_visual_preview_full_frame_tag.hide()
+
 
     def update_ai_visual_preview_overlay(
         self,
@@ -1013,6 +1032,55 @@ class AIVisualPreviewMixin:
         self.update_ai_visual_preview_overlay(
             self.player.position()
         )
+
+
+    def reset_active_visual_preview_position(self) -> bool:
+
+        active_clip = self.active_ai_visual_preview_clip(
+            self.player.position()
+        )
+        if active_clip is None:
+            return False
+
+        clip_id = str(active_clip.get("id", "") or "")
+        if clip_id:
+            self.select_visual_preview_clip(clip_id)
+
+        slot = self.selected_visual_slot()
+        if slot is None:
+            return False
+
+        clip = self.find_editor_clip("AI_VISUAL", clip_id)
+        if clip is None:
+            return False
+
+        slot["position_x"] = 0.0
+        slot["position_y"] = 0.0
+        clip["position_x"] = 0.0
+        clip["position_y"] = 0.0
+        clip["manual_override"] = False
+        clip["locked"] = False
+        self.mark_visual_slot_modified(slot)
+
+        self.updating_visual_inspector = True
+        self.visual_x_slider.setValue(0)
+        self.visual_y_slider.setValue(0)
+        self.visual_x_label.setText("0")
+        self.visual_y_label.setText("0")
+        self.updating_visual_inspector = False
+
+        self.save_ai_visual_plan()
+        if self.selected_visual_slot_index is not None:
+            self.sync_visual_slot_to_editor_asset_plan(
+                self.selected_visual_slot_index
+            )
+        self.refresh_visual_plan_display()
+        self.load_selected_visual_into_inspector()
+
+        self.active_visual_preview_signature = None
+        self.active_visual_preview_layout_signature = None
+        self.update_ai_visual_preview_overlay(self.player.position())
+        return True
 
 
     def finish_visual_preview_drag(self):

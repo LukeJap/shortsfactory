@@ -382,6 +382,22 @@ STYLESHEET =            """
                 color: #111111;
             }
 
+            QLabel#VisualPreviewOverlay:hover,
+            QLabel#EmojiPreviewOverlay:hover,
+            QLabel#CaptionPreviewOverlay:hover {
+                border: 2px solid #C9384F;
+            }
+
+            QLabel#VisualPreviewFullFrameTag {
+                background: #741C28;
+                color: #F4EFE6;
+                border: 1px solid #C9384F;
+                border-radius: 4px;
+                font-size: 10px;
+                font-weight: 900;
+                padding: 2px 6px;
+            }
+
             QVideoWidget#VideoPreview {
                 background: #020203;
                 border: 1px solid #2e272b;

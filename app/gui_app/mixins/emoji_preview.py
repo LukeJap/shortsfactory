@@ -13,6 +13,8 @@ from emoji_overlay import (
     EMOJI_SIZE,
     coerce_emoji_fraction,
     emoji_filename,
+    emoji_pixel_to_fraction,
+    event_default_position_px,
     normalize_emoji,
     resolve_event_asset,
 )
@@ -341,6 +343,33 @@ class EmojiPreviewMixin:
         screen_x = canvas_x + round(position_x * x_span)
         screen_y = canvas_y + round(position_y * y_span)
         label.setGeometry(screen_x, screen_y, emoji_width, emoji_height)
+
+
+    def reset_emoji_preview_position(self, slot_index: int) -> bool:
+
+        active = getattr(self, "emoji_preview_active", [])
+        if not (0 <= slot_index < len(active)):
+            return False
+
+        event_index, _active_event = active[slot_index]
+
+        default_x, default_y = event_default_position_px(event_index)
+        position_x, position_y = emoji_pixel_to_fraction(default_x, default_y)
+
+        data = self.load_emoji_events_file()
+        events = data.get("events", [])
+        if not (isinstance(events, list) and 0 <= event_index < len(events)):
+            return False
+
+        events[event_index]["position_x"] = round(position_x, 3)
+        events[event_index]["position_y"] = round(position_y, 3)
+        events[event_index]["manual_override"] = False
+        data["events"] = events
+        self.save_emoji_events_file(data)
+
+        self._emoji_events_cache = None
+        self.update_emoji_preview_overlay(self.player.position())
+        return True
 
 
     def finish_emoji_preview_drag(self):

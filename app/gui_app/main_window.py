@@ -878,6 +878,19 @@ class ShortsFactoryWindow(
         )
         self.ai_visual_preview_overlay.hide()
 
+        self.ai_visual_preview_full_frame_tag = QLabel(
+            "FULL FRAME",
+            self.video_widget,
+        )
+        self.ai_visual_preview_full_frame_tag.setObjectName(
+            "VisualPreviewFullFrameTag"
+        )
+        self.ai_visual_preview_full_frame_tag.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+        self.ai_visual_preview_full_frame_tag.hide()
+
         playback = QHBoxLayout()
         playback.setSpacing(10)
 
@@ -2153,6 +2166,14 @@ class ShortsFactoryWindow(
             event
         )
 
+    def _point_in_widget(self, widget, event) -> bool:
+        try:
+            return widget.geometry().contains(
+                event.position().toPoint()
+            )
+        except AttributeError:
+            return False
+
     def eventFilter(
         self,
         watched,
@@ -2273,6 +2294,44 @@ class ShortsFactoryWindow(
             self.finish_caption_preview_drag()
             event.accept()
             return True
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.RightButton
+        ):
+            if watched is overlay or (
+                watched is video_widget
+                and overlay is not None
+                and overlay.isVisible()
+                and self._point_in_widget(overlay, event)
+            ):
+                if self.reset_active_visual_preview_position():
+                    event.accept()
+                    return True
+
+            for slot_index, label in enumerate(
+                getattr(self, "emoji_preview_labels", [])
+            ):
+                if not label.isVisible():
+                    continue
+                if watched is label or (
+                    watched is video_widget
+                    and self._point_in_widget(label, event)
+                ):
+                    if self.reset_emoji_preview_position(slot_index):
+                        event.accept()
+                        return True
+                    break
+
+            caption_label = getattr(self, "caption_preview_label", None)
+            if caption_label is not None and caption_label.isVisible():
+                if watched is caption_label or (
+                    watched is video_widget
+                    and self._point_in_widget(caption_label, event)
+                ):
+                    self.reset_caption_position()
+                    event.accept()
+                    return True
 
         if (
             watched is video_widget
