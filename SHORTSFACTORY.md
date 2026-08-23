@@ -481,10 +481,89 @@ install (different/older `opencv-python` version, or a broken install)
 rather than a code bug; this session's clean `opencv-python==4.11.0.86`
 install doesn't exhibit it. No code change made here.
 
-## 7. What's still open
+## 7. First real automated test suite
+
+Until now the only "test" files in the repo (`test_ollama.py`,
+`test_ranker.py`, at the repo root) were manual smoke scripts with no
+assertions, requiring a live local Ollama server, and `pytest` wasn't even
+installed. Added real `pytest`-based tests as a *start*, not exhaustive
+coverage — targeting the highest-value **pure decision logic** in the three
+areas most likely to regress silently: transcript caching, the visual FX
+planner, and the SFX planner. These modules are mostly FFmpeg/subprocess
+orchestration, but each also contains cleanly-separable pure functions that
+decide *what* happens (which caption emphasis level, which SFX category,
+whether a cached transcript is still valid) without doing any I/O — exactly
+the kind of logic where a subtle bug doesn't crash anything, it just quietly
+produces worse output.
+
+### 7.1 Infrastructure
+
+- `requirements-dev.txt` (new) — dev-only dependencies, kept separate from
+  the runtime `requirements.txt`: `pytest==9.1.1`, `pyflakes==3.4.0`.
+- `pytest.ini` (new, repo root) — `testpaths = tests`, `pythonpath = app`.
+  The `pythonpath` setting (pytest 7+) puts `app/` on `sys.path` for every
+  test run, so tests do plain `import subtitles`, `import visual_emphasis`,
+  etc. — matching the flat-import convention already used throughout
+  `app/*.py` itself, no `conftest.py` needed.
+- `tests/` (new directory), four files, 37 tests total, all passing,
+  runtime well under a second.
+
+### 7.2 What's covered
+
+- `tests/test_subtitles_cache.py` (8 tests) — `normalize_quality`,
+  `cache_is_valid` (the actual cache-hit/miss decision — checks
+  `cache_identity` dict equality plus `segments`/`words` being lists),
+  `migrate_cached_transcript` (verified it shallow-copies rather than
+  mutating the input), `normalized_segments` (malformed Whisper segments
+  with `end<=start` get dropped, blank words filtered, missing
+  `probability` defaults to `0.0`), `source_fingerprint`/
+  `cache_path_for_video` (deterministic given the same file+quality+model,
+  different for a different quality/model).
+- `tests/test_visual_emphasis.py` (14 tests) — `normalize_energy`/
+  `normalize_sfx_mode`, `classify_word` (the caption-emphasis classifier —
+  verified against known-good examples already documented in
+  `SHORTSFACTORY_CURRENT_STATUS.md`: `"never"` → `IMPACT`, `"huge"` →
+  `EMPHASIS`), `word_time` (minimum-duration enforcement, garbage input →
+  `None`), `mark_collisions` (two events within 0.35s → the lower-priority
+  one gets flagged; same-`stack_id` events get tagged as deliberate
+  coordination instead of colliding), `build_intensity_curve` (five
+  narrative regions spanning the full duration contiguously; a region with
+  more moments scores at least as high as an identical one with fewer).
+- `tests/test_sfx_engine_planning.py` (9 tests) — `stable_hash`,
+  `filename_words`, `infer_category_from_words` (including the fallback
+  behavior: an invalid fallback category name is silently ignored in favor
+  of `"pop"`), `category_cap` (scales with energy level), `choose_event_category`
+  (verified it actually avoids repeating the immediately-preceding
+  category when an alternative exists), `event_start`/`event_end`
+  (field-fallback order, `end` clamped to never be before `start`).
+- `tests/test_render_helpers.py` (6 tests) — `resolve_source_video`,
+  `component_target_for` (the output-folder-organization collision
+  avoidance — verified 0, 1, and 2 collision levels all resolve to the
+  expected `_2`/`_3` suffixed paths), `python_executable`'s deterministic
+  branch.
+
+Every expected value in these tests was confirmed by calling the real
+function directly (not hand-computed) before being written as an assertion.
+
+### 7.3 What's explicitly not covered by this pass
+
+The FFmpeg/subprocess-invoking parts of these same modules (actual video
+rendering, actual transcription, actual SFX mixing), the GUI package
+(`app/gui_app/`), and every module not named above. This is a foundation to
+build on, not full coverage.
+
+### 7.4 Running the tests
+
+```bash
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
+
+## 8. What's still open
 
 This pass did not touch:
 
-- Test coverage — still effectively none for a large codebase.
 - Further splitting `gui_app/mixins/ai_visual_slots.py`, which remains the
   largest file in the new package.
+- Test coverage for the GUI itself, and for the FFmpeg/subprocess-invoking
+  parts of the modules covered in section 7.
