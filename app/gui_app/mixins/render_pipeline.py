@@ -9,8 +9,77 @@ from PySide6.QtGui import QDesktopServices
 
 from ..constants import ROOT
 
+RENDER_LOG_FILE_PATH = ROOT / "output" / "render_log.txt"
+
 
 class RenderPipelineMixin:
+
+    def reset_render_log_file(self):
+        """
+        Start a fresh output/render_log.txt for this render. Overwritten
+        (not appended) each time Generate Final Video runs, so it always
+        reflects only the most recent render -- e.g. for pasting into an
+        issue report or handing to an AI assistant for analysis, without
+        needing to copy the render log widget by hand.
+        """
+
+        try:
+            RENDER_LOG_FILE_PATH.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            RENDER_LOG_FILE_PATH.write_text(
+                (
+                    f"ShortsFactory render log -- "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Source: {self.video_path}\n"
+                    "=" * 60
+                    + "\n\n"
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+
+    def append_render_log_file(self, text: str):
+
+        if not text:
+            return
+
+        try:
+            with RENDER_LOG_FILE_PATH.open(
+                "a",
+                encoding="utf-8",
+            ) as f:
+                f.write(text)
+        except OSError:
+            pass
+
+
+    def write_render_log_snapshot(self):
+        """
+        Overwrite output/render_log.txt with the full contents of the
+        render log widget. Runs at the end of a render (success or
+        failure) so status-header lines the GUI itself writes directly
+        into the widget (progress/stage announcements scattered across
+        the render mixins) end up in the file too, not just the raw
+        ffmpeg/whisper subprocess output streamed by read_render_output()/
+        read_render_error().
+        """
+
+        try:
+            RENDER_LOG_FILE_PATH.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            RENDER_LOG_FILE_PATH.write_text(
+                self.render_log.toPlainText(),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
 
     def format_progress_duration(
         self,
@@ -494,6 +563,8 @@ class RenderPipelineMixin:
 
     def finish_short_success(self):
 
+        self.write_render_log_snapshot()
+
         self.generate_button.setEnabled(
             True
         )
@@ -604,11 +675,10 @@ class RenderPipelineMixin:
             duration_seconds
         )
 
-        # Preserve the complete source frame for Shorts output. The old
-        # smart_reframe stage produced an already-cropped 1080x1920 file,
-        # so render.py could no longer restore the missing left/right image.
         # Feed the original source directly to the renderer; render.py owns
-        # the final 9:16 contain + black-bar composition.
+        # the final 9:16 crop-to-fill composition (scales up and
+        # center-crops to cover the frame edge-to-edge, no letterboxing --
+        # see render_base_video()).
         self.pending_render_source = None
 
         self.start_render_progress(
@@ -620,6 +690,7 @@ class RenderPipelineMixin:
         )
 
         self.render_log.clear()
+        self.reset_render_log_file()
 
         self.render_log.append(
             "Starting ShortsFactory..."
@@ -683,10 +754,11 @@ class RenderPipelineMixin:
             )
 
         self.render_log.append(
-            "=== PRE-RENDER: FULL SOURCE FRAME ==="
+            "=== PRE-RENDER: 9:16 CROP-TO-FILL ==="
         )
         self.render_log.append(
-            "Preserving the complete source image; unused 9:16 space will be black."
+            "Scaling up and center-cropping to fill the frame edge-to-edge; "
+            "left/right (or top/bottom) source edges outside 9:16 will be cut off."
         )
 
         self.start_main_render(
@@ -888,6 +960,7 @@ class RenderPipelineMixin:
             self.render_log.insertPlainText(data)
             scrollbar = self.render_log.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
+            self.append_render_log_file(data)
 
     def read_render_error(self):
 
@@ -905,6 +978,7 @@ class RenderPipelineMixin:
             self.render_log.insertPlainText(data)
             scrollbar = self.render_log.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
+            self.append_render_log_file(data)
 
     def render_finished(
         self,
@@ -955,5 +1029,7 @@ class RenderPipelineMixin:
         self.render_log.append(
             f"Exit code: {exit_code}"
         )
+
+        self.write_render_log_snapshot()
 
 

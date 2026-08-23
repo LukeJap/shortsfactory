@@ -442,15 +442,14 @@ def content_rect_from_settings(
     settings: dict[str, Any],
 ) -> tuple[int, int, int, int]:
     """
-    render_base_video() (app/render.py) letterboxes the source into the
-    1080x1920 canvas at its native aspect ratio rather than cropping to
-    fill, and persists where the real (non-black-bar) content sits within
-    that canvas into render_settings.json. Stages that draw/zoom/position
-    relative to the video should use this rect, not the raw canvas size,
-    or they'll treat black letterbox bars as part of the frame. Falls back
-    to the full canvas (no letterboxing assumed) if the fields are absent
-    -- e.g. an older render_settings.json from before this existed, or the
-    source already exactly matches the canvas aspect ratio.
+    render_base_video() (app/render.py) crops to fill the 1080x1920 canvas
+    by default (no letterboxing), and persists the content rect (currently
+    always the full canvas) into render_settings.json. This helper exists
+    so stages that draw/zoom/position relative to the video read that
+    persisted rect instead of assuming the raw canvas size -- if
+    letterboxing is ever reintroduced, those stages need no changes. Falls
+    back to the full canvas if the fields are absent, e.g. an older
+    render_settings.json from before this existed.
     """
 
     return (

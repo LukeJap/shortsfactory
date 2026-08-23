@@ -1450,18 +1450,19 @@ def apply_visual_fx(
         content_height,
     ) = content_rect
 
-    # The video at this point is already letterboxed into the 1080x1920
-    # canvas (see render.py's render_base_video()). Every filter above
+    # render_base_video() (app/render.py) crops to fill the 1080x1920
+    # canvas by default (content_rect is the full canvas, making the
+    # crop/pad below a no-op), but this still supports a letterboxed
+    # content_rect if one is ever passed in again. Every filter above
     # (vignette, color grade washes, RGB-split stripes, drawtext slam-text
     # positioning) is computed using iw/ih/w/h -- frame-relative ffmpeg
     # symbols with no hardcoded absolute pixels -- so cropping to the real
     # content rect before this chain runs and padding back out afterward
-    # makes every one of those effects operate on the actual visible video
-    # instead of the full canvas (e.g. a vignette's falloff was being
-    # calibrated to the full 1920px-tall canvas, making it barely visible
-    # within a much smaller letterboxed content area). No changes needed
-    # to any individual filter string. A full-canvas content_rect (no
-    # letterboxing) makes the crop/pad a no-op, identical to before.
+    # would make every one of those effects operate on the actual visible
+    # video instead of the full canvas even in that letterboxed case (e.g.
+    # a vignette's falloff calibrated to the full 1920px-tall canvas would
+    # otherwise be barely visible within a much smaller letterboxed
+    # content area). No changes needed to any individual filter string.
     filter_chain = (
         f"crop={content_width}:{content_height}:"
         f"{content_x}:{content_y},"

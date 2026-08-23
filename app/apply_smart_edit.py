@@ -1101,6 +1101,56 @@ def keep_segments_from_cuts(
     return keeps
 
 
+# Sub-frame precision doesn't matter for "is this the same edit" -- round
+# to milliseconds so float formatting differences between this script and
+# auto_cut.py (which round keep_ranges to 3 decimals when writing
+# edit_plan.json) never cause a false mismatch.
+KEEP_SEGMENT_COMPARISON_DECIMALS = 3
+
+
+def keep_segments_match_existing_tight_video(
+    keep_segments: list[tuple[float, float]],
+    pause_plan: dict[str, Any],
+) -> bool:
+    """
+    True if the final merged keep_segments this run computed are the same
+    as the pause-only keep_ranges auto_cut.py already rendered into
+    TIGHT_VIDEO (its own "ShortsFactory Smart Edit" stage, which always
+    runs before this one and never gets invalidated by it -- semantic_edit.py
+    in between changes no video file). When true, re-encoding here would
+    just reproduce the exact same output short1_tight.mp4 already has.
+    """
+
+    existing_ranges = pause_plan.get(
+        "keep_ranges",
+        [],
+    )
+
+    if not isinstance(existing_ranges, list):
+        return False
+
+    try:
+        existing = [
+            (
+                round(float(item["start"]), KEEP_SEGMENT_COMPARISON_DECIMALS),
+                round(float(item["end"]), KEEP_SEGMENT_COMPARISON_DECIMALS),
+            )
+            for item in existing_ranges
+        ]
+    except (TypeError, ValueError, KeyError):
+        return False
+
+    computed = [
+        (
+            round(start, KEEP_SEGMENT_COMPARISON_DECIMALS),
+            round(end, KEEP_SEGMENT_COMPARISON_DECIMALS),
+        )
+        for start, end in keep_segments
+    ]
+
+    return existing == computed
+
+
 def run(
     command: list[str],
 ) -> None:
@@ -1595,36 +1645,50 @@ def main() -> int:
 
             return 1
 
-    log("")
-    log(
-        "Rendering approved pause + semantic + manual transcript edits..."
-    )
-
-    try:
-
-        render_keep_segments(
-            BASE_VIDEO,
-            TIGHT_VIDEO,
-            keep_segments,
-        )
-
-    except subprocess.CalledProcessError as exc:
+    if TIGHT_VIDEO.exists() and keep_segments_match_existing_tight_video(
+        keep_segments,
+        pause_plan,
+    ):
 
         log("")
         log(
-            f"ERROR: FFmpeg failed with exit code {exc.returncode}"
+            "Final keep segments are identical to the pause-only cut "
+            "already rendered by the Smart Edit stage -- reusing "
+            f"{TIGHT_VIDEO.name} instead of re-encoding it."
         )
 
-        return exc.returncode or 1
-
-    except RuntimeError as exc:
+    else:
 
         log("")
         log(
-            f"ERROR: {exc}"
+            "Rendering approved pause + semantic + manual transcript edits..."
         )
 
-        return 1
+        try:
+
+            render_keep_segments(
+                BASE_VIDEO,
+                TIGHT_VIDEO,
+                keep_segments,
+            )
+
+        except subprocess.CalledProcessError as exc:
+
+            log("")
+            log(
+                f"ERROR: FFmpeg failed with exit code {exc.returncode}"
+            )
+
+            return exc.returncode or 1
+
+        except RuntimeError as exc:
+
+            log("")
+            log(
+                f"ERROR: {exc}"
+            )
+
+            return 1
 
     log("")
     log(

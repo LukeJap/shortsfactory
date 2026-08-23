@@ -1359,16 +1359,16 @@ def apply_motion(
         content_height,
     ) = content_rect
 
-    # The video at this point is already letterboxed into the 1080x1920
-    # canvas (see render.py's render_base_video()), so the zoompan filter
-    # above -- whose x/y/zoom expressions center and pan using iw/ih --
-    # would otherwise zoom into a mix of real content and black bars.
-    # Cropping to the real content rect first means iw/ih inside those
-    # expressions resolve to the actual content dimensions with no changes
-    # needed to any of that zoom/pan logic; padding back out afterward
-    # restores the original 1080x1920 canvas and centering. When
-    # content_rect is the full-canvas default, both crop and pad are
-    # no-ops, identical to the previous behavior.
+    # render_base_video() (app/render.py) crops to fill the 1080x1920
+    # canvas by default (content_rect is the full canvas, making both
+    # crop/pad below no-ops), but this still supports a letterboxed
+    # content_rect if one is ever passed in again -- in that case the
+    # zoompan filter above (whose x/y/zoom expressions center and pan
+    # using iw/ih) would otherwise zoom into a mix of real content and
+    # black bars. Cropping to the real content rect first means iw/ih
+    # inside those expressions resolve to the actual content dimensions
+    # with no changes needed to any of that zoom/pan logic; padding back
+    # out afterward restores the original 1080x1920 canvas and centering.
     filter_string = (
         f"crop={content_width}:{content_height}:"
         f"{content_x}:{content_y},"
