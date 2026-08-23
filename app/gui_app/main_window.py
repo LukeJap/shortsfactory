@@ -94,6 +94,17 @@ class ShortsFactoryWindow(
         process_env.insert("PYTHONIOENCODING", "utf-8")
         process_env.insert("PYTHONUTF8", "1")
 
+        # render.py's own stdout is a pipe (not a terminal), so Python
+        # defaults to full block-buffering for it -- its own print()
+        # "=== STEP N ===" progress headers then sit in that buffer for
+        # the entire multi-minute render and only appear all at once right
+        # before the process exits, even though the ffmpeg/whisper
+        # subprocesses it shells out to stream their own output live (each
+        # is short-lived, so its buffer auto-flushes at its own exit).
+        # Forcing every Python process this app launches fully unbuffered
+        # makes the live render log actually reflect progress in real time.
+        process_env.insert("PYTHONUNBUFFERED", "1")
+
         self.render_process.setProcessEnvironment(
             process_env
         )

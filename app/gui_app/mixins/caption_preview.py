@@ -3,13 +3,28 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel
 
+from render import (
+    CAPTION_SAFE_MARGIN_BOTTOM,
+    CAPTION_SAFE_MARGIN_LEFT,
+    CAPTION_SAFE_MARGIN_RIGHT,
+    OUTPUT_HEIGHT,
+    OUTPUT_WIDTH,
+)
 
-# Matches today's default ASS placement with no override: Alignment=2
-# (bottom-center) and MarginV=250 out of a 1920-tall canvas, horizontally
-# centered. Used both as the preview's idle position (nothing dragged yet)
-# and as the fallback the render itself uses when no override is saved.
-DEFAULT_CAPTION_POSITION_X = 0.5
-DEFAULT_CAPTION_POSITION_Y = 1.0 - (250 / 1920)
+
+# Matches today's *actual* default caption placement with no override.
+# burn_captions() (render.py, STEP 8) burns captions with
+# force_style='Alignment=2,MarginL=...,MarginR=...,MarginV=...', which
+# completely overrides whatever Style block make_captions.py wrote into
+# captions.ass -- so these constants (not make_captions.py's own MARGIN_V)
+# are the ones that actually determine where captions land by default.
+# Importing them directly from render.py means this can't drift out of
+# sync with the real render again.
+DEFAULT_CAPTION_POSITION_X = (
+    CAPTION_SAFE_MARGIN_LEFT
+    + (OUTPUT_WIDTH - CAPTION_SAFE_MARGIN_RIGHT)
+) / 2 / OUTPUT_WIDTH
+DEFAULT_CAPTION_POSITION_Y = 1.0 - (CAPTION_SAFE_MARGIN_BOTTOM / OUTPUT_HEIGHT)
 
 PLACEHOLDER_CAPTION_TEXT = "Sample caption text"
 
