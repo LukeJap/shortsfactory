@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..constants import ROOT
+from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 from emoji_overlay import (
     EMOJI_DIR,
     EMOJI_SIZE,
@@ -230,8 +231,8 @@ class EmojiPreviewMixin:
             self.ai_visual_preview_canvas_rect()
         )
 
-        emoji_width = max(1, round(canvas_width * (EMOJI_SIZE / 1080)))
-        emoji_height = max(1, round(canvas_height * (EMOJI_SIZE / 1920)))
+        emoji_width = max(1, round(canvas_width * (EMOJI_SIZE / OUTPUT_WIDTH)))
+        emoji_height = max(1, round(canvas_height * (EMOJI_SIZE / OUTPUT_HEIGHT)))
 
         for slot_index, label in enumerate(self.emoji_preview_labels):
             if slot_index >= len(active):
@@ -331,8 +332,8 @@ class EmojiPreviewMixin:
         canvas_x, canvas_y, canvas_width, canvas_height = (
             self.ai_visual_preview_canvas_rect()
         )
-        emoji_width = max(1, round(canvas_width * (EMOJI_SIZE / 1080)))
-        emoji_height = max(1, round(canvas_height * (EMOJI_SIZE / 1920)))
+        emoji_width = max(1, round(canvas_width * (EMOJI_SIZE / OUTPUT_WIDTH)))
+        emoji_height = max(1, round(canvas_height * (EMOJI_SIZE / OUTPUT_HEIGHT)))
 
         delta = event.globalPosition().toPoint() - self.emoji_preview_drag_origin
 

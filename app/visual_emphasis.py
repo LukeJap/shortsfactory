@@ -5,6 +5,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+try:
+    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -434,10 +439,6 @@ def write_render_settings(
     )
 
 
-CANVAS_WIDTH = 1080
-CANVAS_HEIGHT = 1920
-
-
 def content_rect_from_settings(
     settings: dict[str, Any],
 ) -> tuple[int, int, int, int]:
@@ -468,13 +469,13 @@ def content_rect_from_settings(
         int(
             settings.get(
                 "content_width",
-                CANVAS_WIDTH,
+                OUTPUT_WIDTH,
             )
         ),
         int(
             settings.get(
                 "content_height",
-                CANVAS_HEIGHT,
+                OUTPUT_HEIGHT,
             )
         ),
     )

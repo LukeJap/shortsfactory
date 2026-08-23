@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QPixmap
 
+from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 from editor_asset_plan import clips_of_kind
 
 
@@ -342,7 +343,7 @@ class AIVisualPreviewMixin:
                         canvas_width
                         * (
                             842
-                            / 1080
+                            / OUTPUT_WIDTH
                         )
                         * scale
                     )
@@ -355,7 +356,7 @@ class AIVisualPreviewMixin:
                         canvas_height
                         * (
                             882
-                            / 1920
+                            / OUTPUT_HEIGHT
                         )
                         * scale
                     )
@@ -387,7 +388,7 @@ class AIVisualPreviewMixin:
                         canvas_height
                         * (
                             110
-                            / 1920
+                            / OUTPUT_HEIGHT
                         )
                     )
                 ),

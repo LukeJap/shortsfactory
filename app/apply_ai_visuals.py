@@ -31,6 +31,11 @@ except ImportError:
         load_render_settings,
     )
 
+try:
+    from .canvas_config import OUTPUT_HEIGHT as FRAME_HEIGHT, OUTPUT_WIDTH as FRAME_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT as FRAME_HEIGHT, OUTPUT_WIDTH as FRAME_WIDTH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -79,8 +84,6 @@ TEMP_PATH = (
     / "short1_visuals_tmp.mp4"
 )
 
-FRAME_WIDTH = 1080
-FRAME_HEIGHT = 1920
 CARD_MAX_WIDTH = 842
 CARD_MAX_HEIGHT = 882
 CARD_BORDER = 12

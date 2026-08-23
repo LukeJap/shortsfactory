@@ -24,6 +24,11 @@ except ImportError:
         write_render_settings,
     )
 
+try:
+    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,9 +64,6 @@ SUBTITLES_PATH = (
 DEFAULT_SOURCE_VIDEO = (
     ROOT / "input" / "short1.mp4"
 )
-
-OUTPUT_WIDTH = 1080
-OUTPUT_HEIGHT = 1920
 
 # Keep captions around the lower-center of the Shorts canvas rather
 # than near the bottom UI controls.

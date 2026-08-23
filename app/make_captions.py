@@ -1519,10 +1519,10 @@ def main() -> int:
     # ASS HEADER
     # ========================================================
 
-    header = """[Script Info]
+    header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {OUTPUT_WIDTH}
+PlayResY: {OUTPUT_HEIGHT}
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]

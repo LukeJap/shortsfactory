@@ -27,6 +27,11 @@ except ImportError:
         normalize_energy,
     )
 
+try:
+    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1336,7 +1341,7 @@ def y_expression(
 def apply_motion(
     events: list[dict[str, Any]],
     fps: float,
-    content_rect: tuple[int, int, int, int] = (0, 0, 1080, 1920),
+    content_rect: tuple[int, int, int, int] = (0, 0, OUTPUT_WIDTH, OUTPUT_HEIGHT),
 ) -> None:
 
     zoom = zoom_expression(
@@ -1379,7 +1384,7 @@ def apply_motion(
         "d=1:"
         f"s={content_width}x{content_height}:"
         f"fps={fps:.6f},"
-        "pad=1080:1920:"
+        f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
         f"{content_x}:{content_y}:black"
     )
 

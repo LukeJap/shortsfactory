@@ -5,6 +5,11 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
+try:
+    from .canvas_config import OUTPUT_HEIGHT as CANVAS_HEIGHT, OUTPUT_WIDTH as CANVAS_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT as CANVAS_HEIGHT, OUTPUT_WIDTH as CANVAS_WIDTH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,9 +40,6 @@ TWEMOJI_BASE = (
 # Simple emoji style.
 EMOJI_DURATION = 1.50
 EMOJI_SIZE = 175
-
-CANVAS_WIDTH = 1080
-CANVAS_HEIGHT = 1920
 
 # Legacy fixed round-robin corner positions (top-left of the EMOJI_SIZE box,
 # in canvas pixels). Still used as the *default* position for any emoji

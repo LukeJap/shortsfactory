@@ -37,6 +37,11 @@ except ImportError:
         word_time,
     )
 
+try:
+    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1433,7 +1438,7 @@ def write_plan(
 def apply_visual_fx(
     energy: str,
     events: list[dict[str, Any]],
-    content_rect: tuple[int, int, int, int] = (0, 0, 1080, 1920),
+    content_rect: tuple[int, int, int, int] = (0, 0, OUTPUT_WIDTH, OUTPUT_HEIGHT),
     intensity: float = 1.0,
 ) -> None:
 
@@ -1467,7 +1472,7 @@ def apply_visual_fx(
         f"crop={content_width}:{content_height}:"
         f"{content_x}:{content_y},"
         f"{filter_chain},"
-        "pad=1080:1920:"
+        f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
         f"{content_x}:{content_y}:black"
     )
 
