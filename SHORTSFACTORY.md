@@ -928,7 +928,43 @@ the same output paths structurally impossible (e.g. a lock file, or
 per-render-attempt unique temp paths merged in only on success) rather
 than just detecting the corruption after the fact.
 
-## 13. What's still open
+## 13. Reverted to full-frame crop, letting sides get cut off instead of letterboxing
+
+Sections 10-11 made every visual effect (smart motion zoom, AI visual
+overlays, color grade/vignette) correctly aware of the letterboxed
+content rect, on the premise that `render_base_video()` fits the source
+into the canvas without cropping (letterboxed, black bars). The user then
+asked for the opposite trade-off: fill the entire 9:16 frame with real
+video edge-to-edge, accepting cropped left/right (or top/bottom) edges
+rather than black bars.
+
+`render_base_video()`'s `-vf` filter changed from fit-and-letterbox
+(`scale=...:force_original_aspect_ratio=decrease` + `pad=...:black`) back
+to scale-and-crop-to-fill (`scale=...:force_original_aspect_ratio=increase`
++ `crop=1080:1920`) — covering the whole canvas, cropping whatever
+overhangs the edges.
+
+Because crop-to-fill means content always covers 100% of the canvas, there
+is no longer a smaller "content rect" to compute per source — it's simply
+the full canvas every time. `render_base_video()` now writes
+`content_x=0, content_y=0, content_width=1080, content_height=1920`
+directly into `render_settings.json` instead of calling
+`content_rect_for_source()`. Since every downstream effect added in
+sections 10-11 already reads the content rect with a full-canvas default,
+**this needed zero further changes to `smart_motion.py`,
+`apply_ai_visuals.py`, or `visual_fx.py`** — they automatically treat the
+whole frame as content again, which is exactly the desired behavior now.
+`content_rect_for_source()` and `ffprobe_source_dimensions()` are left in
+place (still tested, still correct) in case letterboxing is wanted again
+later — `render_base_video()` just doesn't call them anymore.
+
+Verified with a real render against the sample video: `ffprobe` confirms
+the output is 1080x1920, and ffmpeg's own `cropdetect` now reports
+`crop=1080:1920:0:0` — zero black border detected, full-frame content
+confirmed. `py_compile`/`pyflakes` clean, full test suite passes (41/41),
+app launches cleanly offscreen.
+
+## 14. What's still open
 
 This pass did not touch:
 

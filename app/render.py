@@ -614,35 +614,19 @@ def render_base_video(
     )
     print()
 
-    try:
-        source_width, source_height = ffprobe_source_dimensions(
-            source_video
-        )
-    except (
-        subprocess.CalledProcessError,
-        RuntimeError,
-        KeyError,
-        ValueError,
-    ) as exc:
-        print(
-            f"WARNING: Could not probe source dimensions "
-            f"({exc}); downstream effects will assume a "
-            f"full-canvas (non-letterboxed) frame."
-        )
-        source_width, source_height = 0, 0
-
-    content_x, content_y, content_width, content_height = (
-        content_rect_for_source(
-            source_width,
-            source_height,
-        )
-    )
-
+    # Fill the entire 9:16 canvas with real video -- source content is
+    # scaled up and center-cropped to cover the frame edge-to-edge, at the
+    # cost of losing the source's left/right (or top/bottom) edges. No
+    # letterboxing, so there's no separate "content rect" to track: the
+    # video content always fills the whole canvas, and every downstream
+    # effect (smart motion zoom, AI visual overlays, color grade/vignette)
+    # already treats a full-canvas content rect as its default, so this
+    # needs no further changes there.
     settings = load_render_settings()
-    settings["content_x"] = content_x
-    settings["content_y"] = content_y
-    settings["content_width"] = content_width
-    settings["content_height"] = content_height
+    settings["content_x"] = 0
+    settings["content_y"] = 0
+    settings["content_width"] = OUTPUT_WIDTH
+    settings["content_height"] = OUTPUT_HEIGHT
     write_render_settings(settings)
 
     command = [
@@ -673,13 +657,11 @@ def render_base_video(
 
         "-vf",
         (
-            # Preserve the complete source frame. Landscape video is
-            # fitted to the Shorts width and letterboxed vertically
-            # instead of being enlarged and center-cropped.
+            # Fill the full 9:16 frame: scale up until the source covers
+            # the canvas, then center-crop whatever overhangs the edges.
             f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
-            "force_original_aspect_ratio=decrease:flags=lanczos,"
-            f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
-            "(ow-iw)/2:(oh-ih)/2:black,"
+            "force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},"
             "setsar=1"
         ),
 
