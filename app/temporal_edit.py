@@ -241,32 +241,20 @@ def event_budget(duration: float, energy: str) -> dict[str, int]:
         scale = 0.72 if duration < 18 else 1.0
         return {
             "speed_up": max(1, int(round(3 * scale))),
-            "slow_down": max(1, int(round(2 * scale))),
             "speed_ramp": max(1, int(round(2 * scale))),
-            "freeze": max(1, int(round(2 * scale))),
-            "micro_replay": 1 if duration >= 14 else 0,
-            "reverse_blip": 1 if duration >= 20 else 0,
             "whip_transition": max(1, int(round(3 * scale))),
         }
 
     if energy == "PUNCHY":
         return {
             "speed_up": 1 if duration >= 18 else 0,
-            "slow_down": 1 if duration >= 24 else 0,
             "speed_ramp": 1 if duration >= 16 else 0,
-            "freeze": 1 if duration >= 22 else 0,
-            "micro_replay": 0,
-            "reverse_blip": 0,
             "whip_transition": 1 if duration >= 20 else 0,
         }
 
     return {
         "speed_up": 0,
-        "slow_down": 0,
         "speed_ramp": 0,
-        "freeze": 0,
-        "micro_replay": 0,
-        "reverse_blip": 0,
         "whip_transition": 0,
     }
 
@@ -516,168 +504,8 @@ def build_temporal_events(
         ):
             selected_counts["whip_transition"] += 1
 
-    # Short slowdowns preserve pitch with atempo and stay small.
-    for moment in moments:
-        if selected_counts["slow_down"] >= budgets["slow_down"]:
-            break
-
-        recipe = str(moment.get("recipe", ""))
-        if recipe not in {
-            "reaction",
-            "fail_awkward",
-            "wtf_chaos",
-            "hype_win",
-            "doom_negative",
-        }:
-            continue
-
-        start = max(0.0, as_float(moment.get("start"), 0.0) - 0.04)
-        end = min(duration, as_float(moment.get("end"), start) + 0.12)
-        if end - start > 0.82:
-            end = start + 0.82
-
-        overlapping = overlaps_word(words, start, end)
-        if len(overlapping) > 3:
-            continue
-
-        speed = 0.82 if energy == "MAXIMUM" else 0.91
-        if add_event(
-            events,
-            {
-                "type": "slow_down",
-                "source_start": round(start, 3),
-                "source_end": round(end, 3),
-                "speed": speed,
-                "reason": "hold_reaction_or_payoff_timing",
-                "trigger_word": moment.get("word", ""),
-                "recipe": recipe,
-                "intensity": moment.get("intensity", 0.0),
-                "dialogue_protection": "short_pitch_preserved_atempo",
-            },
-            scene_cuts,
-        ):
-            selected_counts["slow_down"] += 1
-
-    # Visual holds insert silence after a word/gap so we never repeat syllables.
-    for moment in moments:
-        if selected_counts["freeze"] >= budgets["freeze"]:
-            break
-
-        anchor = min(duration - 0.05, as_float(moment.get("end"), 0.0))
-        next_words = [
-            word
-            for word in words
-            if (word_time(word) or (0.0, 0.0))[0] >= anchor
-        ]
-        if next_words:
-            next_timing = word_time(
-                next_words[0]
-            )
-            if (
-                next_timing is not None
-                and next_timing[0] - anchor < 0.12
-            ):
-                continue
-
-        hold = 0.28 if energy == "MAXIMUM" else 0.18
-        if str(moment.get("recipe", "")) in {"reaction", "wtf_chaos"}:
-            hold += 0.10
-
-        if add_event(
-            events,
-            {
-                "type": "freeze",
-                "anchor": round(anchor, 3),
-                "duration": round(min(0.52, hold), 3),
-                "reason": "visual_hold_after_impact_word",
-                "trigger_word": moment.get("word", ""),
-                "recipe": moment.get("recipe", ""),
-                "intensity": moment.get("intensity", 0.0),
-                "audio_behavior": "insert_silence_to_protect_speech",
-                "dialogue_protection": "post_word_gap_required",
-            },
-            scene_cuts,
-        ):
-            selected_counts["freeze"] += 1
-
-    if energy == "MAXIMUM":
-        for moment in moments:
-            if selected_counts["micro_replay"] >= budgets["micro_replay"]:
-                break
-
-            recipe = str(moment.get("recipe", ""))
-            if recipe not in {"reaction", "wtf_chaos", "fail_awkward", "hype_win"}:
-                continue
-
-            anchor = as_float(moment.get("end"), 0.0)
-            start = max(0.0, anchor - 0.42)
-            end = min(duration, anchor + 0.06)
-            if end - start < 0.24:
-                continue
-
-            if len(overlaps_word(words, start, end)) > 3:
-                continue
-
-            if add_event(
-                events,
-                {
-                    "type": "micro_replay",
-                    "anchor": round(anchor, 3),
-                    "source_start": round(start, 3),
-                    "source_end": round(end, 3),
-                    "duration": round(end - start, 3),
-                    "reason": "rare_visual_payoff_replay",
-                    "trigger_word": moment.get("word", ""),
-                    "recipe": recipe,
-                    "intensity": moment.get("intensity", 0.0),
-                    "audio_behavior": "muted_insert_silence",
-                    "dialogue_protection": "short_low_density_snippet",
-                },
-                scene_cuts,
-            ):
-                selected_counts["micro_replay"] += 1
-
-        for moment in moments:
-            if selected_counts["reverse_blip"] >= budgets["reverse_blip"]:
-                break
-
-            if str(moment.get("recipe", "")) not in {
-                "wtf_chaos",
-                "reaction",
-                "fail_awkward",
-            }:
-                continue
-
-            anchor = as_float(moment.get("start"), 0.0)
-            start = max(0.0, anchor - 0.28)
-            end = min(duration, anchor)
-            if end - start < 0.16 or overlaps_word(words, start, end):
-                continue
-
-            if add_event(
-                events,
-                {
-                    "type": "reverse_blip",
-                    "anchor": round(anchor, 3),
-                    "source_start": round(start, 3),
-                    "source_end": round(end, 3),
-                    "duration": round(end - start, 3),
-                    "reason": "rare_comedic_reverse_before_reaction",
-                    "trigger_word": moment.get("word", ""),
-                    "recipe": moment.get("recipe", ""),
-                    "intensity": moment.get("intensity", 0.0),
-                    "audio_behavior": "muted_insert_silence",
-                    "dialogue_protection": "pre_word_gap_only",
-                },
-                scene_cuts,
-            ):
-                selected_counts["reverse_blip"] += 1
-
     events.sort(
-        key=lambda event: (
-            as_float(event.get("source_start", event.get("anchor")), 0.0),
-            0 if event.get("type") in {"freeze", "micro_replay", "reverse_blip"} else 1,
-        )
+        key=lambda event: as_float(event.get("source_start"), 0.0)
     )
     return events
 
@@ -721,36 +549,6 @@ def add_source_segment(
     )
 
 
-def add_insert_segment(
-    media_segments: list[dict[str, Any]],
-    event: dict[str, Any],
-) -> None:
-    duration = as_float(event.get("duration"), 0.0)
-    if duration < MIN_SOURCE_SEGMENT_SECONDS:
-        return
-
-    output_start = (
-        as_float(media_segments[-1].get("output_end"), 0.0)
-        if media_segments
-        else 0.0
-    )
-    media_segments.append(
-        {
-            "kind": "insert",
-            "type": event.get("type", "insert"),
-            "anchor": round(as_float(event.get("anchor"), 0.0), 6),
-            "source_start": round(as_float(event.get("source_start"), 0.0), 6),
-            "source_end": round(as_float(event.get("source_end"), 0.0), 6),
-            "output_start": round(output_start, 6),
-            "output_end": round(output_start + duration, 6),
-            "duration_before": 0.0,
-            "duration_after": round(duration, 6),
-            "speed": 0.0,
-            "event_id": event.get("id", ""),
-        }
-    )
-
-
 def build_media_segments(
     events: list[dict[str, Any]],
     duration: float,
@@ -760,31 +558,7 @@ def build_media_segments(
 
     for event in events:
         event_type = str(event.get("type", ""))
-        is_insert = event_type in {"freeze", "micro_replay", "reverse_blip"}
-        anchor = as_float(
-            event.get("anchor", event.get("source_start", 0.0)),
-            0.0,
-        )
-
-        if anchor < cursor - 0.001:
-            event["skipped_reason"] = "overlaps_previous_temporal_segment"
-            continue
-
-        if anchor > cursor:
-            add_source_segment(
-                media_segments,
-                cursor,
-                min(duration, anchor),
-                1.0,
-                "normal",
-            )
-            cursor = anchor
-
-        if is_insert:
-            add_insert_segment(media_segments, event)
-            continue
-
-        source_start = as_float(event.get("source_start"), anchor)
+        source_start = as_float(event.get("source_start"), 0.0)
         source_end = as_float(event.get("source_end"), source_start)
         speed = as_float(event.get("speed"), 1.0)
 
@@ -831,41 +605,15 @@ def filter_for_video_segment(
     label = f"[v{index}]"
     segment_type = str(segment.get("type", "normal"))
 
-    if segment.get("kind") == "insert" and segment_type == "freeze":
-        anchor = as_float(segment.get("anchor"), 0.0)
-        frame_span = max(0.034, 1.0 / max(1.0, fps))
-        duration = as_float(segment.get("duration_after"), 0.1)
-        return (
-            f"[0:v]trim=start={anchor:.6f}:end={anchor + frame_span:.6f},"
-            "setpts=PTS-STARTPTS,"
-            f"tpad=stop_mode=clone:stop_duration={duration:.6f},"
-            f"trim=duration={duration:.6f},format=yuv420p{label}"
-        )
-
     source_start = as_float(segment.get("source_start"), 0.0)
     source_end = as_float(segment.get("source_end"), source_start)
-
-    # Insert segments do not advance the source timeline, so their plan-level
-    # speed is stored as 0.0. That value must never be used as playback speed:
-    # dividing PTS by 0.001 turns a 0.48s replay into roughly 480 seconds.
-    speed = (
-        1.0
-        if segment.get("kind") == "insert"
-        else as_float(segment.get("speed"), 1.0)
-    )
+    speed = as_float(segment.get("speed"), 1.0)
 
     filters = [
         f"[0:v]trim=start={source_start:.6f}:end={source_end:.6f}",
     ]
 
-    if segment_type == "reverse_blip":
-        filters.append("reverse")
-
     filters.append(f"setpts=(PTS-STARTPTS)/{max(0.001, speed):.6f}")
-
-    if segment_type in {"micro_replay", "reverse_blip"}:
-        filters.append("eq=contrast=1.28:saturation=1.22:brightness=0.020")
-        filters.append("drawbox=x=0:y=0:w=iw:h=ih:color=white@0.08:t=fill")
 
     if segment_type in {"speed_ramp", "speed_up", "whip_transition"}:
         filters.append("unsharp=5:5:0.36:3:3:0.12")
@@ -885,13 +633,6 @@ def filter_for_audio_segment(
 ) -> str:
     label = f"[a{index}]"
     segment_type = str(segment.get("type", "normal"))
-
-    if segment.get("kind") == "insert":
-        duration = as_float(segment.get("duration_after"), 0.1)
-        return (
-            "anullsrc=channel_layout=stereo:sample_rate=48000,"
-            f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS{label}"
-        )
 
     source_start = as_float(segment.get("source_start"), 0.0)
     source_end = as_float(segment.get("source_end"), source_start)
@@ -1129,65 +870,40 @@ def annotate_events_with_output_times(
 
     for event in events:
         item = dict(event)
-        event_type = str(item.get("type", ""))
-        if event_type in {"freeze", "micro_replay", "reverse_blip"}:
-            matching = next(
-                (
-                    segment
-                    for segment in media_segments
-                    if segment.get("event_id") == item.get("id")
-                ),
-                None,
+        source_start = as_float(item.get("source_start"), 0.0)
+        source_end = as_float(item.get("source_end"), source_start)
+        speed = max(0.001, as_float(item.get("speed"), 1.0))
+        item["output_start"] = round(
+            map_time(
+                source_start,
+                media_segments,
+                final_duration,
+            ),
+            4,
+        )
+        item["output_end"] = round(
+            map_time(
+                source_end,
+                media_segments,
+                final_duration,
+            ),
+            4,
+        )
+        item["duration_before"] = round(
+            max(
+                0.0,
+                source_end - source_start,
+            ),
+            4,
+        )
+        item["duration_after"] = round(
+            max(
+                0.0,
+                source_end - source_start,
             )
-            if matching:
-                item["output_start"] = matching.get("output_start", 0.0)
-                item["output_end"] = matching.get("output_end", 0.0)
-                item["duration_before"] = matching.get(
-                    "duration_before",
-                    0.0,
-                )
-                item["duration_after"] = matching.get(
-                    "duration_after",
-                    item.get(
-                        "duration",
-                        0.0,
-                    ),
-                )
-        else:
-            source_start = as_float(item.get("source_start"), 0.0)
-            source_end = as_float(item.get("source_end"), source_start)
-            speed = max(0.001, as_float(item.get("speed"), 1.0))
-            item["output_start"] = round(
-                map_time(
-                    source_start,
-                    media_segments,
-                    final_duration,
-                ),
-                4,
-            )
-            item["output_end"] = round(
-                map_time(
-                    source_end,
-                    media_segments,
-                    final_duration,
-                ),
-                4,
-            )
-            item["duration_before"] = round(
-                max(
-                    0.0,
-                    source_end - source_start,
-                ),
-                4,
-            )
-            item["duration_after"] = round(
-                max(
-                    0.0,
-                    source_end - source_start,
-                )
-                / speed,
-                4,
-            )
+            / speed,
+            4,
+        )
 
         annotated.append(item)
 
@@ -1290,14 +1006,9 @@ def main() -> int:
         "duration_delta_seconds": round(final_duration - duration, 4),
         "fps": round(fps, 6),
         "has_audio": has_audio,
-        "audio_strategy": (
-            "pitch_preserving_atempo_for_speed_segments; "
-            "silence_for_inserted_freeze_replay_reverse_segments"
-        ),
+        "audio_strategy": "pitch_preserving_atempo_for_speed_segments",
         "dialogue_protection": [
-            "speed-up and speed-ramp events are selected from word gaps",
-            "freeze events require a post-word gap and never repeat phonemes",
-            "replay/reverse inserts are MAXIMUM-only and muted",
+            "speed-up, speed-ramp, and whip events are selected from word gaps",
             "events crossing scene cuts are rejected",
         ],
         "scene_cuts": [round(cut, 3) for cut in scene_cuts],
