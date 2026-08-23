@@ -695,7 +695,34 @@ fully mocking out) — the throttle/nudge block itself is textually
 identical to the already-stress-tested one in `seek_video()`, just not
 independently re-exercised in isolation here. Not yet confirmed live.
 
-## 9. What's still open
+## 9. Trackpad horizontal scroll to pan the editor timeline
+
+`SuggestionSlider.wheelEvent()` (`app/gui_app/timeline_widget.py`) already
+supported `Ctrl+wheel` to zoom and `Shift+wheel` to pan, but a plain
+two-finger trackpad horizontal swipe (no modifier key) did nothing —
+`event.ignore()`. Added a new branch: when no modifier is held and the
+horizontal scroll component (`angleDelta().x()`) is the dominant one
+(`>= abs(angleDelta().y())`), pan the timeline directly using the same
+`horizontal_pan()` used by `Shift+wheel`. An ordinary vertical scroll
+(dominant `y` component) still falls through to `event.ignore()`
+unchanged, so it doesn't interfere with anything a parent widget might do
+with vertical scroll input.
+
+Verified directly with a synthetic `QWheelEvent`: a horizontal scroll pans
+the viewport, the opposite direction pans back symmetrically to the exact
+same range, and a vertical-only scroll leaves the viewport untouched and
+correctly reports `event.isAccepted() == False`. `py_compile`/`pyflakes`
+clean, full test suite passes (37/37), app launches cleanly offscreen.
+
+**Uncertainty worth flagging:** the pan direction reuses the same sign
+convention already used for `Shift+wheel`, for internal consistency, but
+which direction feels "natural" for a two-finger swipe is genuinely
+platform/settings-dependent (macOS's "natural scrolling" toggle inverts
+the convention) and wasn't confirmed live. If it pans backwards from what
+feels right, it's a one-line sign flip (`direction = -1 if
+horizontal_delta > 0 else 1` → `1 if ... else -1`).
+
+## 10. What's still open
 
 This pass did not touch:
 

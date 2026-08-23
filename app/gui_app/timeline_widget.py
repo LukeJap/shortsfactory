@@ -2149,6 +2149,33 @@ class SuggestionSlider(QSlider):
             event.accept()
             return
 
+        # Plain two-finger trackpad horizontal scroll (no modifier key)
+        # pans the timeline directly, without needing to hold Shift.
+        # Distinguished from an ordinary vertical scroll by the horizontal
+        # component being the dominant one, so a normal vertical scroll
+        # over the timeline still falls through to event.ignore() below.
+        horizontal_delta = event.angleDelta().x()
+
+        if (
+            not modifiers
+            and horizontal_delta != 0
+            and abs(horizontal_delta)
+            >= abs(
+                event.angleDelta().y()
+            )
+        ):
+            direction = -1 if horizontal_delta > 0 else 1
+            self.horizontal_pan(
+                int(
+                    self.visible_duration()
+                    * 0.14
+                    * direction
+                ),
+                manual=True,
+            )
+            event.accept()
+            return
+
         event.ignore()
 
     def set_manual_cut_ranges(
