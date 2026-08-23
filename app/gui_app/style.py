@@ -120,6 +120,13 @@ STYLESHEET =            """
                 border: 1px dashed #d04b5f;
             }
 
+            QFrame#EditStylePanel {
+                background: #0B0B0D;
+                border: 1px solid #30292D;
+                border-left: 3px solid #741C28;
+                border-radius: 4px;
+            }
+
             QLabel#DropIcon {
                 font-size: 44px;
                 color: #d04b5f;
@@ -436,6 +443,30 @@ STYLESHEET =            """
             QPushButton#TinyButton:hover {
                 background: #1C1014;
                 border: 1px solid #C9384F;
+            }
+
+            QPushButton#EditStyleButton {
+                color: #968B86;
+                background: #101012;
+                border: 1px solid #30292D;
+                border-radius: 4px;
+                padding: 7px 3px;
+                min-height: 38px;
+                font-size: 9px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+
+            QPushButton#EditStyleButton:hover {
+                color: #F2E6D4;
+                background: #1A1115;
+                border: 1px solid #8D3445;
+            }
+
+            QPushButton#EditStyleButton:checked {
+                color: #FFF3E3;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);
+                border: 1px solid #E05C6F;
             }
 
             QPushButton#CutButton {

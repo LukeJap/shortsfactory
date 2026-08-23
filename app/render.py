@@ -504,6 +504,19 @@ def render_base_video(
         "-i",
         str(source_video),
 
+        # ShortsFactory exports only the primary video plus optional primary
+        # audio. Some source files carry long timecode/data tracks; allowing
+        # FFmpeg to auto-select those can make a 6-second Short report as
+        # several minutes long in media players.
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "0:a:0?",
+
+        "-sn",
+        "-dn",
+
         "-vf",
         (
             # Preserve the complete source frame. Landscape video is
@@ -761,6 +774,18 @@ def burn_captions() -> None:
         "-i",
         str(TIGHT_OUTPUT_PATH),
 
+        # Final-export guard: keep only picture + optional audio even if a
+        # future intermediate stage accidentally introduces subtitle/data
+        # tracks again.
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "0:a:0?",
+
+        "-sn",
+        "-dn",
+
         "-vf",
         (
             "subtitles=output/captions.ass:"
@@ -856,6 +881,55 @@ def add_sound_effects() -> None:
                 f"{result.returncode}; continuing without blocking render."
             )
         )
+
+
+def sanitize_final_output() -> None:
+
+    print()
+    print(
+        "=== STEP 10.5: Sanitizing final media streams ==="
+    )
+    print()
+
+    if not CAPTION_OUTPUT_PATH.exists():
+        raise FileNotFoundError(
+            f"Final Short not found: {CAPTION_OUTPUT_PATH}"
+        )
+
+    sanitized_path = CAPTION_OUTPUT_PATH.with_name(
+        f"{CAPTION_OUTPUT_PATH.stem}_sanitized{CAPTION_OUTPUT_PATH.suffix}"
+    )
+
+    if sanitized_path.exists():
+        sanitized_path.unlink()
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(CAPTION_OUTPUT_PATH),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-sn",
+        "-dn",
+        "-map_metadata",
+        "-1",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(sanitized_path),
+    ]
+
+    run_command(
+        command
+    )
+
+    sanitized_path.replace(
+        CAPTION_OUTPUT_PATH
+    )
 
 
 # ============================================================
@@ -1044,6 +1118,14 @@ def main() -> int:
     # --------------------------------------------------------
 
     add_sound_effects()
+
+    # --------------------------------------------------------
+    # STEP 10.5
+    # Final export sanitation. Optional emoji/SFX stages may skip
+    # rewriting the file, so explicitly remove non-A/V streams here.
+    # --------------------------------------------------------
+
+    sanitize_final_output()
 
     # --------------------------------------------------------
     # STEP 11
