@@ -1,0 +1,33 @@
+# Python runtime dependencies for ShortsFactory.
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# This alone is not a full environment. Two system-level (non-Python)
+# dependencies are also required and cannot be expressed in this file —
+# see "Environment setup" in SHORTSFACTORY.md for the full recipe:
+#   - ffmpeg — on macOS this must be Homebrew's `ffmpeg-full`, not the
+#     default `ffmpeg` formula, which lacks `libass` (needed to burn in
+#     captions). `brew install ffmpeg-full && brew link --force ffmpeg-full`.
+#   - Ollama (https://ollama.com) running locally, with the `llama3.1:8b`
+#     model pulled: `ollama pull llama3.1:8b`.
+#
+# numpy/opencv-python/llvmlite/numba/torch are pinned together as a known
+# working set, not just individually latest. If you're on an x86_64 Python
+# running under Rosetta on Apple Silicon (check with
+# `python3 -c "import platform; print(platform.machine())"` — x86_64 on an
+# M-series Mac means Rosetta), PyTorch is capped at 2.2.2, the last version
+# with an Intel macOS wheel, and 2.2.2 predates NumPy 2 support — hence the
+# numpy<2 / opencv-python<5 pins below. If you instead rebuild this venv on
+# a native arm64 Python, you can likely drop these pins and use current
+# releases of everything (numpy>=2, a newer torch, opencv-python 5.x) —
+# see SHORTSFACTORY.md.
+
+PySide6==6.11.2
+requests==2.34.2
+opencv-python==4.11.0.86
+numpy==1.26.4
+llvmlite==0.45.1
+numba==0.62.1
+openai-whisper==20250625
+torch==2.2.2

@@ -87,6 +87,58 @@ via Homebrew:
   installed. Installed the Ollama app and ran `ollama pull llama3.1:8b`
   (~4.9GB).
 
+### 1.5 Reproducible setup: `requirements.txt`
+
+Everything in 1.2/1.3 above had to be discovered by running the app and
+reading tracebacks, because nothing in the repo declared these
+dependencies. Added `requirements.txt` at the repo root capturing the
+actual working set verified in this pass:
+
+```
+PySide6==6.11.2
+requests==2.34.2
+opencv-python==4.11.0.86
+numpy==1.26.4
+llvmlite==0.45.1
+numba==0.62.1
+openai-whisper==20250625
+torch==2.2.2
+```
+
+These aren't independently "latest" pins — they're a known-working
+combination. In particular, `llvmlite`/`numba` (transitive dependencies of
+`openai-whisper` via `numba`) are pinned to exact versions that have
+prebuilt wheels for this platform; without the pin, pip's resolver picks
+newer versions that only ship as source distributions, which then fail to
+build without `cmake` and a matching LLVM installed. Verified with a real
+from-scratch install into a throwaway venv (`pip install -r
+requirements.txt`, no special flags) — installs cleanly and
+`torch`↔`numpy` interop works.
+
+`requirements.txt` only covers Python packages. The two system-level
+dependencies from 1.4 (`ffmpeg-full`, Ollama + the `llama3.1:8b` model)
+still need to be installed separately — they're called out in a comment at
+the top of `requirements.txt` pointing back to this document.
+
+Full macOS setup from scratch, in order:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+brew install ffmpeg-full
+brew link --force ffmpeg-full
+brew install ollama
+ollama pull llama3.1:8b
+.venv/bin/python app/gui.py
+```
+
+If your `.venv` ends up on a native arm64 Python instead of an x86_64/
+Rosetta one (check with `python3 -c "import platform;
+print(platform.machine())"`), the `numpy<2`/`torch==2.2.2` pins above are
+probably unnecessarily conservative — see 1.3 for why they exist on this
+specific machine, and consider using current releases of `numpy`, `torch`,
+and `opencv-python` instead if you rebuild on arm64.
+
 ## 2. Repository hygiene cleanup
 
 The git history shows this codebase was reconstructed after `app/gui.py`
@@ -379,9 +431,6 @@ app-launch smoke test.
 
 This pass did not touch:
 
-- The lack of a `requirements.txt`/`pyproject.toml` — every dependency in
-  section 1 still has to be discovered by trial and error on a fresh
-  machine.
 - Test coverage — still effectively none for a large codebase.
 - Further splitting `gui_app/mixins/ai_visual_slots.py`, which remains the
   largest file in the new package.
