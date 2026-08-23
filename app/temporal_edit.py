@@ -844,7 +844,15 @@ def filter_for_video_segment(
 
     source_start = as_float(segment.get("source_start"), 0.0)
     source_end = as_float(segment.get("source_end"), source_start)
-    speed = as_float(segment.get("speed"), 1.0)
+
+    # Insert segments do not advance the source timeline, so their plan-level
+    # speed is stored as 0.0. That value must never be used as playback speed:
+    # dividing PTS by 0.001 turns a 0.48s replay into roughly 480 seconds.
+    speed = (
+        1.0
+        if segment.get("kind") == "insert"
+        else as_float(segment.get("speed"), 1.0)
+    )
 
     filters = [
         f"[0:v]trim=start={source_start:.6f}:end={source_end:.6f}",
@@ -904,6 +912,7 @@ def render_temporal_video(
     media_segments: list[dict[str, Any]],
     fps: float,
     has_audio: bool,
+    expected_duration: float,
 ) -> None:
     filter_parts = []
     concat_inputs = []
@@ -970,6 +979,35 @@ def render_temporal_video(
     log()
 
     subprocess.run(command, cwd=ROOT, check=True)
+
+    # Never replace the real tight clip with a temporal render whose encoded
+    # duration wildly disagrees with the planner. This keeps one malformed
+    # filter from turning a ~1 minute Short into several minutes of bad media.
+    rendered_probe = probe_video(TEMP_PATH)
+    rendered_duration = as_float(
+        rendered_probe.get("duration"),
+        0.0,
+    )
+    tolerance = max(
+        1.0,
+        expected_duration * 0.08,
+    )
+
+    if (
+        rendered_duration <= 0.0
+        or abs(rendered_duration - expected_duration) > tolerance
+    ):
+        try:
+            TEMP_PATH.unlink()
+        except OSError:
+            pass
+
+        raise RuntimeError(
+            "Temporal output duration safety check failed: "
+            f"planned {expected_duration:.2f}s, "
+            f"encoded {rendered_duration:.2f}s."
+        )
+
     os.replace(TEMP_PATH, VIDEO_PATH)
 
 
@@ -1286,6 +1324,7 @@ def main() -> int:
             media_segments,
             fps,
             has_audio,
+            final_duration,
         )
     except subprocess.CalledProcessError as exc:
         if TEMP_PATH.exists():
@@ -1300,6 +1339,20 @@ def main() -> int:
         log(
             "WARNING: Temporal edit FFmpeg pass failed "
             f"with exit code {exc.returncode}. Continuing without it."
+        )
+        return 0
+    except RuntimeError as exc:
+        if TEMP_PATH.exists():
+            try:
+                TEMP_PATH.unlink()
+            except OSError:
+                pass
+
+        plan["applied"] = False
+        plan["failed_reason"] = str(exc)
+        write_json(PLAN_PATH, plan)
+        log(
+            f"WARNING: {exc} Continuing without temporal editing."
         )
         return 0
 
