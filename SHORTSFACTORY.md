@@ -722,7 +722,98 @@ the convention) and wasn't confirmed live. If it pans backwards from what
 feels right, it's a one-line sign flip (`direction = -1 if
 horizontal_delta > 0 else 1` → `1 if ... else -1`).
 
-## 10. What's still open
+## 10. Visual effects were positioning relative to the full letterboxed canvas, not the real video content
+
+`render_base_video()` (STEP 1 of the render pipeline, `app/render.py`) fits
+the source video into the 1080x1920 output canvas at its native aspect
+ratio and letterboxes it (`scale=...:force_original_aspect_ratio=decrease`
++ `pad=1080:1920:...:black`) rather than cropping to fill — a deliberate
+earlier change to stop cutting off parts of the source frame. For a
+typical landscape source this means the real video content ends up as a
+smaller centered rectangle with black bars around it (e.g. the sample
+clip in this repo, 638x480, fits to full 1080 width but only ~813 of the
+1920 canvas height — more than half the vertical canvas is black bar).
+
+Every later pipeline stage operates on this already-letterboxed video, but
+two of them were written assuming the video content fills the full canvas
+edge-to-edge, which stopped being true once letterboxing was introduced:
+
+- **`app/smart_motion.py`**'s zoompan "punch-in" effect centered/panned
+  using `iw`/`ih`, which resolve to the full canvas at that point in the
+  filter chain — and worse, the zoom crop window itself was sized as a
+  fraction of the full 1920 canvas height, so even a 1.3x "zoom in" barely
+  shrank the black bars or enlarged the actual subject; it was mostly
+  zooming into a mix of content and black bar.
+- **`app/apply_ai_visuals.py`**'s AI visual overlay positioning
+  (`OVERLAY_CARD` and `FULL_FRAME_CONTAIN` modes) centered/positioned
+  cards using the ffmpeg `overlay` filter's `W`/`H` (full canvas), so
+  overlays could land across or beyond the actual visible content into the
+  black bars.
+
+### Fix: a shared "content rect"
+
+Added `content_rect_for_source()` (`app/render.py`) — a pure function
+mirroring the exact scale+pad math to compute where the real content sits
+within the canvas (x, y, width, height) — called from
+`render_base_video()` (after a new `ffprobe_source_dimensions()` helper,
+adapted from the same pattern already in the now-dead `app/smart_reframe.py`)
+and persisted into the already-shared `output/render_settings.json` (both
+target files already read this file for `edit_energy`/`sfx_mode`, so this
+reuses existing plumbing rather than inventing new). Added
+`content_rect_from_settings()` in `app/visual_emphasis.py` for downstream
+stages to read it back, defaulting to the full canvas (no letterboxing
+assumed) if absent — fully backward compatible with any render predating
+this change.
+
+- **`smart_motion.py`**: `apply_motion()` now wraps the existing zoompan
+  filter with `crop={content}` before it and `pad=1080:1920:{content_x}:
+  {content_y}:black` after. Key insight: `zoom_expression`/`x_expression`/
+  `y_expression`'s `iw`/`ih` references are ffmpeg-runtime symbols that
+  resolve to whatever frame is actually fed into `zoompan` — cropping away
+  the black bars first means all of that existing zoom-selection/bias/
+  shot-aware-strength logic needed **zero changes** and automatically
+  becomes correct.
+- **`apply_ai_visuals.py`**: `build_filter()` gained a `content_rect`
+  parameter; `OVERLAY_CARD` and `FULL_FRAME_CONTAIN` positioning math now
+  reference the content rect instead of raw `W`/`H`. `FULL_FRAME_COVER`
+  mode is deliberately unchanged — it's meant to cover the entire canvas
+  edge-to-edge by design, not a bug.
+
+Confirmed **not** part of this problem, left alone: `app/smart_reframe.py`
+(dead code — a comment in `app/gui_app/mixins/render_pipeline.py:606-610`
+confirms this old stage was explicitly disabled when letterboxing was
+adopted); `app/visual_fx.py`'s full-canvas `drawbox` color-wash/flash
+effects (deliberately whole-screen atmospheric effects); `app/make_captions.py`'s
+`PlayResX`/`PlayResY` (correctly describes the actual canvas, not a bug) —
+its margin constants are canvas-relative by design, to stay clear of
+TikTok/Reels/Shorts' own on-screen UI controls, which is a separate,
+more debatable design question left untouched here.
+
+### Verification
+
+- New `tests/test_render_content_rect.py` (4 tests) for
+  `content_rect_for_source()`, including the exact real sample video
+  dimensions (638x480).
+- Cross-checked the computed rect against ffmpeg's own `cropdetect` filter
+  run on the actually-rendered letterboxed output: computed `(0, 553,
+  1080, 813)` vs. ffmpeg's independently detected `crop=1080:812:0:552` —
+  within 1px, well inside cropdetect's own detection tolerance.
+- Ran the real `render_base_video()` write path against the sample video
+  and confirmed `render_settings.json` got the correct fields merged in
+  without disturbing existing keys (`edit_energy`, `source_video`,
+  `selection_start`/`end`, etc.).
+- **Visually confirmed both fixes with real ffmpeg renders, not just
+  geometry checks**: extracted actual frames before/after applying a 1.3x
+  `smart_motion` zoom event on a real clip — the black bars visibly and
+  proportionally shrink and the subject visibly gets larger/closer, which
+  would barely have happened before this fix. Extracted a frame from a
+  real `apply_ai_visuals` composite — a test overlay card now sits flush
+  against the top of the actual visible content instead of positioned
+  relative to the far larger letterboxed canvas.
+- `py_compile`/`pyflakes` clean, full test suite passes (41/41), app
+  launches cleanly offscreen.
+
+## 11. What's still open
 
 This pass did not touch:
 

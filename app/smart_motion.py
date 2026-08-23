@@ -12,6 +12,7 @@ try:
     from .visual_emphasis import (
         DEFAULT_ENERGY,
         classify_word,
+        content_rect_from_settings,
         energy_profile,
         load_render_settings,
         normalize_energy,
@@ -20,6 +21,7 @@ except ImportError:
     from visual_emphasis import (
         DEFAULT_ENERGY,
         classify_word,
+        content_rect_from_settings,
         energy_profile,
         load_render_settings,
         normalize_energy,
@@ -1334,6 +1336,7 @@ def y_expression(
 def apply_motion(
     events: list[dict[str, Any]],
     fps: float,
+    content_rect: tuple[int, int, int, int] = (0, 0, 1080, 1920),
 ) -> None:
 
     zoom = zoom_expression(
@@ -1349,14 +1352,35 @@ def apply_motion(
         fps,
     )
 
+    (
+        content_x,
+        content_y,
+        content_width,
+        content_height,
+    ) = content_rect
+
+    # The video at this point is already letterboxed into the 1080x1920
+    # canvas (see render.py's render_base_video()), so the zoompan filter
+    # above -- whose x/y/zoom expressions center and pan using iw/ih --
+    # would otherwise zoom into a mix of real content and black bars.
+    # Cropping to the real content rect first means iw/ih inside those
+    # expressions resolve to the actual content dimensions with no changes
+    # needed to any of that zoom/pan logic; padding back out afterward
+    # restores the original 1080x1920 canvas and centering. When
+    # content_rect is the full-canvas default, both crop and pad are
+    # no-ops, identical to the previous behavior.
     filter_string = (
+        f"crop={content_width}:{content_height}:"
+        f"{content_x}:{content_y},"
         "zoompan="
         f"z='{zoom}':"
         f"x='{x}':"
         f"y='{y}':"
         "d=1:"
-        "s=1080x1920:"
-        f"fps={fps:.6f}"
+        f"s={content_width}x{content_height}:"
+        f"fps={fps:.6f},"
+        "pad=1080:1920:"
+        f"{content_x}:{content_y}:black"
     )
 
     command = [
@@ -1603,6 +1627,9 @@ def main() -> int:
         apply_motion(
             events,
             fps,
+            content_rect_from_settings(
+                render_settings
+            ),
         )
 
     except subprocess.CalledProcessError as exc:

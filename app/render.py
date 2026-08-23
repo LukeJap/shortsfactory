@@ -13,6 +13,7 @@ try:
         load_render_settings,
         normalize_energy,
         normalize_sfx_mode,
+        write_render_settings,
     )
 except ImportError:
     from visual_emphasis import (
@@ -20,6 +21,7 @@ except ImportError:
         load_render_settings,
         normalize_energy,
         normalize_sfx_mode,
+        write_render_settings,
     )
 
 
@@ -475,6 +477,127 @@ def get_clip_timestamps() -> tuple[str, str]:
 
 
 # ============================================================
+# CONTENT RECT
+#
+# render_base_video() below letterboxes the source into the 1080x1920
+# canvas at its native aspect ratio rather than cropping to fill. Every
+# later pipeline stage (smart motion zoom/pan, AI visual overlays) operates
+# on that already-letterboxed video, so they need to know where the real
+# (non-black-bar) content actually sits within the canvas -- these two
+# helpers compute that and render_base_video() persists it to
+# render_settings.json for those downstream stages to read.
+# ============================================================
+
+def ffprobe_source_dimensions(
+    source: Path,
+) -> tuple[int, int]:
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "json",
+        str(source),
+    ]
+
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    data = json.loads(
+        result.stdout
+    )
+
+    streams = data.get(
+        "streams",
+        [],
+    )
+
+    if not streams:
+        raise RuntimeError(
+            f"No video stream found in: {source}"
+        )
+
+    width = int(
+        streams[0]["width"]
+    )
+
+    height = int(
+        streams[0]["height"]
+    )
+
+    return width, height
+
+
+def content_rect_for_source(
+    source_width: int,
+    source_height: int,
+    canvas_width: int = OUTPUT_WIDTH,
+    canvas_height: int = OUTPUT_HEIGHT,
+) -> tuple[int, int, int, int]:
+    """
+    Mirrors render_base_video()'s
+    "scale=...:force_original_aspect_ratio=decrease,pad=...:(ow-iw)/2:
+    (oh-ih)/2" filter: fits source_width x source_height into the canvas
+    preserving aspect ratio, then centers it. Returns
+    (content_x, content_y, content_width, content_height) -- the
+    rectangle within the canvas the real video content occupies.
+    """
+
+    if source_width <= 0 or source_height <= 0:
+        return 0, 0, canvas_width, canvas_height
+
+    scale_factor = min(
+        canvas_width / source_width,
+        canvas_height / source_height,
+    )
+
+    content_width = max(
+        1,
+        round(
+            source_width
+            * scale_factor
+        ),
+    )
+
+    content_height = max(
+        1,
+        round(
+            source_height
+            * scale_factor
+        ),
+    )
+
+    content_x = (
+        canvas_width
+        - content_width
+    ) // 2
+
+    content_y = (
+        canvas_height
+        - content_height
+    ) // 2
+
+    return (
+        content_x,
+        content_y,
+        content_width,
+        content_height,
+    )
+
+
+# ============================================================
 # STEP 1
 # ============================================================
 
@@ -490,6 +613,37 @@ def render_base_video(
         "vertical clip ==="
     )
     print()
+
+    try:
+        source_width, source_height = ffprobe_source_dimensions(
+            source_video
+        )
+    except (
+        subprocess.CalledProcessError,
+        RuntimeError,
+        KeyError,
+        ValueError,
+    ) as exc:
+        print(
+            f"WARNING: Could not probe source dimensions "
+            f"({exc}); downstream effects will assume a "
+            f"full-canvas (non-letterboxed) frame."
+        )
+        source_width, source_height = 0, 0
+
+    content_x, content_y, content_width, content_height = (
+        content_rect_for_source(
+            source_width,
+            source_height,
+        )
+    )
+
+    settings = load_render_settings()
+    settings["content_x"] = content_x
+    settings["content_y"] = content_y
+    settings["content_width"] = content_width
+    settings["content_height"] = content_height
+    write_render_settings(settings)
 
     command = [
         "ffmpeg",

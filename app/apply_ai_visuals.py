@@ -21,9 +21,15 @@ except ImportError:
     )
 
 try:
-    from .visual_emphasis import load_render_settings
+    from .visual_emphasis import (
+        content_rect_from_settings,
+        load_render_settings,
+    )
 except ImportError:
-    from visual_emphasis import load_render_settings
+    from visual_emphasis import (
+        content_rect_from_settings,
+        load_render_settings,
+    )
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -479,7 +485,20 @@ def build_filter(
     mapped_assets: list[
         dict[str, Any]
     ],
+    content_rect: tuple[int, int, int, int] = (
+        0,
+        0,
+        FRAME_WIDTH,
+        FRAME_HEIGHT,
+    ),
 ) -> str:
+
+    (
+        content_x,
+        content_y,
+        content_width,
+        content_height,
+    ) = content_rect
 
     chains = [
         "[0:v]setpts=PTS-STARTPTS[base0]"
@@ -659,34 +678,47 @@ def build_filter(
         )
 
         if mode == "FULL_FRAME_COVER":
+            # Deliberately covers the entire canvas edge-to-edge,
+            # including behind where letterbox bars would be -- not
+            # content-rect-relative by design.
             x_expr = "0"
             y_expr = "0"
         elif mode == "FULL_FRAME_CONTAIN":
+            # Center within the actual visible content area, not the
+            # full (possibly letterboxed) canvas.
             x_expr = (
-                "(W-w)/2"
-                f"+({position_x:.6f})*abs(W-w)/2"
+                f"{content_x}+({content_width}-w)/2"
+                f"+({position_x:.6f})*abs({content_width}-w)/2"
             )
             y_expr = (
-                "(H-h)/2"
-                f"+({position_y:.6f})*abs(H-h)/2"
+                f"{content_y}+({content_height}-h)/2"
+                f"+({position_y:.6f})*abs({content_height}-h)/2"
             )
         else:
             x_expr = (
-                f"(W-w)*(0.5+0.5*({position_x:.6f}))"
+                f"{content_x}+({content_width}-w)"
+                f"*(0.5+0.5*({position_x:.6f}))"
+            )
+            # Local (content-relative) rest position, then offset by the
+            # content rect's own top -- content_y is 0 when there's no
+            # letterboxing, so this is unchanged in that case.
+            local_base_y = (
+                f"max(110,({content_height}-h)*{CARD_Y_FACTOR:.3f})"
             )
             base_y = (
-                f"max(110,(H-h)*{CARD_Y_FACTOR:.3f})"
+                f"({content_y}+({local_base_y}))"
             )
             if position_y >= 0.0:
                 y_expr = (
                     f"({base_y})"
                     f"+({position_y:.6f})"
-                    f"*((H-h)-({base_y}))"
+                    f"*(({content_y}+{content_height}-h)-({base_y}))"
                 )
             else:
                 y_expr = (
                     f"({base_y})"
-                    f"*(1+({position_y:.6f}))"
+                    f"+({position_y:.6f})"
+                    f"*(({base_y})-{content_y})"
                 )
 
         chains.append(
@@ -1262,7 +1294,10 @@ def main() -> int:
         )
 
     filter_complex = build_filter(
-        mapped_assets
+        mapped_assets,
+        content_rect_from_settings(
+            render_settings
+        ),
     )
 
     command.extend(
