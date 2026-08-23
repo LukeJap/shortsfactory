@@ -1,7 +1,11 @@
+import os
+import time
+
 from subtitles import (
     CACHE_DIR,
     cache_is_valid,
     cache_path_for_video,
+    content_sha256,
     migrate_cached_transcript,
     normalize_quality,
     normalized_segments,
@@ -141,3 +145,58 @@ def test_cache_path_for_video_lands_in_cache_dir(tmp_path):
     assert cache_path.suffix == ".json"
     assert identity["quality"] == "AUTO"
     assert identity["model"] == "small"
+
+
+def test_content_sha256_is_deterministic_for_the_same_bytes(tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"same bytes twice")
+
+    assert content_sha256(video) == content_sha256(video)
+
+
+def test_content_sha256_differs_when_content_differs(tmp_path):
+    video_a = tmp_path / "a.mp4"
+    video_b = tmp_path / "b.mp4"
+    video_a.write_bytes(b"content one")
+    video_b.write_bytes(b"content two")
+
+    assert content_sha256(video_a) != content_sha256(video_b)
+
+
+def test_source_fingerprint_is_unaffected_by_rewriting_the_same_path_with_identical_content(
+    tmp_path,
+):
+    # This is the actual bug: render_base_video() and apply_smart_edit.py
+    # always overwrite the same fixed path (short1_base.mp4,
+    # short1_tight.mp4) on every render. An mtime-based fingerprint could
+    # never hit for those paths even when two renders produce
+    # byte-identical output, because the act of rewriting the file always
+    # changes its mtime. A content-based fingerprint must not care.
+    video = tmp_path / "short1_base.mp4"
+    video.write_bytes(b"identical rendered content")
+
+    digest_before, identity_before = source_fingerprint(video, "AUTO", "small")
+
+    # Simulate the file being rewritten with byte-identical content --
+    # mtime changes, content does not.
+    time.sleep(0.01)
+    video.write_bytes(b"identical rendered content")
+    os.utime(video, None)
+
+    digest_after, identity_after = source_fingerprint(video, "AUTO", "small")
+
+    assert digest_before == digest_after
+    assert identity_before == identity_after
+
+
+def test_source_fingerprint_changes_when_the_same_path_gets_different_content(
+    tmp_path,
+):
+    video = tmp_path / "short1_base.mp4"
+    video.write_bytes(b"first render's content")
+    digest_first, _ = source_fingerprint(video, "AUTO", "small")
+
+    video.write_bytes(b"a genuinely different second render")
+    digest_second, _ = source_fingerprint(video, "AUTO", "small")
+
+    assert digest_first != digest_second

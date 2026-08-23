@@ -135,13 +135,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+CONTENT_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def content_sha256(video_path: Path) -> str:
+    """
+    Hash the actual video bytes rather than relying on mtime/size. Several
+    pipeline stages (render_base_video(), apply_smart_edit.py) always
+    write to the same fixed path (short1_base.mp4, short1_tight.mp4),
+    rewriting it fresh on every render -- an mtime-based fingerprint can
+    never hit for those paths even when two renders produce byte-identical
+    output, since the act of producing the file always changes its mtime
+    moments before the cache lookup. A real content hash is unaffected by
+    that and still correctly misses when the content actually differs.
+    Cheap in practice: ~0.4s for a 182MB source video, negligible next to
+    a multi-second-or-longer Whisper transcription pass.
+    """
+
+    hasher = hashlib.sha256()
+
+    with video_path.open("rb") as f:
+        for chunk in iter(
+            lambda: f.read(CONTENT_HASH_CHUNK_BYTES),
+            b"",
+        ):
+            hasher.update(chunk)
+
+    return hasher.hexdigest()
+
+
 def source_fingerprint(
     video_path: Path,
     quality: str,
     model_name: str,
 ) -> tuple[str, dict[str, Any]]:
-
-    stat = video_path.stat()
 
     resolved = str(
         video_path.resolve()
@@ -149,11 +176,8 @@ def source_fingerprint(
 
     identity = {
         "resolved_path": resolved,
-        "size_bytes": int(
-            stat.st_size
-        ),
-        "modified_ns": int(
-            stat.st_mtime_ns
+        "content_sha256": content_sha256(
+            video_path
         ),
         "engine": "openai-whisper",
         "quality": normalize_quality(
