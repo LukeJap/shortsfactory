@@ -1064,14 +1064,14 @@ class AIVisualPipelineMixin:
                 (
                     "Assets ready — "
                     f"{provider_summary}. "
-                    "Generate Short to composite them."
+                    "Generate Final Video to composite them."
                 )
             )
 
         else:
 
             self.visual_status_label.setText(
-                "Visual assets ready. Generate Short to composite them."
+                "Visual assets ready. Generate Final Video to composite them."
             )
 
         self.render_log.append(

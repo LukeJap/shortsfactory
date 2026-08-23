@@ -778,11 +778,6 @@ class ShortsFactoryWindow(
 
         edit_style_layout.addLayout(fx_intensity_row)
 
-        self.generate_button = QPushButton("Generate Short")
-        self.generate_button.setObjectName("GenerateButton")
-        self.generate_button.setEnabled(False)
-        self.generate_button.clicked.connect(self.generate_short)
-
         source_layout.addWidget(left_title)
         source_layout.addWidget(self.drop_zone, 1)
         source_layout.addWidget(self.file_label)
@@ -791,7 +786,6 @@ class ShortsFactoryWindow(
         source_layout.addSpacing(6)
         source_layout.addWidget(self.find_clips_button)
         source_layout.addWidget(edit_style_frame)
-        source_layout.addWidget(self.generate_button)
 
         workspace.addWidget(source_frame)
 
@@ -935,6 +929,14 @@ class ShortsFactoryWindow(
         playback.addWidget(self.preview_volume_slider)
         playback.addWidget(self.preview_volume_label)
 
+        self.generate_button = QPushButton("Generate Final Video")
+        self.generate_button.setObjectName("GenerateButton")
+        self.generate_button.setEnabled(False)
+        self.generate_button.setToolTip(
+            "Select a clip first."
+        )
+        self.generate_button.clicked.connect(self.generate_short)
+
         video_stack = QWidget()
         video_stack.setObjectName("VideoStack")
         video_stack_layout = QVBoxLayout(video_stack)
@@ -942,6 +944,7 @@ class ShortsFactoryWindow(
         video_stack_layout.setSpacing(10)
         video_stack_layout.addWidget(self.video_widget, 1)
         video_stack_layout.addLayout(playback)
+        video_stack_layout.addWidget(self.generate_button)
 
         self.timeline = SuggestionSlider(Qt.Orientation.Horizontal)
         self.timeline.setRange(0, 0)

@@ -929,7 +929,7 @@ class RenderPipelineMixin:
         )
 
         self.generate_button.setText(
-            "Generate Short"
+            "Generate Final Video"
         )
 
         self.find_clips_button.setEnabled(
