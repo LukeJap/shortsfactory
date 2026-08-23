@@ -7,6 +7,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from .visual_emphasis import (
+        energy_profile,
+        load_render_settings,
+        normalize_energy,
+    )
+except ImportError:
+    from visual_emphasis import (
+        energy_profile,
+        load_render_settings,
+        normalize_energy,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -481,68 +494,226 @@ def apply_automatic_cut_safety(
     pause_cuts: list[dict[str, Any]],
     semantic_cuts: list[dict[str, Any]],
     duration: float,
+    *,
+    profile: dict[str, Any] | None = None,
+    energy: str = "PUNCHY",
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
     str | None,
 ]:
     """
-    Safety guard against malformed/stale automatic plans.
+    Keep automatic editing natural and bounded.
 
-    Automatic editing should tighten a clip, not erase it. Manual
-    transcript cuts remain authoritative because the user explicitly
-    selected them.
+    Manual transcript cuts remain authoritative. Automatic cuts must
+    leave enough retained footage between jump cuts and must stay
+    inside the selected Edit Style's removal budget.
     """
 
-    automatic_cuts = (
+    if profile is None:
+        profile = energy_profile(
+            energy
+        )
+
+    automatic_cuts = []
+
+    for cut in (
         pause_cuts
         + semantic_cuts
-    )
+    ):
+        normalized = normalize_cut(
+            cut,
+            duration,
+        )
+        if normalized is not None:
+            automatic_cuts.append(
+                normalized
+            )
 
     if not automatic_cuts:
         return (
-            pause_cuts,
-            semantic_cuts,
+            [],
+            [],
             None,
         )
 
-    automatic_removed = merged_duration(
-        automatic_cuts,
-        duration,
+    automatic_cuts.sort(
+        key=lambda cut: (
+            float(
+                cut["start"]
+            ),
+            float(
+                cut["end"]
+            ),
+        )
     )
 
-    # More than half the clip disappearing automatically is almost
-    # certainly a bad plan/parser mismatch for this stage.
-    max_automatic_removal = min(
-        duration * 0.50,
-        max(
-            8.0,
-            duration - 8.0,
+    minimum_spacing = float(
+        profile.get(
+            "auto_cut_min_spacing",
+            1.50,
+        )
+    )
+    max_removal_ratio = float(
+        profile.get(
+            "auto_cut_max_removal_ratio",
+            0.22,
+        )
+    )
+    max_removed = max(
+        0.0,
+        duration
+        * max(
+            0.0,
+            min(
+                1.0,
+                max_removal_ratio,
+            ),
         ),
     )
 
+    spaced: list[dict[str, Any]] = []
+    crowded_rejected = 0
+
+    for cut in automatic_cuts:
+        if spaced:
+            previous = spaced[-1]
+            retained_between = (
+                float(
+                    cut["start"]
+                )
+                - float(
+                    previous["end"]
+                )
+            )
+
+            if retained_between < minimum_spacing:
+                # Pause cuts are less likely than semantic cuts to create
+                # an awkward spoken join. Prefer the pause when two
+                # automatic edits compete for the same moment.
+                if (
+                    cut.get(
+                        "source"
+                    ) == "pause"
+                    and previous.get(
+                        "source"
+                    ) == "semantic"
+                ):
+                    if (
+                        len(
+                            spaced
+                        ) == 1
+                        or float(
+                            cut["start"]
+                        )
+                        - float(
+                            spaced[-2]["end"]
+                        )
+                        >= minimum_spacing
+                    ):
+                        spaced[-1] = cut
+
+                crowded_rejected += 1
+                continue
+
+        spaced.append(
+            cut
+        )
+
+    # Use the removal budget on the safest edits first: pauses, then
+    # already-verified semantic cuts. Sort chronologically again before
+    # returning so downstream rendering behavior stays deterministic.
+    budget_order = sorted(
+        spaced,
+        key=lambda cut: (
+            0
+            if cut.get(
+                "source"
+            ) == "pause"
+            else 1,
+            float(
+                cut["start"]
+            ),
+        ),
+    )
+
+    selected: list[dict[str, Any]] = []
+    selected_removed = 0.0
+    budget_rejected = 0
+
+    for cut in budget_order:
+        cut_duration = (
+            float(
+                cut["end"]
+            )
+            - float(
+                cut["start"]
+            )
+        )
+
+        if (
+            selected_removed
+            + cut_duration
+            > max_removed
+            + 1e-6
+        ):
+            budget_rejected += 1
+            continue
+
+        selected.append(
+            cut
+        )
+        selected_removed += cut_duration
+
+    selected.sort(
+        key=lambda cut: float(
+            cut["start"]
+        )
+    )
+
+    selected_pause = [
+        cut
+        for cut in selected
+        if cut.get(
+            "source"
+        ) == "pause"
+    ]
+    selected_semantic = [
+        cut
+        for cut in selected
+        if cut.get(
+            "source"
+        ) == "semantic"
+    ]
+
     if (
-        automatic_removed
-        <= max_automatic_removal
+        crowded_rejected == 0
+        and budget_rejected == 0
     ):
         return (
-            pause_cuts,
-            semantic_cuts,
+            selected_pause,
+            selected_semantic,
             None,
         )
 
+    proposed_removed = merged_duration(
+        automatic_cuts,
+        duration,
+    )
     warning = (
-        "Automatic cut safety triggered: "
-        f"pause + semantic edits would remove "
-        f"{automatic_removed:.2f}s of a "
-        f"{duration:.2f}s clip. "
-        "Ignoring automatic cuts for this render; "
-        "manual transcript cuts will still be applied."
+        f"Natural pacing guard ({energy}): "
+        f"automatic edits proposed removing {proposed_removed:.2f}s. "
+        f"Kept {len(selected)} cuts removing {selected_removed:.2f}s; "
+        f"minimum retained spacing is {minimum_spacing:.2f}s and "
+        f"automatic removal is capped at "
+        f"{max_removal_ratio * 100:.0f}% ({max_removed:.2f}s). "
+        f"Skipped {crowded_rejected} crowded cuts and "
+        f"{budget_rejected} cuts over the removal budget."
     )
 
     return (
-        [],
-        [],
+        selected_pause,
+        selected_semantic,
         warning,
     )
 
@@ -1191,11 +1362,24 @@ def main() -> int:
         semantic_plan
     )
 
+    settings = load_render_settings()
+    energy = normalize_energy(
+        settings.get(
+            "edit_energy",
+            "PUNCHY",
+        )
+    )
+    profile = energy_profile(
+        energy
+    )
+
     pause_cuts, semantic_cuts, automatic_warning = (
         apply_automatic_cut_safety(
             pause_cuts,
             semantic_cuts,
             duration,
+            profile=profile,
+            energy=energy,
         )
     )
 

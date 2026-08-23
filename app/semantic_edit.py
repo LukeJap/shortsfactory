@@ -9,8 +9,18 @@ import requests
 
 try:
     from .ollama_config import OLLAMA_HOST, OLLAMA_MODEL
+    from .visual_emphasis import (
+        energy_profile,
+        load_render_settings,
+        normalize_energy,
+    )
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
+    from visual_emphasis import (
+        energy_profile,
+        load_render_settings,
+        normalize_energy,
+    )
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -168,6 +178,7 @@ def build_timed_transcript(
 
 def build_prompt(
     words: list[dict],
+    energy: str = "PUNCHY",
 ) -> str:
 
     transcript = build_timed_transcript(
@@ -221,6 +232,12 @@ Do NOT remove:
 - anything you are uncertain about
 
 A Short should feel FAST but still natural.
+
+The selected edit style is {energy}. Even in PUNCHY or MAXIMUM mode,
+do not cut simply because a word or pause could technically be removed.
+Prefer complete, clearly redundant phrases over tiny micro-cuts.
+For LOW and PUNCHY, avoid isolated one-word removals.
+Preserve reactions, comedic timing, and natural conversational rhythm.
 
 Do not try to remove a certain amount of time.
 
@@ -289,7 +306,32 @@ If there are no safe semantic cuts:
 def validate_cuts(
     result: dict[str, Any],
     words: list[dict],
+    profile: dict[str, Any] | None = None,
 ) -> list[dict]:
+
+    if profile is None:
+        profile = energy_profile(
+            "PUNCHY"
+        )
+
+    min_duration = float(
+        profile.get(
+            "semantic_min_duration",
+            0.45,
+        )
+    )
+    min_words = int(
+        profile.get(
+            "semantic_min_words",
+            2,
+        )
+    )
+    min_confidence = float(
+        profile.get(
+            "semantic_min_confidence",
+            0.88,
+        )
+    )
 
     valid = []
 
@@ -338,8 +380,16 @@ def validate_cuts(
         )
 
         duration = end - start
+        word_count = (
+            end_index
+            - start_index
+            + 1
+        )
 
-        if duration < 0.20:
+        if duration < min_duration:
+            continue
+
+        if word_count < min_words:
             continue
 
         confidence = float(
@@ -349,7 +399,7 @@ def validate_cuts(
             )
         )
 
-        if confidence < 0.80:
+        if confidence < min_confidence:
             continue
 
         removed_words = words[
@@ -457,6 +507,7 @@ def words_to_text(
 def build_verification_prompt(
     cut: dict,
     words: list[dict],
+    energy: str = "PUNCHY",
 ) -> str:
 
     start_index = int(
@@ -496,6 +547,9 @@ You are verifying one proposed jump cut in spoken video.
 
 The goal is to make a YouTube Short tighter WITHOUT making
 the speaker sound broken, confusing, unnatural, or misleading.
+
+The selected edit style is {energy}. Natural speech rhythm wins over
+a marginal pacing improvement. Reject tiny or questionable edits.
 
 A previous editing model proposed removing the words below.
 
@@ -577,11 +631,13 @@ or
 def verify_cut(
     cut: dict,
     words: list[dict],
+    energy: str = "PUNCHY",
 ) -> dict:
 
     prompt = build_verification_prompt(
         cut,
         words,
+        energy,
     )
 
     result = call_ollama(
@@ -649,9 +705,36 @@ def main() -> int:
         f"Words: {len(words)}"
     )
 
+    settings = load_render_settings()
+    energy = normalize_energy(
+        settings.get(
+            "edit_energy",
+            "PUNCHY",
+        )
+    )
+    profile = energy_profile(
+        energy
+    )
+    verification_threshold = float(
+        profile.get(
+            "semantic_verify_confidence",
+            0.90,
+        )
+    )
+
     print(
         f"Using Ollama model: "
         f"{OLLAMA_MODEL}"
+    )
+    print(
+        f"Edit style: {energy}"
+    )
+    print(
+        "Semantic cut thresholds: "
+        f">={float(profile.get('semantic_min_duration', 0.45)):.2f}s, "
+        f">={int(profile.get('semantic_min_words', 2))} words, "
+        f"proposal confidence >= {float(profile.get('semantic_min_confidence', 0.88)):.2f}, "
+        f"verification >= {verification_threshold:.2f}"
     )
 
     print()
@@ -661,7 +744,8 @@ def main() -> int:
     )
 
     prompt = build_prompt(
-        words
+        words,
+        energy,
     )
 
     try:
@@ -694,6 +778,7 @@ def main() -> int:
     proposed_cuts = validate_cuts(
         result,
         words,
+        profile,
     )
 
     print()
@@ -721,6 +806,7 @@ def main() -> int:
             verification = verify_cut(
                 cut,
                 words,
+                energy,
             )
         except Exception as exc:
             verification = {
@@ -773,7 +859,7 @@ def main() -> int:
         if (
             verification["approved"]
             and
-            verification["confidence"] >= 0.80
+            verification["confidence"] >= verification_threshold
         ):
 
             approved_cuts.append(

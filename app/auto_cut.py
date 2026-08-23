@@ -5,6 +5,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from .visual_emphasis import (
+        energy_profile,
+        load_render_settings,
+        normalize_energy,
+    )
+except ImportError:
+    from visual_emphasis import (
+        energy_profile,
+        load_render_settings,
+        normalize_energy,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -20,11 +33,10 @@ EDIT_PLAN_PATH = ROOT / "output" / "edit_plan.json"
 # SETTINGS
 # ============================================================
 
-# Ignore very small conversational gaps.
-MIN_GAP_TO_EDIT = 0.80
-
-# If there is a long pause, leave this much breathing room.
-KEEP_GAP_SECONDS = 0.22
+# Defaults preserve backwards compatibility for direct function calls.
+# Normal renders override these from the selected Edit Style profile.
+DEFAULT_MIN_GAP_TO_EDIT = 1.15
+DEFAULT_KEEP_GAP_SECONDS = 0.42
 
 # Never create a tiny retained video segment.
 MIN_KEEP_SEGMENT = 0.15
@@ -85,6 +97,9 @@ def get_video_duration(path: Path) -> float:
 
 def detect_pause_cuts(
     words: list[dict],
+    *,
+    min_gap_to_edit: float = DEFAULT_MIN_GAP_TO_EDIT,
+    keep_gap_seconds: float = DEFAULT_KEEP_GAP_SECONDS,
 ) -> list[dict]:
 
     cuts = []
@@ -107,18 +122,19 @@ def detect_pause_cuts(
 
         gap = next_start - current_end
 
-        if gap < MIN_GAP_TO_EDIT:
+        if gap < min_gap_to_edit:
             continue
 
-        # Leave a little natural breathing room around the cut.
+        # Leave natural breathing room around the cut instead of
+        # snapping directly from one spoken word to the next.
         remove_start = (
             current_end
-            + KEEP_GAP_SECONDS / 2
+            + keep_gap_seconds / 2
         )
 
         remove_end = (
             next_start
-            - KEEP_GAP_SECONDS / 2
+            - keep_gap_seconds / 2
         )
 
         if remove_end <= remove_start:
@@ -307,12 +323,48 @@ def main() -> int:
         )
         return 1
 
+    settings = load_render_settings()
+    energy = normalize_energy(
+        settings.get(
+            "edit_energy",
+            "PUNCHY",
+        )
+    )
+    profile = energy_profile(
+        energy
+    )
+
+    min_gap_to_edit = float(
+        profile.get(
+            "auto_cut_min_gap",
+            DEFAULT_MIN_GAP_TO_EDIT,
+        )
+    )
+    keep_gap_seconds = float(
+        profile.get(
+            "auto_cut_keep_gap",
+            DEFAULT_KEEP_GAP_SECONDS,
+        )
+    )
+
     duration = get_video_duration(
         INPUT_VIDEO
     )
 
+    print(
+        f"Edit style: {energy}"
+    )
+    print(
+        "Pause rule: edit gaps >= "
+        f"{min_gap_to_edit:.2f}s and retain "
+        f"{keep_gap_seconds:.2f}s of breathing room"
+    )
+    print()
+
     cuts = detect_pause_cuts(
-        words
+        words,
+        min_gap_to_edit=min_gap_to_edit,
+        keep_gap_seconds=keep_gap_seconds,
     )
 
     keep_ranges = cuts_to_keep_ranges(
@@ -331,6 +383,17 @@ def main() -> int:
 
     edit_plan = {
         "mode": "light",
+        "edit_energy": energy,
+        "pause_settings": {
+            "minimum_gap_seconds": round(
+                min_gap_to_edit,
+                3,
+            ),
+            "retained_gap_seconds": round(
+                keep_gap_seconds,
+                3,
+            ),
+        },
         "original_duration_seconds": round(
             duration,
             3,
