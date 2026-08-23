@@ -69,6 +69,40 @@ CAPTION_SAFE_MARGIN_LEFT = 110
 CAPTION_SAFE_MARGIN_RIGHT = 180
 CAPTION_SAFE_MARGIN_BOTTOM = 980
 
+# Hard floor/ceiling for a *manually dragged* caption position (both the
+# placement-editor preview and the real \pos() override in
+# make_captions.py's caption_position_override_tag() clamp to these). Looser
+# than CAPTION_SAFE_MARGIN_BOTTOM above -- that constant sets a stylistic
+# default placement (roughly screen-center), not the actual edge of usable
+# space -- but still tight enough to keep a dragged caption's anchor out of
+# where a platform's own UI (like/comment/share rail, caption/username
+# strip, top status area) typically sits on a real vertical video post.
+CAPTION_DRAG_MARGIN_TOP = 140
+CAPTION_DRAG_MARGIN_BOTTOM = 260
+
+
+def clamp_caption_drag_position(
+    position_x: float,
+    position_y: float,
+) -> tuple[float, float]:
+    """
+    Clamp a caption anchor position (fraction of canvas, 0-1) into the
+    safe drag range -- shared by the placement-editor preview
+    (gui_app/mixins/caption_preview.py) and the real \\pos() override
+    (make_captions.py's caption_position_override_tag()) so a manual drag
+    can never land somewhere the render itself would refuse to honor.
+    """
+
+    min_x = CAPTION_SAFE_MARGIN_LEFT / OUTPUT_WIDTH
+    max_x = (OUTPUT_WIDTH - CAPTION_SAFE_MARGIN_RIGHT) / OUTPUT_WIDTH
+    min_y = CAPTION_DRAG_MARGIN_TOP / OUTPUT_HEIGHT
+    max_y = (OUTPUT_HEIGHT - CAPTION_DRAG_MARGIN_BOTTOM) / OUTPUT_HEIGHT
+
+    return (
+        max(min_x, min(max_x, position_x)),
+        max(min_y, min(max_y, position_y)),
+    )
+
 
 # ============================================================
 # PIPELINE SCRIPTS

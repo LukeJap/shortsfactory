@@ -9,6 +9,7 @@ from render import (
     CAPTION_SAFE_MARGIN_RIGHT,
     OUTPUT_HEIGHT,
     OUTPUT_WIDTH,
+    clamp_caption_drag_position,
 )
 
 
@@ -49,7 +50,12 @@ class CaptionPreviewMixin:
         if position_x is None or position_y is None:
             return (DEFAULT_CAPTION_POSITION_X, DEFAULT_CAPTION_POSITION_Y)
 
-        return (
+        # Re-clamp on every read, not just on drag -- a value saved before
+        # the drag range was tightened (or edited directly in
+        # render_settings.json) gets pulled back into the safe zone the
+        # next time it's displayed, instead of silently staying stuck
+        # somewhere the render would otherwise refuse to honor.
+        return clamp_caption_drag_position(
             coerce_caption_fraction(position_x),
             coerce_caption_fraction(position_y),
         )
@@ -191,13 +197,18 @@ class CaptionPreviewMixin:
 
         delta = event.globalPosition().toPoint() - self.caption_preview_drag_origin
 
-        position_x = coerce_caption_fraction(
+        raw_x = (
             self.caption_preview_drag_start_x
             + delta.x() / max(1, canvas_width)
         )
-        position_y = coerce_caption_fraction(
+        raw_y = (
             self.caption_preview_drag_start_y
             + delta.y() / max(1, canvas_height)
+        )
+
+        position_x, position_y = clamp_caption_drag_position(
+            coerce_caption_fraction(raw_x),
+            coerce_caption_fraction(raw_y),
         )
 
         self.caption_position_x = round(position_x, 3)

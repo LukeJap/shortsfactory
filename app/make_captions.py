@@ -39,6 +39,11 @@ except ImportError:
         event_default_position_px,
     )
 
+try:
+    from .render import OUTPUT_HEIGHT, OUTPUT_WIDTH, clamp_caption_drag_position
+except ImportError:
+    from render import OUTPUT_HEIGHT, OUTPUT_WIDTH, clamp_caption_drag_position
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -495,10 +500,18 @@ def caption_position_override_tag(render_settings: dict) -> str:
         return ""
 
     try:
-        x = max(0.0, min(1.0, float(position_x))) * 1080
-        y = max(0.0, min(1.0, float(position_y))) * 1920
+        raw_x = max(0.0, min(1.0, float(position_x)))
+        raw_y = max(0.0, min(1.0, float(position_y)))
     except (TypeError, ValueError):
         return ""
+
+    # Defensive clamp, independent of the GUI's own drag clamp -- a value
+    # saved before the drag range was tightened, or edited directly in
+    # render_settings.json, must not be able to burn a caption into the
+    # zone a platform's own UI would cover.
+    fraction_x, fraction_y = clamp_caption_drag_position(raw_x, raw_y)
+    x = fraction_x * OUTPUT_WIDTH
+    y = fraction_y * OUTPUT_HEIGHT
 
     return f"{{\\pos({x:.1f},{y:.1f})}}"
 

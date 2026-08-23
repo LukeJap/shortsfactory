@@ -8,6 +8,7 @@ from render import (
     CAPTION_SAFE_MARGIN_RIGHT,
     OUTPUT_HEIGHT,
     OUTPUT_WIDTH,
+    clamp_caption_drag_position,
 )
 
 
@@ -30,3 +31,12 @@ def test_default_caption_position_matches_render_py_force_style_margins():
 def test_default_caption_position_is_within_the_canvas():
     assert 0.0 <= DEFAULT_CAPTION_POSITION_X <= 1.0
     assert 0.0 <= DEFAULT_CAPTION_POSITION_Y <= 1.0
+
+
+def test_default_caption_position_is_already_within_the_safe_drag_zone():
+    # The default shouldn't need clamping -- if it did, the "default" and
+    # "floor/ceiling" values would be fighting each other.
+    assert clamp_caption_drag_position(
+        DEFAULT_CAPTION_POSITION_X,
+        DEFAULT_CAPTION_POSITION_Y,
+    ) == (DEFAULT_CAPTION_POSITION_X, DEFAULT_CAPTION_POSITION_Y)
