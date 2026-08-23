@@ -24,10 +24,18 @@ input/
 
 # Generated ShortsFactory output
 output/
+videos/
 
 # Recovery/decompiler files
 .tmp_pycdc_rapid/
 .tmp_pycdc_rapid.zip
+.tmp_decompyle3/
+.tmp_pycdecompiler.py
 recovered_gui.py
 recovered_gui_BACKUP.py
 app/gui_CORRUPTED_RECOVERY.py
+app/gui8.20.py
+app/analyze_backup.py
+
+# Personal working notes
+PROJECT_ISSUES.md
