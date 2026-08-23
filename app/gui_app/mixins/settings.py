@@ -179,6 +179,7 @@ class SettingsMixin:
             "edit_energy": self.current_edit_energy(),
             "fx_intensity": self.current_fx_intensity(),
             "sfx_mode": self.current_sfx_mode(),
+            "transcription_quality": self.current_transcription_quality(),
             "source_video": (
                 str(
                     self.video_path

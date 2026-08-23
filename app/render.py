@@ -698,6 +698,10 @@ def render_base_video(
 def regenerate_subtitles(
     video_path: Path,
     step_name: str,
+    *,
+    quality: str = "AUTO",
+    selection_start: float | None = None,
+    selection_end: float | None = None,
 ) -> None:
 
     print()
@@ -731,11 +735,136 @@ def regenerate_subtitles(
     command = [
         python_executable(),
         str(SUBTITLES_SCRIPT),
-        str(video_path),
+        "--quality",
+        str(quality),
     ]
+
+    if (
+        selection_start is not None
+        and selection_end is not None
+    ):
+        command.extend(
+            [
+                "--selection-start",
+                f"{selection_start:.3f}",
+                "--selection-end",
+                f"{selection_end:.3f}",
+            ]
+        )
+
+    command.append(
+        str(video_path)
+    )
 
     run_command(
         command
+    )
+
+
+def remap_subtitles_after_smart_edit(
+    video_path: Path,
+    *,
+    quality: str = "AUTO",
+) -> None:
+    print()
+    print(
+        "=== STEP 6: Remapping transcript through SMART-EDITED clip ==="
+    )
+    print()
+
+    if not SUBTITLES_SCRIPT.exists():
+        raise FileNotFoundError(
+            f"Subtitle script not found: {SUBTITLES_SCRIPT}"
+        )
+
+    if not video_path.exists():
+        raise FileNotFoundError(
+            f"Smart-edited video not found: {video_path}"
+        )
+
+    if not SUBTITLES_PATH.exists():
+        raise FileNotFoundError(
+            "Selected source transcript is missing before smart-edit remap."
+        )
+
+    run_command(
+        [
+            python_executable(),
+            str(SUBTITLES_SCRIPT),
+            "--quality",
+            str(quality),
+            "--remap-through-cuts",
+            str(video_path),
+        ]
+    )
+
+
+def source_transcript_selection(
+    render_settings: dict,
+    current_render_source: Path,
+) -> tuple[Path, float, float] | None:
+    raw_source = str(
+        render_settings.get(
+            "source_video",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not raw_source:
+        return None
+
+    source_path = Path(raw_source).expanduser()
+    if not source_path.is_absolute():
+        source_path = ROOT / source_path
+
+    try:
+        source_path = source_path.resolve()
+        current_resolved = current_render_source.resolve()
+    except OSError:
+        return None
+
+    if not source_path.exists():
+        return None
+
+    try:
+        selection_start = float(
+            render_settings.get(
+                "selection_start",
+                0.0,
+            )
+        )
+        selection_end = float(
+            render_settings.get(
+                "selection_end",
+                0.0,
+            )
+        )
+    except (TypeError, ValueError):
+        return None
+
+    if selection_end <= selection_start:
+        return None
+
+    current_is_original = (
+        current_resolved
+        == source_path
+    )
+    current_is_reframed = (
+        current_render_source.name.lower()
+        == "reframed_source.mp4"
+    )
+
+    if not (
+        current_is_original
+        or current_is_reframed
+    ):
+        return None
+
+    return (
+        source_path,
+        selection_start,
+        selection_end,
     )
 
 
@@ -1092,6 +1221,19 @@ def main() -> int:
             "AUTO",
         )
     )
+    transcription_quality = str(
+        render_settings.get(
+            "transcription_quality",
+            "AUTO",
+        )
+        or "AUTO"
+    ).upper()
+    if transcription_quality not in {
+        "AUTO",
+        "FAST",
+        "ACCURATE",
+    }:
+        transcription_quality = "AUTO"
 
     print()
     print(
@@ -1118,6 +1260,10 @@ def main() -> int:
 
     print(
         f"Sound FX: {sfx_mode}"
+    )
+
+    print(
+        f"Transcription quality: {transcription_quality}"
     )
 
     if not source_video.exists():
@@ -1178,16 +1324,50 @@ def main() -> int:
 
     # --------------------------------------------------------
     # STEP 2
-    # Transcribe ORIGINAL selected section
+    # Reuse the transcript created when the source was imported.
+    # Only the selected range is copied to subtitles.json and shifted
+    # to selection-relative timestamps.
     # --------------------------------------------------------
 
-    regenerate_subtitles(
-        BASE_OUTPUT_PATH,
-        (
-            "STEP 2: Transcribing original "
-            "selected clip"
-        ),
+    transcript_selection = source_transcript_selection(
+        render_settings,
+        source_video,
     )
+
+    if transcript_selection is not None:
+        (
+            transcript_source,
+            transcript_start,
+            transcript_end,
+        ) = transcript_selection
+
+        regenerate_subtitles(
+            transcript_source,
+            (
+                "STEP 2: Preparing selected transcript "
+                "from imported source cache"
+            ),
+            quality=transcription_quality,
+            selection_start=transcript_start,
+            selection_end=transcript_end,
+        )
+    else:
+        print()
+        print(
+            (
+                "WARNING: Original source transcript metadata is unavailable; "
+                "falling back to transcribing short1_base.mp4."
+            )
+        )
+
+        regenerate_subtitles(
+            BASE_OUTPUT_PATH,
+            (
+                "STEP 2: Transcribing original "
+                "selected clip"
+            ),
+            quality=transcription_quality,
+        )
 
     # --------------------------------------------------------
     # STEP 3
@@ -1212,19 +1392,13 @@ def main() -> int:
 
     # --------------------------------------------------------
     # STEP 6
-    # CRITICAL:
-    # Re-transcribe AFTER the jump cuts.
-    #
-    # This guarantees caption timing now matches
-    # the edited video.
+    # Remap the selected transcript through apply_smart_edit.py's exact
+    # keep-segment map instead of running Whisper on short1_tight.mp4.
     # --------------------------------------------------------
 
-    regenerate_subtitles(
+    remap_subtitles_after_smart_edit(
         TIGHT_OUTPUT_PATH,
-        (
-            "STEP 6: Re-transcribing "
-            "SMART-EDITED clip"
-        ),
+        quality=transcription_quality,
     )
 
     # --------------------------------------------------------
