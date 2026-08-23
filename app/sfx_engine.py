@@ -161,7 +161,7 @@ CATEGORY_LABELS = {
 
 # Category caps are intentionally stricter for the two sounds that were
 # dominating automatic plans. True motion can still earn a whoosh and a real
-# slam/freeze can still earn an impact, but generic emphasis is routed toward
+# slam can still earn an impact, but generic emphasis is routed toward
 # dings, bells, pops, reactions, and other semantic choices.
 CATEGORY_EVENT_CAPS = {
     "LOW": {
@@ -1313,7 +1313,6 @@ def strong_impact_event(
         )
         or treatment
         in {
-            "freeze",
             "impact",
             "slam",
         }
@@ -1329,7 +1328,6 @@ def strong_impact_event(
                 "punch",
                 "smash",
                 "stomp",
-                "freeze",
             )
         )
     )
@@ -1573,7 +1571,6 @@ def semantic_asset_score(
         if any(
             token in blob
             for token in (
-                "freeze",
                 "reaction",
                 "chaos",
                 "wtf",
@@ -2014,21 +2011,11 @@ def candidate_for_event(
         category = "whoosh"
         score = 92.0
         reason = "whip transition"
-    elif treatment == "freeze":
-        category = "impact"
-        score = 80.0
-        reason = "freeze accent"
-    elif treatment in {
-        "micro_replay",
-        "replay",
-    }:
+    elif treatment == "replay":
         category = "replay"
         score = 86.0
         reason = "replay cue"
-    elif treatment in {
-        "reverse_blip",
-        "rewind",
-    }:
+    elif treatment == "rewind":
         category = "rewind"
         score = 86.0
         reason = "rewind cue"

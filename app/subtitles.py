@@ -34,6 +34,12 @@ CACHE_DIR = (
     / "transcript_cache"
 )
 
+COMBINED_EDIT_PLAN_PATH = (
+    ROOT
+    / "output"
+    / "combined_edit_plan.json"
+)
+
 DEFAULT_QUALITY = "AUTO"
 LANGUAGE = "en"
 
@@ -132,7 +138,54 @@ def parse_args() -> argparse.Namespace:
         help="Transcription quality preset for local Whisper.",
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--selection-start",
+        type=float,
+        default=None,
+        help=(
+            "Optional source-video selection start in seconds. "
+            "When paired with --selection-end, reuse the full-source "
+            "transcript/cache and write selection-relative timestamps."
+        ),
+    )
+
+    parser.add_argument(
+        "--selection-end",
+        type=float,
+        default=None,
+        help="Optional source-video selection end in seconds.",
+    )
+
+    parser.add_argument(
+        "--remap-through-cuts",
+        action="store_true",
+        help=(
+            "Reuse the current selection-relative subtitles.json and remap "
+            "its timestamps through output/combined_edit_plan.json instead "
+            "of running Whisper on short1_tight.mp4."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if (
+        (args.selection_start is None)
+        != (args.selection_end is None)
+    ):
+        parser.error(
+            "--selection-start and --selection-end must be supplied together."
+        )
+
+    if (
+        args.selection_start is not None
+        and args.selection_end is not None
+        and args.selection_end <= args.selection_start
+    ):
+        parser.error(
+            "--selection-end must be greater than --selection-start."
+        )
+
+    return args
 
 
 CONTENT_HASH_CHUNK_BYTES = 1024 * 1024
@@ -363,6 +416,321 @@ def cache_is_valid(
             ),
             list,
         )
+    )
+
+
+def slice_transcript_to_selection(
+    data: dict[str, Any],
+    selection_start: float,
+    selection_end: float,
+) -> dict[str, Any]:
+    """Return a selection-relative view of a full-source transcript."""
+
+    start = max(0.0, float(selection_start))
+    end = max(start, float(selection_end))
+    if end <= start:
+        raise ValueError(
+            "Transcript selection end must be after selection start."
+        )
+
+    def clip_word(raw_word: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(raw_word, dict):
+            return None
+
+        try:
+            word_start = float(raw_word.get("start", 0.0))
+            word_end = float(raw_word.get("end", word_start))
+        except (TypeError, ValueError):
+            return None
+
+        if word_end <= start or word_start >= end:
+            return None
+
+        mapped_start = max(start, word_start) - start
+        mapped_end = min(end, word_end) - start
+        if mapped_end <= mapped_start:
+            return None
+
+        item = dict(raw_word)
+        item["start"] = round(mapped_start, 4)
+        item["end"] = round(mapped_end, 4)
+        return item
+
+    words: list[dict[str, Any]] = []
+    raw_words = data.get("words", [])
+    if isinstance(raw_words, list):
+        for raw_word in raw_words:
+            item = clip_word(raw_word)
+            if item is not None:
+                words.append(item)
+
+    segments: list[dict[str, Any]] = []
+    raw_segments = data.get("segments", [])
+    if isinstance(raw_segments, list):
+        for raw_segment in raw_segments:
+            if not isinstance(raw_segment, dict):
+                continue
+
+            try:
+                segment_start = float(raw_segment.get("start", 0.0))
+                segment_end = float(
+                    raw_segment.get("end", segment_start)
+                )
+            except (TypeError, ValueError):
+                continue
+
+            if segment_end <= start or segment_start >= end:
+                continue
+
+            segment_words: list[dict[str, Any]] = []
+            raw_segment_words = raw_segment.get("words", [])
+            if isinstance(raw_segment_words, list):
+                for raw_word in raw_segment_words:
+                    item = clip_word(raw_word)
+                    if item is not None:
+                        segment_words.append(item)
+
+            if segment_words:
+                mapped_start = float(segment_words[0]["start"])
+                mapped_end = float(segment_words[-1]["end"])
+            else:
+                mapped_start = max(start, segment_start) - start
+                mapped_end = min(end, segment_end) - start
+
+            if mapped_end <= mapped_start:
+                continue
+
+            item = dict(raw_segment)
+            item["start"] = round(mapped_start, 4)
+            item["end"] = round(mapped_end, 4)
+            item["words"] = segment_words
+            if segment_words:
+                item["text"] = " ".join(
+                    str(word.get("word", "") or "").strip()
+                    for word in segment_words
+                    if str(word.get("word", "") or "").strip()
+                )
+            segments.append(item)
+
+    output = dict(data)
+    output["selection_start"] = round(start, 4)
+    output["selection_end"] = round(end, 4)
+    output["selection_duration_seconds"] = round(end - start, 4)
+    output["timeline"] = "selection_relative"
+    output["words"] = words
+    output["segments"] = segments
+    output["word_count"] = len(words)
+    output["segment_count"] = len(segments)
+    output["text"] = " ".join(
+        str(word.get("word", "") or "").strip()
+        for word in words
+        if str(word.get("word", "") or "").strip()
+    )
+    return output
+
+
+def normalized_keep_segments(
+    plan: dict[str, Any],
+) -> list[tuple[float, float]]:
+    raw_segments = plan.get("keep_segments", [])
+    if not isinstance(raw_segments, list):
+        return []
+
+    keeps: list[tuple[float, float]] = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item.get("start", 0.0))
+            end = float(item.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            keeps.append((start, end))
+
+    keeps.sort(key=lambda item: item[0])
+    return keeps
+
+
+def map_interval_through_keeps(
+    start: float,
+    end: float,
+    keeps: list[tuple[float, float]],
+) -> tuple[float, float] | None:
+    """Map a base-timeline interval into the concatenated tight timeline."""
+
+    if end <= start:
+        return None
+
+    accumulated = 0.0
+    best: tuple[float, float, float] | None = None
+
+    for keep_start, keep_end in keeps:
+        overlap_start = max(start, keep_start)
+        overlap_end = min(end, keep_end)
+        overlap = overlap_end - overlap_start
+
+        if overlap > 0:
+            mapped_start = accumulated + overlap_start - keep_start
+            mapped_end = accumulated + overlap_end - keep_start
+            if best is None or overlap > best[0]:
+                best = (overlap, mapped_start, mapped_end)
+
+        accumulated += keep_end - keep_start
+
+    if best is None:
+        return None
+
+    return best[1], best[2]
+
+
+def remap_timed_item_through_keeps(
+    raw_item: dict[str, Any],
+    keeps: list[tuple[float, float]],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_item, dict):
+        return None
+
+    try:
+        start = float(raw_item.get("start", 0.0))
+        end = float(raw_item.get("end", start))
+    except (TypeError, ValueError):
+        return None
+
+    mapped = map_interval_through_keeps(start, end, keeps)
+    if mapped is None:
+        return None
+
+    mapped_start, mapped_end = mapped
+    if mapped_end <= mapped_start:
+        return None
+
+    item = dict(raw_item)
+    item["start"] = round(mapped_start, 4)
+    item["end"] = round(mapped_end, 4)
+    return item
+
+
+def remap_transcript_through_edit_plan(
+    data: dict[str, Any],
+    plan: dict[str, Any],
+    tight_video: Path,
+) -> dict[str, Any]:
+    keeps = normalized_keep_segments(plan)
+
+    if not keeps:
+        try:
+            duration = float(
+                plan.get("original_duration_seconds", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            duration = 0.0
+
+        if duration > 0:
+            keeps = [(0.0, duration)]
+
+    if not keeps:
+        raise RuntimeError(
+            "combined_edit_plan.json has no usable keep segments."
+        )
+
+    words: list[dict[str, Any]] = []
+    raw_words = data.get("words", [])
+    if isinstance(raw_words, list):
+        for raw_word in raw_words:
+            item = remap_timed_item_through_keeps(
+                raw_word,
+                keeps,
+            )
+            if item is not None:
+                words.append(item)
+
+    words.sort(
+        key=lambda item: float(item.get("start", 0.0))
+    )
+
+    segments: list[dict[str, Any]] = []
+    raw_segments = data.get("segments", [])
+    if isinstance(raw_segments, list):
+        for raw_segment in raw_segments:
+            if not isinstance(raw_segment, dict):
+                continue
+
+            segment_words: list[dict[str, Any]] = []
+            raw_segment_words = raw_segment.get("words", [])
+            if isinstance(raw_segment_words, list):
+                for raw_word in raw_segment_words:
+                    item = remap_timed_item_through_keeps(
+                        raw_word,
+                        keeps,
+                    )
+                    if item is not None:
+                        segment_words.append(item)
+
+            if segment_words:
+                item = dict(raw_segment)
+                item["start"] = round(
+                    float(segment_words[0]["start"]),
+                    4,
+                )
+                item["end"] = round(
+                    float(segment_words[-1]["end"]),
+                    4,
+                )
+                item["words"] = segment_words
+                item["text"] = " ".join(
+                    str(word.get("word", "") or "").strip()
+                    for word in segment_words
+                    if str(word.get("word", "") or "").strip()
+                )
+                segments.append(item)
+                continue
+
+            item = remap_timed_item_through_keeps(
+                raw_segment,
+                keeps,
+            )
+            if item is not None:
+                item["words"] = []
+                segments.append(item)
+
+    output = dict(data)
+    output["source_video"] = tight_video.name
+    output["source_video_path"] = str(tight_video.resolve())
+    output["timeline"] = "tight_edit_relative"
+    output["remapped_from_source_transcript"] = True
+    output["keep_segment_count"] = len(keeps)
+    output["words"] = words
+    output["segments"] = segments
+    output["word_count"] = len(words)
+    output["segment_count"] = len(segments)
+    output["text"] = " ".join(
+        str(word.get("word", "") or "").strip()
+        for word in words
+        if str(word.get("word", "") or "").strip()
+    )
+    return output
+
+
+def remap_current_transcript_after_smart_edit(
+    tight_video: Path,
+) -> dict[str, Any]:
+    transcript = read_json(OUTPUT_PATH)
+    if transcript is None:
+        raise RuntimeError(
+            "No selected transcript is available to remap."
+        )
+
+    plan = read_json(COMBINED_EDIT_PLAN_PATH)
+    if plan is None:
+        raise RuntimeError(
+            "combined_edit_plan.json is unavailable."
+        )
+
+    return remap_transcript_through_edit_plan(
+        transcript,
+        plan,
+        tight_video,
     )
 
 
@@ -1022,22 +1390,8 @@ def main() -> int:
         args.quality
     )
 
-    model_candidates = model_candidates_for_quality(
-        quality
-    )
-
     print(
         f"Transcription quality: {quality}",
-        flush=True,
-    )
-
-    print(
-        (
-            "Whisper model candidates: "
-            + ", ".join(
-                model_candidates
-            )
-        ),
         flush=True,
     )
 
@@ -1049,6 +1403,88 @@ def main() -> int:
         )
 
         return 1
+
+    if args.remap_through_cuts:
+        print(
+            "",
+            flush=True,
+        )
+        print(
+            "Reusing selected transcript after smart jump cuts.",
+            flush=True,
+        )
+        print(
+            "Skipping Whisper transcription for short1_tight.mp4.",
+            flush=True,
+        )
+
+        try:
+            output_for_run = remap_current_transcript_after_smart_edit(
+                video_path
+            )
+        except Exception as exc:
+            print(
+                f"ERROR: Could not remap transcript through smart edits: {exc}",
+                flush=True,
+            )
+            return 1
+
+        write_output(
+            output_for_run
+        )
+
+        print(
+            (
+                "Tight transcript remapped from "
+                f"{output_for_run.get('keep_segment_count', 0)} "
+                "retained segment(s)."
+            ),
+            flush=True,
+        )
+        print(
+            f"Words retained: {len(output_for_run.get('words', []))}",
+            flush=True,
+        )
+        print(
+            f"Speech segments retained: {len(output_for_run.get('segments', []))}",
+            flush=True,
+        )
+
+        maybe_apply_transcript_corrections(
+            video_path
+        )
+        maybe_apply_temporal_edit(
+            video_path
+        )
+        maybe_apply_smart_motion(
+            video_path
+        )
+        maybe_apply_ai_visuals(
+            video_path
+        )
+        maybe_apply_visual_fx(
+            video_path
+        )
+
+        print(
+            "Done.",
+            flush=True,
+        )
+        return 0
+
+    model_candidates = model_candidates_for_quality(
+        quality
+    )
+
+    print(
+        (
+            "Whisper model candidates: "
+            + ", ".join(
+                model_candidates
+            )
+        ),
+        flush=True,
+    )
 
     try:
 
@@ -1169,9 +1605,35 @@ def main() -> int:
                 flush=True,
             )
 
-            write_output(
-                cached
+            output_for_run = (
+                slice_transcript_to_selection(
+                    cached,
+                    args.selection_start,
+                    args.selection_end,
+                )
+                if (
+                    args.selection_start is not None
+                    and args.selection_end is not None
+                )
+                else cached
             )
+
+            write_output(
+                output_for_run
+            )
+
+            if (
+                args.selection_start is not None
+                and args.selection_end is not None
+            ):
+                print(
+                    (
+                        "Prepared selected transcript from cached source: "
+                        f"{args.selection_start:.3f}s -> "
+                        f"{args.selection_end:.3f}s."
+                    ),
+                    flush=True,
+                )
 
             print(
                 f"Cached transcript: {cache_path}",
@@ -1184,12 +1646,12 @@ def main() -> int:
             )
 
             print(
-                f"Words detected: {len(cached.get('words', []))}",
+                f"Words detected: {len(output_for_run.get('words', []))}",
                 flush=True,
             )
 
             print(
-                f"Speech segments detected: {len(cached.get('segments', []))}",
+                f"Speech segments detected: {len(output_for_run.get('segments', []))}",
                 flush=True,
             )
 
@@ -1272,12 +1734,27 @@ def main() -> int:
 
         return 1
 
+    output_for_run = (
+        slice_transcript_to_selection(
+            output,
+            args.selection_start,
+            args.selection_end,
+        )
+        if (
+            args.selection_start is not None
+            and args.selection_end is not None
+        )
+        else output
+    )
+
     write_output(
-        output
+        output_for_run
     )
 
     try:
 
+        # Cache the complete source transcript. Selection slicing is
+        # output-only so future selections can reuse the same Whisper result.
         cache_path.write_text(
             json.dumps(
                 output,
@@ -1297,6 +1774,19 @@ def main() -> int:
             flush=True,
         )
 
+    if (
+        args.selection_start is not None
+        and args.selection_end is not None
+    ):
+        print(
+            (
+                "Prepared selected transcript from source transcript: "
+                f"{args.selection_start:.3f}s -> "
+                f"{args.selection_end:.3f}s."
+            ),
+            flush=True,
+        )
+
     print(
         f"Subtitle data saved to: {OUTPUT_PATH}",
         flush=True,
@@ -1308,12 +1798,12 @@ def main() -> int:
     )
 
     print(
-        f"Words detected: {len(output['words'])}",
+        f"Words detected: {len(output_for_run['words'])}",
         flush=True,
     )
 
     print(
-        f"Speech segments detected: {len(output['segments'])}",
+        f"Speech segments detected: {len(output_for_run['segments'])}",
         flush=True,
     )
 
