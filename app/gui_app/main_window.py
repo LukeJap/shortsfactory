@@ -9,6 +9,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -654,6 +655,56 @@ class ShortsFactoryWindow(
         self.find_clips_button.setEnabled(False)
         self.find_clips_button.clicked.connect(self.find_best_clips)
 
+        edit_style_frame = QFrame()
+        edit_style_frame.setObjectName("EditStylePanel")
+        edit_style_layout = QVBoxLayout(edit_style_frame)
+        edit_style_layout.setContentsMargins(10, 9, 10, 10)
+        edit_style_layout.setSpacing(7)
+
+        edit_style_label = QLabel("EDIT STYLE")
+        edit_style_label.setObjectName("TinyLabel")
+        edit_style_layout.addWidget(edit_style_label)
+
+        edit_style_buttons = QHBoxLayout()
+        edit_style_buttons.setSpacing(6)
+
+        self.edit_style_group = QButtonGroup(self)
+        self.edit_style_group.setExclusive(True)
+        self.edit_style_buttons: dict[str, QPushButton] = {}
+
+        style_options = (
+            (
+                "LOW",
+                "LOW\nCLEAN",
+                "Cleaner, restrained editing with lighter motion, captions, FX, and SFX.",
+            ),
+            (
+                "PUNCHY",
+                "PUNCHY\nVIRAL",
+                "Fast viral Shorts pacing with balanced motion, captions, FX, and SFX.",
+            ),
+            (
+                "MAXIMUM",
+                "MAXIMUM\nHEAVY",
+                "Aggressive editing with the strongest motion, captions, FX, and SFX density.",
+            ),
+        )
+
+        for energy, button_text, tooltip in style_options:
+            button = QPushButton(button_text)
+            button.setObjectName("EditStyleButton")
+            button.setCheckable(True)
+            button.setChecked(energy == self.edit_energy)
+            button.setToolTip(tooltip)
+            button.clicked.connect(
+                lambda checked=False, value=energy: self.edit_energy_changed(value)
+            )
+            self.edit_style_group.addButton(button)
+            self.edit_style_buttons[energy] = button
+            edit_style_buttons.addWidget(button, 1)
+
+        edit_style_layout.addLayout(edit_style_buttons)
+
         self.generate_button = QPushButton("Generate Short")
         self.generate_button.setObjectName("GenerateButton")
         self.generate_button.setEnabled(False)
@@ -666,6 +717,7 @@ class ShortsFactoryWindow(
         source_layout.addLayout(transcription_row)
         source_layout.addSpacing(6)
         source_layout.addWidget(self.find_clips_button)
+        source_layout.addWidget(edit_style_frame)
         source_layout.addWidget(self.generate_button)
 
         workspace.addWidget(source_frame)
@@ -960,27 +1012,6 @@ class ShortsFactoryWindow(
         audio_title = QLabel("AUDIO")
         audio_title.setObjectName("SectionTitle")
 
-        edit_energy_label = QLabel("Edit Energy")
-        edit_energy_label.setObjectName("MicroLabel")
-
-        self.edit_energy_combo = QComboBox()
-        self.edit_energy_combo.setObjectName("CompactCombo")
-        self.edit_energy_combo.addItems(
-            [
-                "LOW",
-                "PUNCHY",
-                "MAXIMUM",
-            ]
-        )
-        self.edit_energy_combo.setCurrentText(
-            self.edit_energy
-        )
-        self.edit_energy_combo.setToolTip(
-            "Controls exported visual intensity for captions, motion, emojis, and visual effects."
-        )
-        self.edit_energy_combo.currentTextChanged.connect(
-            self.edit_energy_changed
-        )
 
         sfx_mode_label = QLabel("Sound FX")
         sfx_mode_label.setObjectName("MicroLabel")
@@ -1101,9 +1132,6 @@ class ShortsFactoryWindow(
         sfx_context_layout.addWidget(self.delete_sfx_button)
 
         audio_top_row.addWidget(audio_title)
-        audio_top_row.addSpacing(6)
-        audio_top_row.addWidget(edit_energy_label)
-        audio_top_row.addWidget(self.edit_energy_combo)
         audio_top_row.addSpacing(12)
         audio_top_row.addWidget(sfx_mode_label)
         audio_top_row.addWidget(self.sfx_mode_combo)
