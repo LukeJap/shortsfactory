@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QCoreApplication, QTimer, QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
 from ..helpers import format_precise_time, format_time
@@ -463,14 +464,6 @@ class PlaybackMixin:
             )
         )
 
-        was_playing = (
-            self.player.playbackState()
-            == QMediaPlayer.PlaybackState.PlayingState
-        )
-
-        self.player.setPosition(
-            position
-        )
         self.current_time_label.setText(
             format_precise_time(position)
         )
@@ -489,17 +482,47 @@ class PlaybackMixin:
             position
         )
 
-        if not was_playing and getattr(
+        # Actually moving the player is throttled while the user is
+        # actively dragging the playhead. Calling setPosition() faster than
+        # the backend can seek+decode a frame appears to cancel each seek
+        # before it completes, so nothing ever finishes until the drag
+        # stops -- which is exactly the "frozen until you release the
+        # mouse" symptom this is fixing. Outside of active dragging (a
+        # single click, or the final position on release, when
+        # scrubbing_playhead is already False) always seek immediately.
+        is_scrubbing = getattr(
             self.timeline,
             "scrubbing_playhead",
             False,
-        ):
+        )
+        now = time.monotonic()
+        last_seek_time = getattr(
+            self,
+            "_last_actual_seek_time",
+            0.0,
+        )
+        if is_scrubbing and (now - last_seek_time) < 0.08:
             return
+        self._last_actual_seek_time = now
 
-        # On some Windows multimedia backends, a paused video does
-        # not immediately redraw after seeking. Briefly advancing the
-        # player while muted forces the preview frame to refresh, but
-        # never while actively dragging the playhead.
+        was_playing = (
+            self.player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        )
+
+        self.player.setPosition(
+            position
+        )
+
+        # Some Qt multimedia backends (confirmed: the FFmpeg-based one used
+        # here) never repaint a paused video after a bare setPosition() --
+        # confirmed directly, a seek alone produces zero pixel change until
+        # this nudge runs. Runs synchronously (processEvents() instead of
+        # QTimer.singleShot): during an active mouse drag, macOS's native
+        # drag-tracking can starve regular QTimer callbacks even while
+        # direct method calls and repaints elsewhere keep working, which
+        # left an async version of this nudge never actually completing
+        # mid-drag.
         if not was_playing and not self.paused_seek_refresh_pending:
 
             self.paused_seek_refresh_pending = True
@@ -508,11 +531,13 @@ class PlaybackMixin:
             )
 
             self.player.play()
+            QCoreApplication.processEvents()
 
-            QTimer.singleShot(
-                45,
-                self.finish_paused_seek,
+            self.player.pause()
+            self.audio_output.setMuted(
+                False
             )
+            self.paused_seek_refresh_pending = False
 
     def finish_paused_seek(self):
 
@@ -850,45 +875,75 @@ class PlaybackMixin:
             )
         )
 
-        if getattr(
+        dragging_handle = getattr(
             self.timeline,
             "dragging_handle",
             None,
-        ) == "start":
-            self.player.setPosition(
-                self.start_ms
-            )
-            self.current_time_label.setText(
-                format_precise_time(
-                    self.start_ms
-                )
-            )
-        elif getattr(
-            self.timeline,
-            "dragging_handle",
-            None,
-        ) == "end":
-            self.player.setPosition(
-                self.end_ms
-            )
-            self.current_time_label.setText(
-                format_precise_time(
-                    self.end_ms
-                )
-            )
-        elif getattr(
+        )
+        dragging_source_clip = getattr(
             self.timeline,
             "dragging_source_clip",
             False,
-        ):
-            self.player.setPosition(
-                self.start_ms
-            )
+        )
+
+        target_position = None
+        if dragging_handle == "start" or dragging_source_clip:
+            target_position = self.start_ms
+        elif dragging_handle == "end":
+            target_position = self.end_ms
+
+        if target_position is not None:
+
             self.current_time_label.setText(
                 format_precise_time(
-                    self.start_ms
+                    target_position
                 )
             )
+
+            # Same seek-cancellation/repaint issue and fix as seek_video():
+            # trimming the source clip's IN/OUT handles (or dragging the
+            # whole clip) hits this same setPosition() call on every mouse
+            # move, and calling it faster than the backend can seek+decode
+            # a frame cancelled each seek before it finished, so the
+            # preview looked frozen for the entire duration of the drag.
+            is_dragging = bool(
+                dragging_handle
+                or dragging_source_clip
+            )
+            now = time.monotonic()
+            last_seek_time = getattr(
+                self,
+                "_last_actual_seek_time",
+                0.0,
+            )
+            if not is_dragging or (now - last_seek_time) >= 0.08:
+
+                self._last_actual_seek_time = now
+
+                was_playing = (
+                    self.player.playbackState()
+                    == QMediaPlayer.PlaybackState.PlayingState
+                )
+
+                self.player.setPosition(
+                    target_position
+                )
+
+                if not was_playing and not self.paused_seek_refresh_pending:
+
+                    self.paused_seek_refresh_pending = True
+                    self.audio_output.setMuted(
+                        True
+                    )
+
+                    self.player.play()
+                    QCoreApplication.processEvents()
+
+                    self.player.pause()
+                    self.audio_output.setMuted(
+                        False
+                    )
+                    self.paused_seek_refresh_pending = False
 
         self.timeline.set_selected_suggestion(
             None

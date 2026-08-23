@@ -559,7 +559,143 @@ build on, not full coverage.
 .venv/bin/python -m pytest
 ```
 
-## 8. What's still open
+## 8. Playback bug: scrubbing the timeline while paused looked frozen
+
+**Symptom:** dragging the preview timeline's playhead while the video was
+paused didn't visibly update the video frame at all until the mouse was
+released — it looked completely frozen mid-drag, then jumped to the
+correct frame on release.
+
+**Root cause:** `PlaybackMixin.seek_video()` (`app/gui_app/mixins/playback.py`)
+always calls `self.player.setPosition(position)` on every drag update (via
+`sliderMoved`), so the player's actual position was updating correctly the
+whole time — the bug was purely visual. Directly confirmed: on this
+machine's Qt Multimedia backend (`qt.multimedia.ffmpeg`, the FFmpeg-based
+backend), a bare `setPosition()` while paused produces **zero** repaint —
+sampled the rendered widget before and after a 15-second seek with no
+nudge, and not a single pixel changed. `seek_video()` already has a
+workaround for exactly this ("Some Qt multimedia backends... never repaint
+a paused video after a bare setPosition()" — briefly nudging playback
+forward while muted, then pausing again, forces a real repaint), but it was
+explicitly skipped whenever `self.timeline.scrubbing_playhead` was `True`
+— i.e. it was disabled for the entire duration of a drag, and only ran
+once on release.
+
+**First attempt (insufficient):** removed the scrubbing-specific skip so
+the existing async nudge (`self.player.play()` then
+`QTimer.singleShot(45, self.finish_paused_seek)`) would also run during a
+drag, throttled by the existing `paused_seek_refresh_pending` in-flight
+guard. This didn't fix it — confirmed live, the preview still only updated
+on release.
+
+**Actual root cause:** the async nudge depends on a `QTimer.singleShot`
+callback actually firing 45ms later to pause the player again and clear
+`paused_seek_refresh_pending`. Reproduced the failure directly: simulated a
+tight loop of `seek_video()` calls with no event-loop yield between them
+(the worst case for a fast drag, since macOS's native drag-tracking can
+starve regular `QTimer` callbacks even while direct method calls and
+repaints elsewhere keep working) — `paused_seek_refresh_pending` got stuck
+`True` after the very first call and never reset, so the player was left
+sitting in `PlayingState` for the rest of the simulated drag instead of
+returning to `PausedState`; only the first seek's nudge ever actually
+completed.
+
+**Fix:** replaced the async nudge in `seek_video()` specifically (not the
+other call sites of this pattern — `prime_preview_frame`'s initial-load
+nudge and `toggle_playback` are untouched, out of scope here) with a
+synchronous version: `player.play()` → `QCoreApplication.processEvents()`
+→ `player.pause()`, all inline, no `QTimer` involved. Re-ran the same
+tight-loop stress test against the new version: every single call now
+completes fully immediately (`paused_seek_refresh_pending` resets to
+`False`, `playbackState` returns to `PausedState`, and the player's actual
+position matches exactly what was requested) — a direct, controlled
+before/after comparison under identical conditions, not just a code-reading
+argument.
+
+This second attempt *also* didn't fix it — confirmed live, still frozen
+until release.
+
+**Third attempt — different root cause entirely:** both prior attempts
+assumed the bottleneck was "how do we force a repaint," and neither
+questioned whether the seeks themselves were completing at all. The more
+likely explanation, common to scrubbing implementations generally (not
+specific to Qt or macOS): calling `setPosition()` faster than the backend
+can seek+decode a frame cancels each in-flight seek before it finishes, so
+during a fast drag (mouse-move events firing far faster than any single
+seek can complete) *no seek ever finishes* until movement stops and the
+final one finally gets uninterrupted time to complete — which matches the
+symptom exactly (freezes while moving, snaps to the correct frame the
+instant you stop).
+
+**Fix:** throttle how often `seek_video()` actually calls
+`player.setPosition()` (and the repaint nudge) while
+`self.timeline.scrubbing_playhead` is `True`, using a plain wall-clock
+check (`time.monotonic()`, no `QTimer` involved, so it can't be affected by
+the same callback-starvation risk as attempt one) — at most once per 80ms.
+Cheap UI updates (time label, AI-visual-preview overlay, selection-loop
+state) still run on every single call so the UI stays responsive; only the
+actual expensive player seek is throttled. Outside of active dragging (a
+single click, or the final position on release — `scrubbing_playhead` is
+already `False` by the time `sliderReleased` fires) seeks are never
+throttled. Verified directly with a 3-part stress test: a burst of calls
+with no delay between them applies only the *first* seek and coalesces the
+rest (throttle engaged); calls spaced 100ms apart (past the 80ms window)
+each apply individually (throttle doesn't block a real drag); and a
+post-release call always applies immediately regardless of timing. This is
+a materially different, independently-verified mechanism from both prior
+attempts, not another tweak to the same one.
+
+**Verification caveat:** offscreen pixel-grab testing was ruled out as a
+verification method for this bug across all three attempts — even normal
+continuous playback showed zero captured pixel change via
+`QVideoWidget.grab()` under `QT_QPA_PLATFORM=offscreen` (likely tied to the
+"`No RHI backend. Using CPU conversion`" fallback this backend logs in
+headless mode), so it can't distinguish a real fix from a broken one either
+way. Verification instead relied on directly exercising the actual
+call-frequency/throttle behavior under controlled stress tests, plus
+`py_compile`/`pyflakes` clean and the full test suite passing (37/37). Both
+earlier attempts were also verified as thoroughly as this environment
+allows and both still failed live — confirming in the actual running app
+remains the real test, this is not a guarantee.
+
+**Confirmed live** (attempt 3, main playhead scrubbing): the throttle fixed
+it.
+
+### 8.1 Same fix extended to trimming the source clip
+
+The user reported the identical frozen-preview symptom also applies when
+dragging the source clip's IN/OUT trim handles, or dragging the whole clip
+body — a separate code path, `PlaybackMixin.timeline_selection_changed()`,
+which had the exact same unthrottled `player.setPosition()` call on every
+`selectionChanged` emission during a drag, and — unlike `seek_video()` —
+never had the repaint nudge at all. Applied the identical fix: throttle the
+actual seek to at most once per 80ms while `timeline.dragging_handle` or
+`timeline.dragging_source_clip` is truthy (sharing the same
+`_last_actual_seek_time` throttle window as `seek_video()`, since both
+compete for the same underlying player), plus the same synchronous
+play→processEvents→pause repaint nudge, which this path was missing
+entirely. Cheap updates (the time label) still run on every call.
+
+One behavioral note carried over unchanged from the pre-existing code, not
+introduced by this fix: `timeline_selection_changed()` only ever calls
+`setPosition()` while `dragging_handle`/`dragging_source_clip` is still
+`True` — by the time `mouseReleaseEvent` fires the final `selectionChanged`
+emission, that flag is already cleared, so (both before and after this
+fix) the final release event doesn't independently re-sync position; it
+relies on the last in-drag update having already landed close enough.
+Throttling makes that last-applied position up to ~80ms staler than
+before, which matches the same acceptable trade-off already confirmed live
+for the main scrubber, but is worth knowing about.
+
+Verification: `py_compile`/`pyflakes` clean, full test suite still passes
+(37/37), app launches cleanly offscreen. Could not get a clean isolated
+stress-test replica of this exact code path the way `seek_video()` got one
+(this method's tail calls into several other GUI-update methods not worth
+fully mocking out) — the throttle/nudge block itself is textually
+identical to the already-stress-tested one in `seek_video()`, just not
+independently re-exercised in isolation here. Not yet confirmed live.
+
+## 9. What's still open
 
 This pass did not touch:
 
