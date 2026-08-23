@@ -3,9 +3,19 @@ from __future__ import annotations
 import json
 import sys
 
-from PySide6.QtCore import QProcess, Qt
-from PySide6.QtGui import QFont, QPixmap
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QProcess, QSize, Qt
+from PySide6.QtGui import QFont, QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..constants import ROOT
 from emoji_overlay import (
@@ -18,6 +28,7 @@ from emoji_overlay import (
     normalize_emoji,
     resolve_event_asset,
 )
+from make_captions import load_local_reaction_assets, relative_asset_path
 
 
 EMOJI_EVENTS_PATH = ROOT / "output" / "emoji_events.json"
@@ -400,3 +411,133 @@ class EmojiPreviewMixin:
             events[event_index]["manual_override"] = True
             data["events"] = events
             self.save_emoji_events_file(data)
+
+
+    def open_emoji_picker(self, slot_index: int):
+
+        active = getattr(self, "emoji_preview_active", [])
+        if not (0 <= slot_index < len(active)):
+            return
+
+        event_index, active_event = active[slot_index]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Change Emoji Reaction")
+        dialog.setMinimumWidth(420)
+
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+
+        hint = QLabel(
+            f"Currently: {active_event.get('emoji', '?')} "
+            f"(\"{active_event.get('matched_word', '')}\")"
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(320)
+
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(6)
+
+        assets = load_local_reaction_assets()
+        columns = 5
+
+        for index, asset in enumerate(assets):
+            path = asset["path"]
+            button = QPushButton()
+            button.setToolTip(asset.get("description", path.stem))
+            button.setFixedSize(64, 64)
+            button.setIconSize(QSize(52, 52))
+
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                button.setIcon(QIcon(pixmap))
+            else:
+                button.setText(path.stem[:6])
+
+            button.clicked.connect(
+                lambda checked=False, chosen_path=path, chosen_description=asset.get(
+                    "description", path.stem
+                ): self.apply_emoji_picker_choice(
+                    event_index,
+                    dialog,
+                    asset_path=chosen_path,
+                    description=chosen_description,
+                )
+            )
+            grid.addWidget(button, index // columns, index % columns)
+
+        scroll.setWidget(grid_widget)
+        layout.addWidget(scroll)
+
+        custom_row = QHBoxLayout()
+        custom_label = QLabel("Or type a custom emoji:")
+        custom_input = QLineEdit()
+        custom_input.setPlaceholderText("e.g. \U0001f525")
+        custom_input.setMaximumWidth(80)
+        custom_use_button = QPushButton("Use")
+        custom_use_button.clicked.connect(
+            lambda: self.apply_emoji_picker_choice(
+                event_index,
+                dialog,
+                custom_emoji=custom_input.text(),
+            )
+        )
+        custom_row.addWidget(custom_label)
+        custom_row.addWidget(custom_input)
+        custom_row.addWidget(custom_use_button)
+        custom_row.addStretch()
+        layout.addLayout(custom_row)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(dialog.reject)
+        layout.addWidget(cancel_button)
+
+        dialog.exec()
+
+
+    def apply_emoji_picker_choice(
+        self,
+        event_index: int,
+        dialog,
+        asset_path=None,
+        description: str = "",
+        custom_emoji: str = "",
+    ):
+
+        data = self.load_emoji_events_file()
+        events = data.get("events", [])
+        if not (isinstance(events, list) and 0 <= event_index < len(events)):
+            dialog.reject()
+            return
+
+        event = events[event_index]
+
+        if asset_path is not None:
+            event["asset_path"] = relative_asset_path(asset_path)
+            event["asset_description"] = description
+            event["asset_type"] = "local"
+            event["emoji"] = description
+        else:
+            emoji = normalize_emoji(custom_emoji)
+            if not emoji:
+                dialog.reject()
+                return
+            event["emoji"] = emoji
+            event.pop("asset_path", None)
+            event.pop("asset_description", None)
+            event.pop("asset_type", None)
+
+        event["manual_override"] = True
+        event["content_override"] = True
+
+        data["events"] = events
+        self.save_emoji_events_file(data)
+        self._emoji_events_cache = None
+
+        dialog.accept()
+        self.update_emoji_preview_overlay(self.player.position())

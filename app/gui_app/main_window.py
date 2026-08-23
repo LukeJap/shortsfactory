@@ -2269,6 +2269,24 @@ class ShortsFactoryWindow(
             return True
 
         if (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            for slot_index, label in enumerate(
+                getattr(self, "emoji_preview_labels", [])
+            ):
+                if not label.isVisible():
+                    continue
+                hit = watched is label or (
+                    watched is video_widget
+                    and self._point_in_widget(label, event)
+                )
+                if hit:
+                    self.open_emoji_picker(slot_index)
+                    event.accept()
+                    return True
+
+        if (
             not self.visual_preview_dragging
             and not getattr(self, "emoji_preview_dragging", False)
             and event.type() == QEvent.Type.MouseButtonPress

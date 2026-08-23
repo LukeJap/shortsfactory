@@ -983,13 +983,15 @@ def apply_emoji_position_overrides(
     previous_events: list[dict],
 ) -> list[dict]:
     """
-    Carry forward a manually-dragged position from a previous emoji_events.json
-    onto the freshly-chosen events, matched by matched_word/asset identity plus
-    a close start time. Events are compared/stored using the same clip-relative
-    time convention on both sides (subtitles.json is always clip-relative to
-    whichever video was most recently transcribed, so no rebasing is needed
-    here -- the caller is responsible for feeding in two lists on the same
-    time base).
+    Carry forward a manual edit (dragged position and/or a picked emoji/
+    asset) from a previous emoji_events.json onto the freshly-chosen
+    events, matched purely by close start time -- not by matched_word/asset
+    identity, since changing which emoji represents a moment deliberately
+    changes that identity. Events are compared/stored using the same
+    clip-relative time convention on both sides (subtitles.json is always
+    clip-relative to whichever video was most recently transcribed, so no
+    rebasing is needed here -- the caller is responsible for feeding in two
+    lists on the same time base).
     """
 
     manual_previous = [
@@ -1002,28 +1004,22 @@ def apply_emoji_position_overrides(
     if not manual_previous:
         return events
 
-    def identity(event: dict) -> str:
-        return str(
-            event.get("asset_path", "")
-            or event.get("matched_word", "")
-            or event.get("emoji", "")
-        )
-
+    used_previous_ids = set()
     updated = []
 
     for event in events:
         event = dict(event)
-        event_identity = identity(event)
         try:
             event_start = float(event.get("start", 0.0))
         except (TypeError, ValueError):
             event_start = 0.0
 
         best_match = None
+        best_match_id = None
         best_distance = EMOJI_POSITION_MERGE_TOLERANCE_SECONDS
 
-        for previous in manual_previous:
-            if identity(previous) != event_identity:
+        for previous_id, previous in enumerate(manual_previous):
+            if previous_id in used_previous_ids:
                 continue
             try:
                 previous_start = float(previous.get("start", 0.0))
@@ -1033,11 +1029,22 @@ def apply_emoji_position_overrides(
             if distance <= best_distance:
                 best_distance = distance
                 best_match = previous
+                best_match_id = previous_id
 
         if best_match is not None:
+            used_previous_ids.add(best_match_id)
             event["position_x"] = best_match.get("position_x", event.get("position_x"))
             event["position_y"] = best_match.get("position_y", event.get("position_y"))
             event["manual_override"] = True
+
+            if best_match.get("content_override"):
+                event["emoji"] = best_match.get("emoji", event.get("emoji"))
+                event["content_override"] = True
+                for asset_key in ("asset_path", "asset_description", "asset_type"):
+                    if best_match.get(asset_key):
+                        event[asset_key] = best_match[asset_key]
+                    else:
+                        event.pop(asset_key, None)
 
         updated.append(event)
 
