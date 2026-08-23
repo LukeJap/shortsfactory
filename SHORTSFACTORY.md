@@ -1,6 +1,95 @@
 # ShortsFactory — Development Log: macOS Environment Setup, Repo Cleanup, `gui.py` Split
 
-Date: 2026-08-22
+Date: 2026-08-22 (updated through 2026-08-23)
+
+## Project context
+
+**What it is:** ShortsFactory is a local desktop app that turns a long
+source video (e.g. a full TV episode or podcast) into an edited, vertical
+9:16 "Short" — the same format as YouTube Shorts, TikTok, or Instagram
+Reels. It automates the whole pipeline a human editor would otherwise do
+by hand: picking a strong clip, tightening it (cutting dead air and
+redundant speech), captioning it, adding punch-in camera motion, color
+grading, AI-generated visual cutaway graphics, emoji reactions, sound
+effects, and background music.
+
+**Who it's for / design philosophy:** a single local user producing Shorts
+from their own source footage, not a hosted multi-tenant product. The
+stated product rule (from the original design notes): *AI/editor decisions
+should be visible and user-overridable, not hidden in a black box* — every
+automated decision (which clip, which cuts, which captions, which visual
+effects) is shown in the editor and can be adjusted or rejected, not just
+applied silently.
+
+**Platform:** a native desktop app (PySide6/Qt6), not a web app. Originally
+built and run on Windows; this document is largely the record of porting
+it to and hardening it on macOS (Apple Silicon).
+
+**Tech stack:**
+- PySide6 (Qt6) for the GUI
+- FFmpeg for all video/audio processing (rendering, cropping, captions,
+  color grade, compositing) — the app shells out to `ffmpeg`/`ffprobe`
+  directly rather than using a Python video library
+- `openai-whisper` for local transcription
+- Ollama (a local LLM server, default model `llama3.1:8b`) for clip
+  selection, content editing suggestions, and AI visual planning — no
+  cloud AI calls
+- OpenCV for shot-type/face detection (used to size camera zoom effects)
+- Optional: a Forge/Automatic1111-compatible local Stable Diffusion
+  backend for AI-generated visual cutaway images
+
+**Current UI shape** — a dark, gothic/industrial-styled desktop editor
+with three columns:
+- **Left:** source video import (drag-and-drop), transcription quality
+  selector, "Find Best Clips" (AI clip discovery), "Generate Short"
+- **Center:** video preview player, a custom multi-lane zoomable/pannable
+  timeline (source clip trim handles, transcript cuts, scene markers,
+  smart-motion/visual-FX/AI-visual event lanes), render progress + log
+- **Right:** "AI Clip Hunter" candidate cards (AI-suggested clip
+  start/end options with scores/reasoning), "AI Visual Cutaways" panel
+  (generated overlay images with per-clip position/scale/display-mode
+  controls), and a transcript editor (click a line to correct/cut it)
+
+**Visual identity:** near-black panels (`#09090A`/`#101012`/`#0A0A0B`)
+with off-white/cream text (`#DED6C8`), blood-red/rust accent borders and
+highlights (`#741C28`, `#C9384F`, `#733B2D`), muted grey secondary text
+(`#B8AEA1`/`#918B84`/`#7E7670`), sharp (not rounded) panel corners, heavy
+badges/labels. The full stylesheet (a single QSS string) lives in
+`app/gui_app/style.py`. The custom timeline canvas (by far the most
+custom-drawn/bespoke widget in the app — a full multi-lane editor surface,
+not a stock Qt widget) is `app/gui_app/timeline_widget.py`.
+
+**Output format:** every render is 1080×1920 (9:16). As of section 13
+below, the source video is scaled up and **center-cropped to fill the
+entire frame edge-to-edge** (losing whatever overhangs the left/right or
+top/bottom edges) rather than letterboxed with black bars — so whatever
+the source's native aspect ratio, the delivered Short always looks
+full-bleed, no black borders.
+
+**Codebase shape:** the GUI itself lives in `app/gui_app/` (a
+`main_window.py` plus one mixin file per functional area under
+`app/gui_app/mixins/` — playback, transcript, AI visuals, SFX, render
+pipeline, etc. — see section 3 below for why it's structured that way).
+Everything else in `app/*.py` is a standalone script the GUI invokes as a
+subprocess for one pipeline stage each (`render.py` orchestrates the
+overall render; `subtitles.py` transcribes; `smart_motion.py` does the
+camera zoom/pan effect; `visual_fx.py` does color grade/vignette/overlay
+FX; `apply_ai_visuals.py` composites the AI-generated cutaway images;
+`sfx_engine.py` picks and mixes sound effects; etc.) — each independently
+runnable and testable, communicating through small JSON "plan" files in
+`output/`.
+
+**Current maturity:** this codebase was rebuilt from a corrupted/decompiled
+state (see `SHORTSFACTORY_RECOVERY_AUDIT.md`) and has had steady,
+actively-verified fixes applied since (this document). It now has a real
+automated test suite (`tests/`, currently 41 tests covering the pure
+decision logic in the render/transcript-cache/visual-FX/SFX pipeline
+stages — see section 7) and a `requirements.txt` for reproducible setup
+(section 4). The GUI itself has no automated tests yet; changes to it are
+verified by launching it and by direct code/ffmpeg-level checks (documented
+throughout this log).
+
+---
 
 This document describes a batch of environment-setup fixes, repository
 cleanup, and a structural refactor performed while getting ShortsFactory
@@ -10,9 +99,11 @@ developed and validated on Windows (see `SHORTSFACTORY_CURRENT_STATUS.md` /
 is closing gaps that only show up when running on a different OS with a
 from-scratch `.venv`.
 
-No product behavior was intentionally changed anywhere in this pass. Every
-change below is either an environment/tooling fix, a repo-hygiene cleanup,
-or a pure structural code move.
+No product behavior was intentionally changed anywhere in this pass unless
+explicitly noted as such (several later sections *are* product/behavior
+changes, done at the user's request — e.g. sections 13's crop-vs-letterbox
+change). Everything else is an environment/tooling fix, a repo-hygiene
+cleanup, or a pure structural code move.
 
 ## 1. macOS development environment setup
 
