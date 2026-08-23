@@ -42,17 +42,38 @@ VIDEO_PATH = ROOT / "output" / "rendered" / "short1_tight.mp4"
 TRANSCRIPT_PATH = ROOT / "output" / "subtitles.json"
 TEMP_PATH = ROOT / "output" / "rendered" / "short1_fx_tmp.mp4"
 
-FONT_CANDIDATES = [
-    Path(
-        r"C:\Windows\Fonts\arialbd.ttf"
-    ),
-    Path(
-        r"C:\Windows\Fonts\impact.ttf"
-    ),
-    Path(
-        r"C:\Windows\Fonts\arial.ttf"
-    ),
-]
+def _default_font_candidates() -> list[Path]:
+    """
+    Bold/impact-style drawtext fonts, in priority order, for whichever OS
+    this happens to be running on. Each candidate is checked for existence
+    at call time in drawtext_font_option(), so a platform with none of these
+    installed falls back to FFmpeg's default fontconfig lookup rather than
+    failing.
+    """
+
+    if sys.platform.startswith("win"):
+        return [
+            Path(r"C:\Windows\Fonts\arialbd.ttf"),
+            Path(r"C:\Windows\Fonts\impact.ttf"),
+            Path(r"C:\Windows\Fonts\arial.ttf"),
+        ]
+
+    if sys.platform == "darwin":
+        return [
+            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Impact.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            Path("/System/Library/Fonts/Helvetica.ttc"),
+        ]
+
+    return [
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+
+
+FONT_CANDIDATES = _default_font_candidates()
 
 
 def load_json(

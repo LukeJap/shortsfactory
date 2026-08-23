@@ -161,10 +161,6 @@ class PlaybackMixin:
         ):
             return
 
-        self.player.setPosition(
-            0
-        )
-
         if (
             self.player.duration() > 0
             and self.player.playbackState()
@@ -173,6 +169,17 @@ class PlaybackMixin:
         ):
             # Some Windows Qt multimedia backends do not paint the first frame
             # until playback advances briefly. Do that muted, then pause.
+            #
+            # Only reset to frame 0 here, inside this guard: this method is
+            # also called from media_status_changed() whenever the player
+            # reports BufferedMedia, which macOS's FFmpeg-based Qt
+            # Multimedia backend does mid-playback around a pause (unlike
+            # the Windows backend this workaround targets). Resetting
+            # position unconditionally made pausing jump back to the start
+            # on macOS.
+            self.player.setPosition(
+                0
+            )
             self.paused_seek_refresh_pending = True
             self.audio_output.setMuted(
                 True

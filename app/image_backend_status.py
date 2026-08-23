@@ -17,10 +17,23 @@ DEFAULT_API = os.getenv(
     "http://127.0.0.1:7860",
 ).rstrip("/")
 
+def _default_forge_launch_path() -> str:
+    """
+    Best-guess default install location for Forge's launcher script, in
+    whatever form is native to this OS. Always overridable via the
+    SHORTSFACTORY_FORGE_LAUNCH env var regardless of platform.
+    """
+
+    if sys.platform.startswith("win"):
+        return r"C:\AI\Forge\run.bat"
+
+    return str(Path.home() / "AI" / "Forge" / "webui.sh")
+
+
 DEFAULT_FORGE_LAUNCH = Path(
     os.getenv(
         "SHORTSFACTORY_FORGE_LAUNCH",
-        r"C:\AI\Forge\run.bat",
+        _default_forge_launch_path(),
     )
 )
 
@@ -228,24 +241,38 @@ def launch_forge(
         )
 
     try:
-        creationflags = getattr(
-            subprocess,
-            "CREATE_NEW_CONSOLE",
-            0,
-        )
-        subprocess.Popen(
-            [
-                "cmd.exe",
-                "/c",
-                str(
-                    launch_path
+        if sys.platform.startswith("win"):
+            creationflags = getattr(
+                subprocess,
+                "CREATE_NEW_CONSOLE",
+                0,
+            )
+            subprocess.Popen(
+                [
+                    "cmd.exe",
+                    "/c",
+                    str(
+                        launch_path
+                    ),
+                ],
+                cwd=str(
+                    launch_path.parent
                 ),
-            ],
-            cwd=str(
-                launch_path.parent
-            ),
-            creationflags=creationflags,
-        )
+                creationflags=creationflags,
+            )
+        else:
+            subprocess.Popen(
+                [
+                    "/bin/bash",
+                    str(
+                        launch_path
+                    ),
+                ],
+                cwd=str(
+                    launch_path.parent
+                ),
+                start_new_session=True,
+            )
     except OSError as exc:
         return (
             False,

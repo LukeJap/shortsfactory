@@ -288,18 +288,100 @@ range.
   not a substitute for a full manual feature-by-feature regression pass,
   which should still be done before relying on this in production.
 
-## 4. What's still open
+## 4. Cross-platform path fixes (Forge launch, drawtext fonts)
+
+Two spots in the codebase had Windows-only hardcoded paths with no
+platform branching at all, both noted as follow-up work in section 4 (old
+numbering) above. Both are now dynamic based on the OS actually running the
+app, while remaining fully backward compatible on Windows.
+
+### 4.1 `app/image_backend_status.py` — Forge auto-launch
+
+`DEFAULT_FORGE_LAUNCH` previously hardcoded `C:\AI\Forge\run.bat` with no
+fallback. It's now computed by `_default_forge_launch_path()`:
+
+- Windows: `C:\AI\Forge\run.bat` (unchanged).
+- macOS/Linux: `~/AI/Forge/webui.sh`.
+
+Still fully overridable via the existing `SHORTSFACTORY_FORGE_LAUNCH`
+environment variable on any platform — that mechanism was already there and
+didn't need to change.
+
+`launch_forge()` itself also branched on `sys.platform`: Windows keeps
+launching via `cmd.exe /c <path>` with `CREATE_NEW_CONSOLE` (unchanged);
+macOS/Linux now launches via `/bin/bash <path>` with `start_new_session=True`
+(the POSIX equivalent of detaching the child process). Previously, the
+macOS code path attempted to run `cmd.exe` directly, which doesn't exist on
+macOS — it failed safely (caught by the existing `except OSError`, so no
+crash) but never actually worked. Verified end-to-end with a real fake
+`webui.sh` test script: the launch call correctly starts it and its output
+confirms the process ran.
+
+### 4.2 `app/visual_fx.py` — `drawtext` font resolution
+
+`FONT_CANDIDATES` (used by `drawtext_font_option()` to pick a bold/impact
+font for slam-text visual FX overlays) previously listed only Windows font
+paths (`C:\Windows\Fonts\arialbd.ttf`, etc.). On any other OS, none of those
+paths exist, so it silently fell through to FFmpeg's default fontconfig
+lookup — not a crash, but a quiet loss of the intended bold/impact styling.
+
+Replaced with `_default_font_candidates()`, branching on `sys.platform`:
+
+- Windows: `arialbd.ttf` → `impact.ttf` → `arial.ttf` (unchanged).
+- macOS: `/System/Library/Fonts/Supplemental/Arial Bold.ttf` →
+  `Impact.ttf` → `Arial.ttf`, with `/System/Library/Fonts/Helvetica.ttc` as
+  a last-resort fallback. All four confirmed present on a real macOS
+  install.
+- Linux: a DejaVu/Liberation Sans Bold fallback chain (best-effort — not
+  verified on an actual Linux machine, but harmless if absent since the
+  same existence-check fallback to FFmpeg's default lookup still applies).
+
+Verified with an actual `ffmpeg -vf drawtext=fontfile=...` render (not just
+a path-exists check) that the resolved macOS font file loads and renders
+correctly.
+
+Both changes verified with `python -m py_compile` and `pyflakes` (clean),
+plus an offscreen app-launch smoke test.
+
+## 5. macOS playback bug: pausing reset the video to frame 0
+
+**Symptom:** on macOS, pausing a video anywhere in the middle of playback
+snapped it back to the very start (frame 0) instead of staying paused at
+the current position.
+
+**Root cause:** `PlaybackMixin.prime_preview_frame()`
+(`app/gui_app/mixins/playback.py`) is a workaround originally written for a
+Windows Qt Multimedia quirk — some Windows backends don't paint the first
+frame of a freshly loaded video until playback advances briefly, so this
+method nudges playback forward a few milliseconds (muted) right after load,
+then pauses. That workaround is correctly guarded to only fire when the
+player is freshly `StoppedState` with no video position yet.
+
+The bug: the method's very first action, `self.player.setPosition(0)`, sat
+*outside* that guard, unconditionally, at the top of the function. This
+method isn't only called right after loading a new video — it's also
+invoked from `media_status_changed()` any time the player reports
+`BufferedMedia`. On macOS's FFmpeg-based Qt Multimedia backend (confirmed
+in this environment: `qt.multimedia.ffmpeg: Using Qt multimedia with
+FFmpeg version 7.1.5`), pausing mid-playback legitimately re-emits a
+`BufferedMedia` status as the pipeline settles — which the Windows backend
+this workaround was written for apparently doesn't do the same way. Every
+such pause therefore triggered `prime_preview_frame()`, which reset the
+position to 0 before ever reaching the guard that would have skipped it.
+
+**Fix:** moved `self.player.setPosition(0)` inside the existing guard, so
+position is only reset to 0 as part of the actual "prime the first frame
+after a fresh load" workaround, never as a side effect of an ordinary
+mid-playback pause. Verified with `py_compile`, `pyflakes`, and an offscreen
+app-launch smoke test.
+
+## 6. What's still open
 
 This pass did not touch:
 
 - The lack of a `requirements.txt`/`pyproject.toml` — every dependency in
   section 1 still has to be discovered by trial and error on a fresh
   machine.
-- The Windows-only hardcoded paths noted during earlier review (the Forge
-  auto-launch path in `app/image_backend_status.py`, and the Windows font
-  paths in `app/visual_fx.py`) — both fail safe on macOS today (falling
-  back to "offline"/default-font behavior rather than crashing), but
-  neither actually works as intended on this platform yet.
 - Test coverage — still effectively none for a large codebase.
 - Further splitting `gui_app/mixins/ai_visual_slots.py`, which remains the
   largest file in the new package.
