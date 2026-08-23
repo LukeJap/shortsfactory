@@ -863,7 +863,72 @@ the real content because most of its falloff radius was calibrated to the
 much taller full canvas. `py_compile`/`pyflakes` clean, full test suite
 passes (41/41), app launches cleanly offscreen.
 
-## 12. What's still open
+## 12. Corrupted output from a duration mismatch mid-pipeline
+
+**Symptom:** generating a Short from a ~53-second selection produced a
+812-second (13.5 minute) output, and the render log was full of
+`Invalid NAL unit size` / `Error splitting the input into NAL units` /
+`Decoding error: Invalid data found when processing input` — H.264 decode
+garbage.
+
+**Root cause, traced through the actual render log line by line:**
+
+- STEP 1 (`render_base_video()`) correctly rendered `short1_base.mp4` at
+  53.47s — confirmed by its own ffmpeg encoding summary.
+- STEP 3 (`auto_cut.py`, "ShortsFactory Smart Edit") correctly re-probed
+  the same file, still 53.47s, and rendered a tightened preview fine.
+- STEP 4 (`semantic_edit.py`) analyzed the transcript, approved 0 cuts,
+  touched no video file.
+- The next stage — `apply_smart_edit.py`'s `main()` ("ShortsFactory
+  Combined Smart Edit") — re-probed `short1_base.mp4` *again* and got
+  **1422.21s: the full source episode's duration**, not 53.47s. It then
+  built a trim/concat filter including `trim=start=44.11:end=1422.212458`
+  against a file that only actually contains 53.47 seconds of real video
+  data — reading ~1369 seconds past the end of valid H.264 data, which is
+  exactly what produces NAL-unit garbage when something downstream tries
+  to decode it.
+
+Nothing in the normal single-pass pipeline touches `short1_base.mp4`
+again between steps 1 and 5 — `render.py` writes it once and only reads it
+afterward. The only way its probed duration changes mid-pipeline is if
+something else wrote to that same fixed, shared path
+(`output/rendered/short1_base.mp4`) while this render was still running —
+most likely an overlapping second render (a stuck earlier attempt, a
+leftover/orphaned process, etc.). The exact trigger couldn't be confirmed
+after the fact, and `generate_short()` (`app/gui_app/mixins/
+render_pipeline.py`) does disable the Generate button for the duration of
+a render, which should block the most obvious same-session double-click
+path — but `render.py` has no protection at all against *any* other
+process touching the same fixed output path concurrently (a stuck earlier
+run, manually invoking `render.py` from a terminal while the GUI is also
+rendering, etc.).
+
+**Fix:** rather than chase an unconfirmable race, added a defensive sanity
+check in `apply_smart_edit.py`'s `main()`, right after probing
+`BASE_VIDEO`'s duration: cross-check it against the expected duration from
+`render_settings.json`'s `selection_start`/`selection_end` (which
+`render_base_video()` just trimmed the file to exactly match). If the
+probed duration exceeds the expected one by more than 5 seconds, log a
+clear error and exit with failure instead of silently building a filter
+chain that reads past the end of the real file. Converts a silent,
+corrupted-output failure into a loud, actionable one — "this usually means
+another render overwrote this file while this one was still running" —
+without needing to know or fix the exact upstream trigger.
+
+**Verification:** reproduced the exact failure synthetically (a 60-second
+test file standing in for `BASE_VIDEO`, an expected selection of only 10
+seconds) and confirmed the new check fires with the correct message and
+`main()` returns failure; then confirmed the normal case (duration closely
+matching the expected selection) proceeds with no false positive.
+`py_compile`/`pyflakes` clean, full test suite passes (41/41), app
+launches cleanly offscreen.
+
+**Not fixed here, worth doing eventually:** making concurrent renders to
+the same output paths structurally impossible (e.g. a lock file, or
+per-render-attempt unique temp paths merged in only on success) rather
+than just detecting the corruption after the fact.
+
+## 13. What's still open
 
 This pass did not touch:
 

@@ -1342,6 +1342,52 @@ def main() -> int:
 
         return 1
 
+    settings = load_render_settings()
+
+    # Sanity-check the probed duration against the selection the user
+    # actually made. BASE_VIDEO was just trimmed to exactly that range by
+    # render_base_video(), so its real duration should closely match. A
+    # wild mismatch here (seen in practice: probing the full ~24-minute
+    # source instead of a ~50-second selection) means something else wrote
+    # to this shared, fixed output path while this pipeline was still
+    # running -- most likely another render overlapping this one. Rather
+    # than silently build a trim/concat filter that reads far past the end
+    # of the real (correct) video data -- which produces corrupted,
+    # garbage output -- fail loudly here instead.
+    try:
+        expected_duration = (
+            float(
+                settings.get(
+                    "selection_end",
+                    0.0,
+                )
+            )
+            - float(
+                settings.get(
+                    "selection_start",
+                    0.0,
+                )
+            )
+        )
+    except (TypeError, ValueError):
+        expected_duration = 0.0
+
+    if (
+        expected_duration > 0.0
+        and duration
+        > expected_duration + 5.0
+    ):
+
+        log(
+            f"ERROR: {BASE_VIDEO.name} is {duration:.2f}s long, but the "
+            f"selected clip is only {expected_duration:.2f}s. This "
+            "usually means another render overwrote this file while this "
+            "one was still running. Refusing to continue -- please "
+            "re-run Generate Short once no other render is in progress."
+        )
+
+        return 1
+
     pause_plan = load_json(
         PAUSE_PLAN
     )
@@ -1362,7 +1408,6 @@ def main() -> int:
         semantic_plan
     )
 
-    settings = load_render_settings()
     energy = normalize_energy(
         settings.get(
             "edit_energy",
