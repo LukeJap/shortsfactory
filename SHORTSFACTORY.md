@@ -782,12 +782,18 @@ this change.
 Confirmed **not** part of this problem, left alone: `app/smart_reframe.py`
 (dead code — a comment in `app/gui_app/mixins/render_pipeline.py:606-610`
 confirms this old stage was explicitly disabled when letterboxing was
-adopted); `app/visual_fx.py`'s full-canvas `drawbox` color-wash/flash
-effects (deliberately whole-screen atmospheric effects); `app/make_captions.py`'s
-`PlayResX`/`PlayResY` (correctly describes the actual canvas, not a bug) —
-its margin constants are canvas-relative by design, to stay clear of
-TikTok/Reels/Shorts' own on-screen UI controls, which is a separate,
-more debatable design question left untouched here.
+adopted); `app/make_captions.py`'s `PlayResX`/`PlayResY` (correctly
+describes the actual canvas, not a bug) — its margin constants are
+canvas-relative by design, to stay clear of TikTok/Reels/Shorts' own
+on-screen UI controls, which is a separate, more debatable design question
+left untouched here.
+
+**Correction (see section 11 below):** this section originally also
+classified `app/visual_fx.py`'s `drawbox` color washes as "deliberately
+whole-screen, not a bug." That was wrong for the *spatially-varying*
+effects in that same file (`vignette`, RGB-split accent stripes, drawtext
+slam-text positioning) — only the genuinely uniform full-frame color washes
+were actually fine as-is. Fixed in the next pass.
 
 ### Verification
 
@@ -813,7 +819,51 @@ more debatable design question left untouched here.
 - `py_compile`/`pyflakes` clean, full test suite passes (41/41), app
   launches cleanly offscreen.
 
-## 11. What's still open
+## 11. Color grade/vignette FX were also computed relative to the full canvas
+
+After generating an actual video with section 10's fix applied, color
+filters were still visibly wrong — the vignette effect in particular. This
+extends the same content-rect fix to `app/visual_fx.py`, which section 10
+incorrectly cleared as "deliberately whole-screen, not a bug."
+
+That assessment held for the genuinely uniform effects (the full-frame
+`drawbox` color washes, `eq=` contrast/saturation adjustments — flat
+per-pixel transforms with no spatial dependency), but missed the
+*spatially-varying* ones in the same filter chain:
+
+- `vignette=PI/4.2` (and `PI/7`, `PI/3.2`) darkens the frame based on
+  distance from center, calibrated to the full 1080x1920 canvas — but
+  since the real content is usually much shorter than 1920px tall, the
+  vignette's falloff distance was far larger than the actual content, so
+  within the visible video it looked barely-there, with most of the
+  effect's "budget" wasted darkening bars that were already black.
+- `drawtext` slam-text positioning (`y=h*0.28`) and the RGB-split accent
+  stripes (`y=h*0.16/0.22/0.67`) were computed as fractions of the full
+  canvas height rather than the actual content height.
+
+Fix: identical pattern to section 10 — `apply_visual_fx()`
+(`app/visual_fx.py`) now wraps its entire existing filter chain with
+`crop={content}` before and `pad=1080:1920:{content_x}:{content_y}:black`
+after, using the same `content_rect_from_settings()` helper. Every filter
+in the chain (`eq`, `unsharp`, `vignette`, `drawbox`, `drawtext`) already
+used relative `iw`/`ih`/`w`/`h` ffmpeg symbols with zero hardcoded absolute
+pixels, so — same as `smart_motion.py` in section 10 — **no changes were
+needed to any individual filter string**, only the top-level wrap.
+
+### Verification
+
+Visually confirmed with a real ffmpeg render, not just code reading:
+extracted the same frame from the MAXIMUM-energy baseline grade
+(`eq=contrast=1.42:...`, `vignette=PI/4.2`) both unwrapped (old behavior)
+and wrapped with the real content rect (new behavior). The new version
+shows a distinctly stronger, properly-contained vignette — visibly darker
+corners within the actual content bounds and a more concentrated bright
+center — while the old version's vignette was diluted, barely affecting
+the real content because most of its falloff radius was calibrated to the
+much taller full canvas. `py_compile`/`pyflakes` clean, full test suite
+passes (41/41), app launches cleanly offscreen.
+
+## 12. What's still open
 
 This pass did not touch:
 

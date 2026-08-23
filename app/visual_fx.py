@@ -14,6 +14,7 @@ try:
         VISUAL_FX_PLAN_PATH,
         build_intensity_curve,
         classify_word,
+        content_rect_from_settings,
         energy_profile,
         intensity_for_moment,
         load_render_settings,
@@ -27,6 +28,7 @@ except ImportError:
         VISUAL_FX_PLAN_PATH,
         build_intensity_curve,
         classify_word,
+        content_rect_from_settings,
         energy_profile,
         intensity_for_moment,
         load_render_settings,
@@ -1334,11 +1336,39 @@ def write_plan(
 def apply_visual_fx(
     energy: str,
     events: list[dict[str, Any]],
+    content_rect: tuple[int, int, int, int] = (0, 0, 1080, 1920),
 ) -> None:
 
     filter_chain = build_filter_chain(
         energy,
         events,
+    )
+
+    (
+        content_x,
+        content_y,
+        content_width,
+        content_height,
+    ) = content_rect
+
+    # The video at this point is already letterboxed into the 1080x1920
+    # canvas (see render.py's render_base_video()). Every filter above
+    # (vignette, color grade washes, RGB-split stripes, drawtext slam-text
+    # positioning) is computed using iw/ih/w/h -- frame-relative ffmpeg
+    # symbols with no hardcoded absolute pixels -- so cropping to the real
+    # content rect before this chain runs and padding back out afterward
+    # makes every one of those effects operate on the actual visible video
+    # instead of the full canvas (e.g. a vignette's falloff was being
+    # calibrated to the full 1920px-tall canvas, making it barely visible
+    # within a much smaller letterboxed content area). No changes needed
+    # to any individual filter string. A full-canvas content_rect (no
+    # letterboxing) makes the crop/pad a no-op, identical to before.
+    filter_chain = (
+        f"crop={content_width}:{content_height}:"
+        f"{content_x}:{content_y},"
+        f"{filter_chain},"
+        "pad=1080:1920:"
+        f"{content_x}:{content_y}:black"
     )
 
     command = [
@@ -1491,6 +1521,9 @@ def main() -> int:
         apply_visual_fx(
             energy,
             events,
+            content_rect_from_settings(
+                settings
+            ),
         )
     except subprocess.CalledProcessError as exc:
         if TEMP_PATH.exists():
