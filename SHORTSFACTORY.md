@@ -427,7 +427,61 @@ after a fresh load" workaround, never as a side effect of an ordinary
 mid-playback pause. Verified with `py_compile`, `pyflakes`, and an offscreen
 app-launch smoke test.
 
-## 6. What's still open
+## 6. `OLLAMA_MODEL`/`OLLAMA_HOST` deduplication and exception-handling review
+
+### 6.1 Shared Ollama config
+
+`OLLAMA_HOST`/`OLLAMA_MODEL` (defaulting to `http://127.0.0.1:11434` /
+`llama3.1:8b`) were each independently defined as env-var-backed module
+constants in four separate files: `app/plan_short.py`,
+`app/content_edit.py`, `app/semantic_edit.py`, `app/ai_visual_planner.py`.
+Extracted into a new `app/ollama_config.py`, imported by all four via the
+repo's existing relative-then-absolute import fallback pattern (the same
+pattern already used elsewhere for cross-module imports, since `app/` isn't
+a real Python package). `app/analyze.py` was left as-is — it has its own,
+different pattern (discovering whichever model is actually installed in
+Ollama rather than defaulting to a fixed name), which is intentionally
+different and out of scope here.
+
+### 6.2 Exception-handling review
+
+A grep for `except Exception:` across `app/*.py` found three occurrences.
+Reviewed each individually rather than blanket-narrowing:
+
+- `app/generate_ai_visual_assets.py` (parsing an API error body for a
+  friendlier message) — already safe by construction, since the code
+  always falls through to `response.raise_for_status()` regardless of
+  whether the friendlier message parses. Narrowed to `except ValueError:`
+  (covers `json.JSONDecodeError`) purely for precision; no behavior change.
+- `app/emoji_overlay.py`'s `normalize_emoji` (decoding an escaped emoji
+  string) — narrowed to `except UnicodeDecodeError:`, the only realistic
+  failure mode here; unchanged fallback behavior.
+- `app/emoji_overlay.py`'s `resolve_event_asset` — this one was a real
+  correctness issue, not just an overly-broad catch. This function checks
+  that a resolved emoji asset path stays inside `EMOJI_DIR` (a path-
+  traversal guard), but on *any* exception during resolution it silently
+  fell back to trusting the **unresolved** path and skipped the
+  containment check — fail-open rather than fail-closed. Fixed by narrowing
+  the catch to `OSError` (what `Path.resolve()` can actually raise, e.g. a
+  symlink loop) and rejecting the asset (returning `None`) in that case
+  instead of silently trusting it. Verified: legitimate in-folder assets
+  still resolve correctly, and a path-traversal attempt
+  (`../../../etc/passwd`) is still correctly rejected.
+
+### 6.3 `shot_type.py` CascadeClassifier warning — not reproducible here
+
+The project status docs mention `shot_type.py` logging an unresolved
+`cv2.CascadeClassifier` warning "on this machine" (the original Windows dev
+box). Directly tested cascade loading on this macOS setup
+(`cv2.data.haarcascades` → `haarcascade_frontalface_default.xml` →
+`CascadeClassifier(...).empty()`) and ran a full real `analyze_shots()`
+pass against the sample video — both clean, `detector.empty()` is `False`,
+no warnings. Very likely specific to the original machine's OpenCV
+install (different/older `opencv-python` version, or a broken install)
+rather than a code bug; this session's clean `opencv-python==4.11.0.86`
+install doesn't exhibit it. No code change made here.
+
+## 7. What's still open
 
 This pass did not touch:
 

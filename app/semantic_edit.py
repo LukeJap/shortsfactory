@@ -1,28 +1,22 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import requests
 
+try:
+    from .ollama_config import OLLAMA_HOST, OLLAMA_MODEL
+except ImportError:
+    from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
 SUBTITLES_PATH = ROOT / "output" / "subtitles.json"
 OUTPUT_PATH = ROOT / "output" / "semantic_edit_plan.json"
-
-OLLAMA_HOST = os.getenv(
-    "OLLAMA_HOST",
-    "http://127.0.0.1:11434",
-)
-
-OLLAMA_MODEL = os.getenv(
-    "OLLAMA_MODEL",
-    "llama3.1:8b",
-)
 
 
 def load_json(path: Path) -> dict[str, Any]:

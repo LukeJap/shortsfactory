@@ -50,7 +50,7 @@ def normalize_emoji(emoji: str) -> str:
                 .decode("unicode_escape")
             )
 
-        except Exception:
+        except UnicodeDecodeError:
             pass
 
     return emoji
@@ -189,8 +189,14 @@ def resolve_event_asset(
             )
             return None
 
-    except Exception:
-        resolved = path
+    except OSError:
+        # Path resolution genuinely failed (e.g. a symlink loop) -- reject
+        # rather than silently skip the asset-folder containment check
+        # above.
+        print(
+            f"WARNING: Could not resolve emoji asset path: {raw_asset}"
+        )
+        return None
 
     if not resolved.exists():
         print(

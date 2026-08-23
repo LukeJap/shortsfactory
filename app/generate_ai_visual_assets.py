@@ -672,7 +672,7 @@ def generate_openai_image(
                         )
                         or ""
                     ).strip()
-        except Exception:
+        except ValueError:
             message = ""
         if message:
             raise RuntimeError(
