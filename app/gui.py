@@ -7421,6 +7421,17 @@ class ShortsFactoryWindow(QMainWindow):
             self.transcript_status_label.setText(
                 "TRANSCRIPT CACHE HIT"
             )
+
+            # Find Best Clips may already be waiting on a background
+            # transcript job when the requested quality changes or a valid
+            # cache becomes available. A cache hit must resume that pending
+            # analysis instead of leaving the AI Clip Hunter stuck forever.
+            if self.pending_find_best_after_preload:
+                self.pending_find_best_after_preload = False
+                self.render_log.append(
+                    "Stage 1/2: Transcript ready. Continuing clip analysis..."
+                )
+                self.start_clip_analyzer()
             return
 
         if (
@@ -7436,14 +7447,22 @@ class ShortsFactoryWindow(QMainWindow):
                 return
 
             # A different source/quality was selected while a background
-            # Whisper job was running. Kill it before starting the new job;
-            # its completion is additionally guarded by source identity.
+            # Whisper job was running. Preserve a pending Find Best Clips
+            # request when only the quality changed for the same source;
+            # otherwise killing/restarting the preload strands the disabled
+            # AI Clip Hunter button with nothing left to resume it.
+            resume_find_best = (
+                self.pending_find_best_after_preload
+                and self.transcript_preload_source
+                == str(self.video_path)
+            )
             self.transcript_preload_source = ""
             self.pending_find_best_after_preload = False
             self.transcript_preload_process.kill()
             self.transcript_preload_process.waitForFinished(
                 250
             )
+            self.pending_find_best_after_preload = resume_find_best
 
         subtitles_script = (
             ROOT
@@ -18283,29 +18302,19 @@ class ShortsFactoryWindow(QMainWindow):
             duration_seconds
         )
 
-        reframed_source = (
-            ROOT
-            / "output"
-            / "rendered"
-            / "reframed_source.mp4"
-        )
-
-        self.pending_render_source = (
-            reframed_source
-        )
-
-        reframe_script = (
-            ROOT
-            / "app"
-            / "smart_reframe.py"
-        )
+        # Preserve the complete source frame for Shorts output. The old
+        # smart_reframe stage produced an already-cropped 1080x1920 file,
+        # so render.py could no longer restore the missing left/right image.
+        # Feed the original source directly to the renderer; render.py owns
+        # the final 9:16 contain + black-bar composition.
+        self.pending_render_source = None
 
         self.start_render_progress(
             duration_seconds,
             bool(
                 self.music_path
             ),
-            reframe_script.exists(),
+            False,
         )
 
         self.render_log.clear()
@@ -18346,7 +18355,7 @@ class ShortsFactoryWindow(QMainWindow):
         )
 
         self.generate_button.setText(
-            "Framing..."
+            "Rendering..."
         )
 
         self.find_clips_button.setEnabled(
@@ -18371,58 +18380,17 @@ class ShortsFactoryWindow(QMainWindow):
                 ""
             )
 
-        # If the subject-aware framing helper is missing for any reason,
-        # fall back to the existing renderer rather than blocking output.
-        if not reframe_script.exists():
-
-            self.render_log.append(
-                (
-                    "Smart reframe script not installed; "
-                    "using existing center crop."
-                )
-            )
-
-            self.render_log.append(
-                ""
-            )
-
-            self.start_main_render(
-                self.video_path,
-                start_seconds,
-                end_seconds,
-            )
-
-            return
-
-        arguments = [
-            str(
-                reframe_script
-            ),
-            "--source",
-            str(
-                self.video_path
-            ),
-            "--start",
-            f"{start_seconds:.3f}",
-            "--end",
-            f"{end_seconds:.3f}",
-            "--output",
-            str(
-                reframed_source
-            ),
-        ]
-
         self.render_log.append(
-            "=== PRE-RENDER: SUBJECT-AWARE 9:16 FRAMING ==="
+            "=== PRE-RENDER: FULL SOURCE FRAME ==="
+        )
+        self.render_log.append(
+            "Preserving the complete source image; unused 9:16 space will be black."
         )
 
-        self.render_log.append(
-            ""
-        )
-
-        self.reframe_process.start(
-            sys.executable,
-            arguments,
+        self.start_main_render(
+            self.video_path,
+            start_seconds,
+            end_seconds,
         )
 
 

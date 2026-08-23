@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -61,6 +62,7 @@ VISUAL_EDIT_PLAN_PATH = OUTPUT_DIR / "visual_edit_plan.json"
 COMBINED_EDIT_PLAN_PATH = OUTPUT_DIR / "combined_edit_plan.json"
 TEMPORAL_EDIT_PLAN_PATH = OUTPUT_DIR / "temporal_edit_plan.json"
 SFX_PLAN_PATH = OUTPUT_DIR / "sfx_plan.json"
+SUBTITLES_PATH = OUTPUT_DIR / "subtitles.json"
 
 SFX_DIR = ROOT / "assets" / "sfx"
 GENERATED_SFX_DIR = SFX_DIR / "generated"
@@ -78,14 +80,17 @@ ENERGY_LIMITS = {
     "LOW": {
         "max_events": 2,
         "min_spacing": 0.65,
+        "coverage_window": 15.0,
     },
     "PUNCHY": {
         "max_events": 6,
         "min_spacing": 0.42,
+        "coverage_window": 8.0,
     },
     "MAXIMUM": {
         "max_events": 12,
         "min_spacing": 0.24,
+        "coverage_window": 5.0,
     },
 }
 
@@ -93,7 +98,13 @@ CATEGORY_DURATIONS = {
     "impact": 0.28,
     "bass": 0.42,
     "whoosh": 0.38,
+    "transition": 0.34,
     "pop": 0.16,
+    "ding": 0.20,
+    "bell": 0.32,
+    "celebration": 0.55,
+    "reaction": 0.45,
+    "alert": 0.55,
     "glitch": 0.20,
     "rewind": 0.26,
     "replay": 0.24,
@@ -101,14 +112,44 @@ CATEGORY_DURATIONS = {
     "money": 0.24,
     "sparkle": 0.32,
     "doom": 0.46,
-    "transition": 0.34,
 }
+
+# Local sound files should play for their useful audible length instead of
+# being chopped to the tiny planning-marker duration. Very long ambience or
+# siren/reaction files are capped so one automatic accent cannot cover a huge
+# section of the Short.
+CATEGORY_MAX_PLAY_SECONDS = {
+    "impact": 2.2,
+    "bass": 2.8,
+    "whoosh": 2.5,
+    "transition": 2.5,
+    "pop": 1.8,
+    "ding": 2.5,
+    "bell": 3.5,
+    "celebration": 5.5,
+    "reaction": 4.5,
+    "alert": 4.5,
+    "glitch": 2.2,
+    "rewind": 3.0,
+    "replay": 3.0,
+    "beep": 2.0,
+    "money": 3.5,
+    "sparkle": 3.5,
+    "doom": 4.0,
+}
+
 
 CATEGORY_LABELS = {
     "impact": "IMPACT",
     "bass": "BASS HIT",
     "whoosh": "WHOOSH",
+    "transition": "TRANSITION",
     "pop": "POP",
+    "ding": "DING",
+    "bell": "BELL / CHIME",
+    "celebration": "CELEBRATION",
+    "reaction": "REACTION",
+    "alert": "ALERT",
     "glitch": "GLITCH",
     "rewind": "REWIND",
     "replay": "REPLAY CUE",
@@ -116,7 +157,40 @@ CATEGORY_LABELS = {
     "money": "MONEY",
     "sparkle": "SPARKLE/WIN",
     "doom": "DOOM/LOW HIT",
-    "transition": "TRANSITION",
+}
+
+# Category caps are intentionally stricter for the two sounds that were
+# dominating automatic plans. True motion can still earn a whoosh and a real
+# slam/freeze can still earn an impact, but generic emphasis is routed toward
+# dings, bells, pops, reactions, and other semantic choices.
+CATEGORY_EVENT_CAPS = {
+    "LOW": {
+        "whoosh": 1,
+        "impact": 1,
+        "ding": 2,
+        "bell": 1,
+        "reaction": 1,
+        "celebration": 1,
+        "alert": 1,
+    },
+    "PUNCHY": {
+        "whoosh": 1,
+        "impact": 2,
+        "ding": 2,
+        "bell": 2,
+        "reaction": 2,
+        "celebration": 1,
+        "alert": 1,
+    },
+    "MAXIMUM": {
+        "whoosh": 2,
+        "impact": 2,
+        "ding": 3,
+        "bell": 2,
+        "reaction": 2,
+        "celebration": 2,
+        "alert": 1,
+    },
 }
 
 VOLUME_BY_ENERGY = {
@@ -124,7 +198,13 @@ VOLUME_BY_ENERGY = {
         "impact": 0.24,
         "bass": 0.22,
         "whoosh": 0.18,
+        "transition": 0.18,
         "pop": 0.13,
+        "ding": 0.15,
+        "bell": 0.15,
+        "celebration": 0.16,
+        "reaction": 0.15,
+        "alert": 0.15,
         "glitch": 0.16,
         "rewind": 0.17,
         "replay": 0.17,
@@ -132,13 +212,18 @@ VOLUME_BY_ENERGY = {
         "money": 0.17,
         "sparkle": 0.17,
         "doom": 0.20,
-        "transition": 0.18,
     },
     "PUNCHY": {
         "impact": 0.38,
         "bass": 0.34,
         "whoosh": 0.28,
+        "transition": 0.27,
         "pop": 0.22,
+        "ding": 0.23,
+        "bell": 0.23,
+        "celebration": 0.24,
+        "reaction": 0.23,
+        "alert": 0.22,
         "glitch": 0.25,
         "rewind": 0.27,
         "replay": 0.25,
@@ -146,13 +231,18 @@ VOLUME_BY_ENERGY = {
         "money": 0.27,
         "sparkle": 0.26,
         "doom": 0.30,
-        "transition": 0.27,
     },
     "MAXIMUM": {
         "impact": 0.50,
         "bass": 0.45,
         "whoosh": 0.38,
+        "transition": 0.36,
         "pop": 0.31,
+        "ding": 0.31,
+        "bell": 0.31,
+        "celebration": 0.33,
+        "reaction": 0.31,
+        "alert": 0.30,
         "glitch": 0.34,
         "rewind": 0.36,
         "replay": 0.34,
@@ -160,42 +250,65 @@ VOLUME_BY_ENERGY = {
         "money": 0.36,
         "sparkle": 0.35,
         "doom": 0.42,
-        "transition": 0.36,
     },
 }
 
 FILENAME_ALIASES = {
-    "impact": {
-        "hit",
-        "impact",
-        "punch",
-        "slam",
-        "smack",
-        "thud",
+    "money": {
+        "cash",
+        "coin",
+        "coins",
+        "gold",
+        "money",
+        "prize",
+        "register",
     },
-    "bass": {
-        "bass",
-        "boom",
-        "drop",
-        "low",
-        "sub",
+    "reaction": {
+        "anime",
+        "funny",
+        "meme",
+        "reaction",
+        "scream",
+        "screaming",
+        "wow",
+        "yeah",
     },
-    "whoosh": {
-        "swoosh",
-        "swish",
-        "whip",
-        "whoosh",
-        "woosh",
+    "alert": {
+        "alarm",
+        "horn",
+        "police",
+        "siren",
     },
-    "pop": {
-        "click",
-        "pop",
-        "tap",
+    "ding": {
+        "ding",
+        "notification",
     },
-    "glitch": {
-        "digital",
-        "glitch",
-        "static",
+    "bell": {
+        "bell",
+        "bells",
+        "chime",
+        "doorbell",
+    },
+    "celebration": {
+        "achievement",
+        "cheer",
+        "cheering",
+        "crowd",
+        "victory",
+    },
+    "sparkle": {
+        "fairy",
+        "magic",
+        "magical",
+        "sparkle",
+        "success",
+        "win",
+    },
+    "beep": {
+        "beep",
+        "buzzer",
+        "error",
+        "wrong",
     },
     "rewind": {
         "reverse",
@@ -205,41 +318,60 @@ FILENAME_ALIASES = {
         "repeat",
         "replay",
     },
-    "beep": {
-        "beep",
-        "error",
-        "wrong",
+    "glitch": {
+        "digital",
+        "glitch",
+        "static",
     },
-    "money": {
-        "cash",
-        "coin",
-        "coins",
-        "money",
-        "register",
+    "impact": {
+        "hit",
+        "impact",
+        "punch",
+        "slam",
+        "smack",
+        "stomp",
+        "thud",
     },
-    "sparkle": {
-        "chime",
-        "success",
-        "sparkle",
-        "win",
+    "bass": {
+        "bass",
+        "boom",
+        "drop",
+        "low",
+        "sub",
     },
     "doom": {
         "dark",
         "doom",
         "fail",
-        "low",
         "ominous",
+    },
+    "whoosh": {
+        "swoosh",
+        "swish",
+        "whip",
+        "whoosh",
+        "woosh",
     },
     "transition": {
         "rise",
         "transition",
-        "whoosh",
         "wipe",
+    },
+    "pop": {
+        "bubble",
+        "click",
+        "pop",
+        "tap",
     },
 }
 
 CATEGORY_INFERENCE_ORDER = (
     "money",
+    "reaction",
+    "alert",
+    "ding",
+    "bell",
+    "celebration",
     "rewind",
     "replay",
     "glitch",
@@ -252,6 +384,12 @@ CATEGORY_INFERENCE_ORDER = (
     "transition",
     "pop",
 )
+
+GENERATED_CATEGORY_FALLBACKS = {
+    "reaction": "pop",
+    "alert": "beep",
+    "celebration": "bell",
+}
 
 GENERATED_RECIPES = {
     "impact": (
@@ -266,9 +404,21 @@ GENERATED_RECIPES = {
         "anoisesrc=color=pink:sample_rate=48000:duration=0.38:amplitude=0.26",
         "highpass=f=420,lowpass=f=5200,afade=t=in:st=0:d=0.08,afade=t=out:st=0.24:d=0.14",
     ),
+    "transition": (
+        "anoisesrc=color=pink:sample_rate=48000:duration=0.34:amplitude=0.22",
+        "highpass=f=500,lowpass=f=4600,afade=t=in:st=0:d=0.06,afade=t=out:st=0.22:d=0.12",
+    ),
     "pop": (
         "sine=frequency=920:sample_rate=48000:duration=0.16",
         "volume=0.48,afade=t=out:st=0.015:d=0.12",
+    ),
+    "ding": (
+        "sine=frequency=1320:sample_rate=48000:duration=0.20",
+        "volume=0.36,afade=t=out:st=0.04:d=0.14",
+    ),
+    "bell": (
+        "sine=frequency=1046:sample_rate=48000:duration=0.32",
+        "volume=0.34,afade=t=out:st=0.06:d=0.24",
     ),
     "glitch": (
         "anoisesrc=color=white:sample_rate=48000:duration=0.20:amplitude=0.16",
@@ -297,10 +447,6 @@ GENERATED_RECIPES = {
     "doom": (
         "sine=frequency=58:sample_rate=48000:duration=0.46",
         "volume=0.86,afade=t=out:st=0.05:d=0.38",
-    ),
-    "transition": (
-        "anoisesrc=color=pink:sample_rate=48000:duration=0.34:amplitude=0.22",
-        "highpass=f=500,lowpass=f=4600,afade=t=in:st=0:d=0.06,afade=t=out:st=0.22:d=0.12",
     ),
 }
 
@@ -494,32 +640,44 @@ def infer_category_from_words(
         )
         score = len(
             words & aliases
-        )
+        ) * 2
 
-        if category == "beep" and words & {
-            "buzzer",
-            "notification",
+        # Extra context lets descriptive downloaded filenames land in the
+        # category people expect without requiring exact naming conventions.
+        if category == "money" and words & {
+            "cash",
+            "coin",
+            "coins",
+            "gold",
+            "register",
+        }:
+            score += 4
+        elif category == "reaction" and words & {
+            "boy",
+            "what",
+        }:
+            score += 2
+        elif category == "ding" and words & {
+            "editing",
+            "notification04",
             "tone",
-            "unlock",
+        }:
+            score += 2
+        elif category == "bell" and words & {
             "doorbell",
         }:
-            score += 2
-        elif category == "sparkle" and words & {
-            "achievement",
-            "bell",
-            "bells",
-            "fairy",
+            score += 3
+        elif category == "celebration" and words & {
+            "huge",
             "uplifting",
-            "victory",
         }:
-            score += 2
+            score += 1
         elif category == "impact" and words & {
             "epic",
             "hammer",
             "heavy",
             "huge",
             "metal",
-            "stomp",
             "strong",
         }:
             score += 2
@@ -535,12 +693,6 @@ def infer_category_from_words(
             "tape",
         }:
             score += 2
-        elif category == "money" and words & {
-            "bag",
-            "gold",
-            "prize",
-        }:
-            score += 1
         elif category == "whoosh" and words & {
             "air",
         }:
@@ -553,36 +705,10 @@ def infer_category_from_words(
     if best_category:
         return best_category
 
-    if words & {
-        "buzzer",
-        "error",
-        "wrong",
-    }:
-        return "beep"
-    if words & {
-        "victory",
-        "achievement",
-        "success",
-        "fairy",
-    }:
-        return "sparkle"
-    if words & {
-        "epic",
-        "ominous",
-        "dark",
-    }:
-        return "doom"
-    if words & {
-        "hammer",
-        "punches",
-        "stomp",
-    }:
-        return "impact"
-
     return (
         normalized_fallback
         if normalized_fallback in CATEGORY_LABELS
-        else "impact"
+        else "pop"
     )
 
 
@@ -596,11 +722,46 @@ def label_for_asset_words(
             return "CASH REGISTER"
         if "coin" in words or "coins" in words or "gold" in words:
             return "COIN"
-        if "bag" in words:
-            return "MONEY BAG"
         if "cash" in words:
             return "CASH"
         return "MONEY"
+
+    if category == "reaction":
+        if "wow" in words or "anime" in words:
+            return "WOW REACTION"
+        if "scream" in words or "screaming" in words:
+            return "REACTION SCREAM"
+        if "yeah" in words or "boy" in words:
+            return "YEAH BOY"
+        if "meme" in words:
+            return "MEME REACTION"
+        return "REACTION"
+
+    if category == "alert":
+        if "horn" in words:
+            return "AIR HORN"
+        if "siren" in words or "police" in words:
+            return "SIREN"
+        return "ALERT"
+
+    if category == "ding":
+        if "notification" in words or "notification04" in words:
+            return "NOTIFICATION DING"
+        return "DING"
+
+    if category == "bell":
+        if "doorbell" in words:
+            return "DOORBELL"
+        if "achievement" in words:
+            return "ACHIEVEMENT BELL"
+        if "chime" in words:
+            return "CHIME"
+        return "BELL"
+
+    if category == "celebration":
+        if "crowd" in words or "cheer" in words or "cheering" in words:
+            return "CROWD CHEER"
+        return "CELEBRATION"
 
     if category == "impact":
         if words & {
@@ -640,11 +801,16 @@ def label_for_asset_words(
             return "AIR WHOOSH"
         return "WHOOSH"
 
+    if category == "transition":
+        return "TRANSITION"
+
     if category == "pop":
         if "electric" in words:
             return "ELECTRIC POP"
         if "bubble" in words:
             return "BUBBLE POP"
+        if "click" in words:
+            return "CLICK"
         return "POP"
 
     if category == "glitch":
@@ -672,28 +838,12 @@ def label_for_asset_words(
         return "BEEP"
 
     if category == "sparkle":
-        if words & {
-            "achievement",
-            "bell",
-            "bells",
-            "chime",
-            "fairy",
-            "success",
-            "victory",
-            "win",
-        }:
-            return "WIN CHIME"
         return "SPARKLE"
 
     if category == "doom":
         if "game" in words and "over" in words:
             return "GAME OVER"
         return "LOW HIT"
-
-    if category == "transition":
-        if "bass" in words:
-            return "BASS SWEEP"
-        return "TRANSITION"
 
     return CATEGORY_LABELS.get(
         category,
@@ -766,17 +916,39 @@ def index_local_assets() -> dict[str, list[Path]]:
         if path.suffix.lower() not in SUPPORTED_AUDIO_EXTENSIONS:
             continue
 
+        # Legacy ShortsFactory fallback files sometimes live directly in the
+        # user SFX folder (sf_whoosh.wav, sf_impact.wav, etc.). Do not let
+        # those outrank the real library. The procedural fallback generator
+        # remains available when a category truly has no local match.
+        if path.stem.lower().startswith("sf_"):
+            continue
+
         words = filename_words(
             path
         )
-
-        for category, aliases in FILENAME_ALIASES.items():
-            if words & aliases:
-                indexed[category].append(
-                    path
-                )
+        category = infer_category_from_words(
+            words
+        )
+        indexed[
+            category
+        ].append(
+            path
+        )
 
     return indexed
+
+
+def local_asset_counts(
+    local_assets: dict[str, list[Path]],
+) -> dict[str, int]:
+
+    return {
+        category: len(
+            paths
+        )
+        for category, paths in local_assets.items()
+        if paths
+    }
 
 
 def category_options_for_event(
@@ -833,9 +1005,89 @@ def category_options_for_event(
             "coin",
             "coins",
             "register",
+            "price",
+            "paid",
+            "rich",
         )
     ):
         add("money")
+
+    if any(
+        token in blob
+        for token in (
+            "wow",
+            "reaction",
+            "shocked",
+            "shock",
+            "surprise",
+            "surprised",
+            "scream",
+            "funny",
+            "meme",
+            "crazy",
+            "unbelievable",
+        )
+    ):
+        add("reaction")
+
+    if any(
+        token in blob
+        for token in (
+            "victory",
+            "celebrate",
+            "celebration",
+            "cheer",
+            "crowd",
+            "applause",
+            "yeah",
+        )
+    ):
+        add("celebration")
+
+    if any(
+        token in blob
+        for token in (
+            "achievement",
+            "bell",
+            "chime",
+            "unlock",
+            "reward",
+            "success",
+        )
+    ):
+        add("bell")
+
+    if any(
+        token in blob
+        for token in (
+            "ding",
+            "notification",
+            "reveal",
+            "realize",
+            "realization",
+            "discover",
+            "discovery",
+            "notice",
+            "important",
+            "key point",
+            "answer",
+            "finally",
+            "actually",
+        )
+    ):
+        add("ding")
+
+    if any(
+        token in blob
+        for token in (
+            "alarm",
+            "siren",
+            "warning",
+            "attention",
+            "air horn",
+        )
+    ):
+        add("alert")
 
     if any(
         token in blob
@@ -871,14 +1123,9 @@ def category_options_for_event(
         token in blob
         for token in (
             "sparkle",
-            "win",
-            "success",
-            "victory",
             "heart",
-            "achievement",
-            "bell",
-            "unlock",
-            "cheer",
+            "fairy",
+            "magic",
         )
     ):
         add("sparkle")
@@ -891,7 +1138,6 @@ def category_options_for_event(
             "awkward",
             "fail",
             "buzzer",
-            "notification",
         )
     ):
         add("beep")
@@ -948,60 +1194,238 @@ def category_options_for_event(
 
     add(base)
 
+    # Generic emphasis should sound light first. Heavy impacts are fallbacks,
+    # not the default replacement whenever a category repeats.
     if base in {
         "whoosh",
         "transition",
     }:
-        add("impact")
+        add("ding")
         add("pop")
     elif base == "impact":
-        add("bass")
+        add("ding")
         add("pop")
+        add("bass")
     elif base == "pop":
-        add("impact")
-        add("sparkle")
+        add("ding")
+        add("bell")
+    elif base == "ding":
+        add("bell")
+        add("pop")
+    elif base == "bell":
+        add("ding")
+        add("pop")
+    elif base == "reaction":
+        add("pop")
+        add("ding")
+    elif base == "celebration":
+        add("bell")
+        add("ding")
+    elif base == "alert":
+        add("beep")
+        add("ding")
     elif base == "doom":
         add("bass")
         add("impact")
     elif base == "sparkle":
-        add("pop")
+        add("bell")
+        add("ding")
     elif base == "money":
+        add("ding")
         add("pop")
     elif base == "glitch":
-        add("impact")
+        add("beep")
+        add("pop")
 
     if not options:
-        add("impact")
+        add("ding")
+        add("pop")
 
     return options
+
+
+def strong_motion_event(
+    event: dict[str, Any],
+) -> bool:
+
+    treatment = str(
+        event.get(
+            "source_treatment",
+            "",
+        )
+        or ""
+    ).lower()
+    blob = text_blob(
+        event
+    )
+    return (
+        treatment
+        in {
+            "whip_transition",
+            "speed_ramp",
+            "speed_up",
+        }
+        or any(
+            token in blob
+            for token in (
+                "whip",
+                "whoosh",
+                "swish",
+                "wipe",
+                "pan",
+                "zoom",
+                "reframe",
+                "motion",
+                "moving",
+                "transition",
+            )
+        )
+    )
+
+
+def strong_impact_event(
+    event: dict[str, Any],
+) -> bool:
+
+    treatment = str(
+        event.get(
+            "source_treatment",
+            "",
+        )
+        or ""
+    ).lower()
+    level = str(
+        event.get(
+            "level",
+            "",
+        )
+        or ""
+    ).upper()
+    blob = text_blob(
+        event
+    )
+    return (
+        bool(
+            event.get(
+                "hero",
+                False,
+            )
+        )
+        or treatment
+        in {
+            "freeze",
+            "impact",
+            "slam",
+        }
+        or level
+        in {
+            "IMPACT",
+            "EXTREME",
+        }
+        or any(
+            token in blob
+            for token in (
+                "slam",
+                "punch",
+                "smash",
+                "stomp",
+                "freeze",
+            )
+        )
+    )
+
+
+def category_cap(
+    category: str,
+    energy: str,
+) -> int | None:
+
+    limits = CATEGORY_EVENT_CAPS.get(
+        energy,
+        CATEGORY_EVENT_CAPS.get(
+            DEFAULT_ENERGY,
+            {},
+        ),
+    )
+    raw = limits.get(
+        category
+    )
+    return (
+        int(
+            raw
+        )
+        if raw is not None
+        else None
+    )
 
 
 def choose_event_category(
     event: dict[str, Any],
     recent_categories: list[str],
+    category_counts: dict[str, int] | None = None,
+    energy: str = DEFAULT_ENERGY,
 ) -> str:
 
     options = category_options_for_event(
         event
     )
     if not options:
-        return "impact"
+        return "ding"
 
-    if (
-        len(recent_categories) >= 2
-        and recent_categories[-1]
-        == recent_categories[-2]
-    ):
-        for category in options:
-            if category != recent_categories[-1]:
-                return category
+    category_counts = category_counts or {}
+
+    filtered: list[str] = []
+    for category in options:
+        cap = category_cap(
+            category,
+            energy,
+        )
+        if (
+            cap is not None
+            and category_counts.get(
+                category,
+                0,
+            )
+            >= cap
+        ):
+            continue
+        if (
+            category == "whoosh"
+            and not strong_motion_event(
+                event
+            )
+        ):
+            continue
+        if (
+            category == "impact"
+            and not strong_impact_event(
+                event
+            )
+            and len(
+                options
+            ) > 1
+        ):
+            continue
+        filtered.append(
+            category
+        )
+
+    if not filtered:
+        filtered = [
+            category
+            for category in options
+            if category not in {
+                "whoosh",
+                "impact",
+            }
+        ] or options
 
     if recent_categories:
-        for category in options:
+        for category in filtered:
             if category != recent_categories[-1]:
                 return category
 
-    return options[0]
+    return filtered[0]
 
 
 def semantic_asset_score(
@@ -1033,7 +1457,108 @@ def semantic_asset_score(
         )
     ) * 4.0
 
-    if category == "impact":
+    if category == "reaction":
+        if words & {
+            "wow",
+            "anime",
+            "scream",
+            "screaming",
+            "meme",
+            "yeah",
+            "funny",
+        }:
+            score += 5.0
+        if any(
+            token in blob
+            for token in (
+                "wow",
+                "reaction",
+                "shock",
+                "surprise",
+                "funny",
+                "crazy",
+            )
+        ):
+            score += 3.0
+    elif category == "alert":
+        if words & {
+            "horn",
+            "siren",
+            "police",
+            "alarm",
+        }:
+            score += 5.0
+        if any(
+            token in blob
+            for token in (
+                "warning",
+                "attention",
+                "alarm",
+                "siren",
+            )
+        ):
+            score += 3.0
+    elif category == "ding":
+        if words & {
+            "ding",
+            "notification",
+        }:
+            score += 5.0
+        if any(
+            token in blob
+            for token in (
+                "reveal",
+                "realize",
+                "discover",
+                "notice",
+                "important",
+                "answer",
+                "finally",
+                "actually",
+            )
+        ):
+            score += 3.0
+    elif category == "bell":
+        if words & {
+            "bell",
+            "bells",
+            "doorbell",
+            "chime",
+            "achievement",
+        }:
+            score += 5.0
+        if any(
+            token in blob
+            for token in (
+                "achievement",
+                "success",
+                "unlock",
+                "reward",
+                "chime",
+            )
+        ):
+            score += 3.0
+    elif category == "celebration":
+        if words & {
+            "crowd",
+            "cheer",
+            "cheering",
+            "victory",
+            "achievement",
+        }:
+            score += 5.0
+        if any(
+            token in blob
+            for token in (
+                "victory",
+                "celebrate",
+                "cheer",
+                "crowd",
+                "yeah",
+            )
+        ):
+            score += 3.0
+    elif category == "impact":
         if words & {
             "heavy",
             "epic",
@@ -1085,6 +1610,13 @@ def semantic_asset_score(
             score += 5.0
         if treatment == "whip_transition":
             score += 3.0
+    elif category == "transition":
+        if words & {
+            "transition",
+            "rise",
+            "wipe",
+        }:
+            score += 4.0
     elif category == "pop":
         if words & {
             "click",
@@ -1123,8 +1655,6 @@ def semantic_asset_score(
             "wrong",
             "error",
             "buzzer",
-            "notification",
-            "tone",
         }:
             score += 5.0
     elif category == "money":
@@ -1136,6 +1666,7 @@ def semantic_asset_score(
             "register",
             "bag",
             "gold",
+            "prize",
         }:
             score += 5.0
     elif category == "sparkle":
@@ -1143,11 +1674,9 @@ def semantic_asset_score(
             "sparkle",
             "win",
             "success",
-            "bell",
-            "bells",
-            "chime",
-            "victory",
             "fairy",
+            "magic",
+            "magical",
         }:
             score += 5.0
     elif category == "doom":
@@ -1160,14 +1689,6 @@ def semantic_asset_score(
             "epic",
         }:
             score += 5.0
-    elif category == "transition":
-        if words & {
-            "transition",
-            "rise",
-            "wipe",
-            "whoosh",
-        }:
-            score += 4.0
 
     return score
 
@@ -1253,12 +1774,14 @@ def choose_asset(
     event: dict[str, Any] | None = None,
     recent_categories: list[str] | None = None,
     recent_assets: list[str] | None = None,
+    asset_use_counts: dict[str, int] | None = None,
     selection_index: int = 0,
 ) -> tuple[Path | None, str]:
 
     event = event or {}
     recent_categories = recent_categories or []
     recent_assets = recent_assets or []
+    asset_use_counts = asset_use_counts or {}
     valid_assets: list[Path] = []
 
     for path in local_assets.get(
@@ -1286,11 +1809,28 @@ def choose_asset(
         )
         ranked = []
         for path in valid_assets:
+            path_text = str(
+                path
+            )
             score = semantic_asset_score(
                 category,
                 path,
                 event,
             )
+
+            # Strongly rotate through the user's actual library. Semantic fit
+            # still matters, but an unused valid sound should usually beat a
+            # clip that has already fired several times in the same plan.
+            usage_count = int(
+                asset_use_counts.get(
+                    path_text,
+                    0,
+                )
+            )
+            score -= usage_count * 6.0
+            if usage_count == 0:
+                score += 2.0
+
             if recent_categories and recent_categories[-1] == category:
                 score -= 1.8
             if (
@@ -1299,10 +1839,10 @@ def choose_asset(
                 and recent_categories[-2] == category
             ):
                 score -= 3.4
-            if recent_assets and recent_assets[-1] == str(path):
-                score -= 3.8
-            if str(path) in recent_assets[-3:]:
-                score -= 1.4
+            if recent_assets and recent_assets[-1] == path_text:
+                score -= 6.0
+            if path_text in recent_assets[-3:]:
+                score -= 2.5
 
             ranked.append(
                 (
@@ -1325,8 +1865,12 @@ def choose_asset(
         )
         return ranked[0][2], "local"
 
-    generated = ensure_generated_asset(
+    generated_category = GENERATED_CATEGORY_FALLBACKS.get(
         category,
+        category,
+    )
+    generated = ensure_generated_asset(
+        generated_category,
         warnings,
     )
     if generated:
@@ -1516,9 +2060,9 @@ def candidate_for_event(
             score = 76.0
             reason = "doom visual hit"
         elif "detail_hit" in treatment:
-            category = "pop"
+            category = "ding"
             score = 52.0
-            reason = "detail pop"
+            reason = "detail ding"
     elif kind == "camera":
         if any(
             token in blob
@@ -1535,8 +2079,8 @@ def candidate_for_event(
             score = 58.0
             reason = "camera movement"
         else:
-            category = "impact"
-            score = 54.0
+            category = "ding"
+            score = 48.0
             reason = "camera accent"
     elif kind == "ai_visual":
         if any(
@@ -1553,10 +2097,49 @@ def candidate_for_event(
         elif any(
             token in blob
             for token in (
-                "sparkle",
-                "win",
+                "victory",
+                "cheer",
+                "crowd",
+                "yeah",
+            )
+        ):
+            category = "celebration"
+            score = 56.0
+            reason = "celebration cutaway"
+        elif any(
+            token in blob
+            for token in (
+                "achievement",
                 "success",
+                "unlock",
+                "reward",
+                "bell",
+                "chime",
+            )
+        ):
+            category = "bell"
+            score = 54.0
+            reason = "positive chime cutaway"
+        elif any(
+            token in blob
+            for token in (
+                "wow",
+                "reaction",
+                "shock",
+                "surprise",
+                "funny",
+                "crazy",
+            )
+        ):
+            category = "reaction"
+            score = 54.0
+            reason = "reaction cutaway"
+        elif any(
+            token in blob
+            for token in (
+                "sparkle",
                 "heart",
+                "magic",
             )
         ):
             category = "sparkle"
@@ -1600,7 +2183,7 @@ def candidate_for_event(
             score = 48.0
             reason = "AI visual transition"
         else:
-            category = "impact"
+            category = "ding"
             score = 46.0
             reason = "AI visual accent"
     elif kind == "emoji":
@@ -1619,12 +2202,35 @@ def candidate_for_event(
         elif any(
             token in blob
             for token in (
+                "victory",
+                "cheer",
+                "yeah",
+            )
+        ):
+            category = "celebration"
+            score = 46.0
+            reason = "celebration emoji cue"
+        elif any(
+            token in blob
+            for token in (
+                "wow",
+                "shock",
+                "surprise",
+                "funny",
+            )
+        ):
+            category = "reaction"
+            score = 45.0
+            reason = "reaction emoji cue"
+        elif any(
+            token in blob
+            for token in (
                 "win",
                 "sparkle",
                 "heart",
             )
         ):
-            category = "sparkle"
+            category = "bell"
             score = 44.0
             reason = "positive emoji cue"
         else:
@@ -1640,6 +2246,43 @@ def candidate_for_event(
             category = "doom"
             score = 76.0
             reason = "doom/negative word"
+        elif any(
+            token in blob
+            for token in (
+                "victory",
+                "cheer",
+                "celebrate",
+                "yeah",
+            )
+        ):
+            category = "celebration"
+            score = 68.0
+            reason = "celebration word"
+        elif any(
+            token in blob
+            for token in (
+                "achievement",
+                "success",
+                "unlock",
+                "reward",
+            )
+        ):
+            category = "bell"
+            score = 66.0
+            reason = "positive word"
+        elif any(
+            token in blob
+            for token in (
+                "wow",
+                "shock",
+                "surprise",
+                "crazy",
+                "funny",
+            )
+        ):
+            category = "reaction"
+            score = 64.0
+            reason = "reaction word"
         elif level == "IMPACT" or treatment == "impact":
             category = "impact"
             score = 74.0
@@ -1649,8 +2292,8 @@ def candidate_for_event(
             score = 84.0
             reason = "extreme caption hit"
         else:
-            category = "pop"
-            score = 36.0
+            category = "ding"
+            score = 40.0
             reason = "caption emphasis"
 
     if not category:
@@ -1870,34 +2513,65 @@ def collapse_stacks(
 def select_events(
     candidates: list[dict[str, Any]],
     energy: str,
+    *,
+    selection_start: float | None = None,
+    selection_end: float | None = None,
 ) -> list[dict[str, Any]]:
 
     limits = ENERGY_LIMITS.get(
         energy,
         ENERGY_LIMITS[DEFAULT_ENERGY],
     )
-    max_events = int(
+    base_max_events = int(
         limits["max_events"]
     )
     min_spacing = float(
         limits["min_spacing"]
     )
 
-    if energy == "LOW":
-        candidates = [
-            candidate
-            for candidate in candidates
-            if float(
-                candidate.get(
-                    "score",
-                    0.0,
+    bounded_selection = (
+        selection_start is not None
+        and selection_end is not None
+        and float(
+            selection_end
+        )
+        > float(
+            selection_start
+        )
+    )
+    if bounded_selection:
+        selection_start = float(
+            selection_start
+        )
+        selection_end = float(
+            selection_end
+        )
+        selection_duration = max(
+            0.0,
+            selection_end
+            - selection_start,
+        )
+        # Preserve the existing 30-second density, but scale the event budget
+        # with whatever range the editor selected. A 90-second MAXIMUM range,
+        # for example, gets roughly three times the opportunities of a
+        # 30-second range instead of hitting the old hard cap of 12.
+        max_events = max(
+            1,
+            int(
+                math.ceil(
+                    base_max_events
+                    * max(
+                        30.0,
+                        selection_duration,
+                    )
+                    / 30.0
                 )
-            )
-            >= 70.0
-        ]
+            ),
+        )
+    else:
+        max_events = base_max_events
 
-    selected: list[dict[str, Any]] = []
-    for candidate in sorted(
+    ranked_candidates = sorted(
         candidates,
         key=lambda item: (
             -float(
@@ -1913,14 +2587,21 @@ def select_events(
                 )
             ),
         ),
-    ):
+    )
+
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[int] = set()
+
+    def can_add(
+        candidate: dict[str, Any],
+    ) -> bool:
         start = float(
             candidate.get(
                 "start",
                 0.0,
             )
         )
-        if any(
+        return not any(
             abs(
                 start
                 - float(
@@ -1932,15 +2613,91 @@ def select_events(
             )
             < min_spacing
             for chosen in selected
+        )
+
+    def add_candidate(
+        candidate: dict[str, Any],
+    ) -> bool:
+        candidate_id = id(
+            candidate
+        )
+        if (
+            candidate_id in selected_ids
+            or not can_add(
+                candidate
+            )
         ):
-            continue
+            return False
         selected.append(
             candidate
         )
+        selected_ids.add(
+            candidate_id
+        )
+        return True
+
+    if bounded_selection and ranked_candidates:
+        # First guarantee coverage across the selected range. Pick the best
+        # available event inside each successive time window before filling
+        # remaining slots by score. This prevents every high-scoring SFX from
+        # clustering in the opening seconds of a long manual selection.
+        coverage_window = max(
+            2.0,
+            float(
+                limits.get(
+                    "coverage_window",
+                    8.0,
+                )
+            ),
+        )
+        window_start = selection_start
+        while (
+            window_start < selection_end
+            and len(
+                selected
+            )
+            < max_events
+        ):
+            window_end = min(
+                selection_end,
+                window_start
+                + coverage_window,
+            )
+            window_candidates = [
+                candidate
+                for candidate in ranked_candidates
+                if (
+                    float(
+                        candidate.get(
+                            "start",
+                            0.0,
+                        )
+                    )
+                    >= window_start
+                    and float(
+                        candidate.get(
+                            "start",
+                            0.0,
+                        )
+                    )
+                    < window_end
+                )
+            ]
+            for candidate in window_candidates:
+                if add_candidate(
+                    candidate
+                ):
+                    break
+            window_start = window_end
+
+    for candidate in ranked_candidates:
         if len(
             selected
         ) >= max_events:
             break
+        add_candidate(
+            candidate
+        )
 
     selected.sort(
         key=lambda item: float(
@@ -1954,6 +2711,34 @@ def select_events(
     return selected
 
 
+def playback_duration_for_asset(
+    path: Path,
+    category: str,
+) -> float:
+
+    fallback = CATEGORY_DURATIONS.get(
+        category,
+        0.25,
+    )
+    measured = probe_duration(
+        path
+    )
+    if measured <= 0.02:
+        return fallback
+
+    maximum = CATEGORY_MAX_PLAY_SECONDS.get(
+        category,
+        3.0,
+    )
+    return max(
+        0.06,
+        min(
+            measured,
+            maximum,
+        ),
+    )
+
+
 def prepare_events(
     selected: list[dict[str, Any]],
     energy: str,
@@ -1965,6 +2750,8 @@ def prepare_events(
     skipped: list[dict[str, Any]] = []
     recent_categories: list[str] = []
     recent_assets: list[str] = []
+    category_counts: dict[str, int] = {}
+    asset_use_counts: dict[str, int] = {}
 
     for index, event in enumerate(
         selected,
@@ -1973,6 +2760,8 @@ def prepare_events(
         category = choose_event_category(
             event,
             recent_categories,
+            category_counts=category_counts,
+            energy=energy,
         )
         asset, asset_source = choose_asset(
             category,
@@ -1981,6 +2770,7 @@ def prepare_events(
             event=event,
             recent_categories=recent_categories,
             recent_assets=recent_assets,
+            asset_use_counts=asset_use_counts,
             selection_index=index,
         )
         if not asset:
@@ -2032,6 +2822,7 @@ def prepare_events(
                 "caption_emphasis",
                 "emoji",
                 "camera",
+                "transcript_accent",
             }
         ):
             volume *= 0.82
@@ -2064,9 +2855,12 @@ def prepare_events(
                     )
                     or ""
                 ),
-                "duration": CATEGORY_DURATIONS.get(
-                    resolved_category,
-                    0.25,
+                "duration": round(
+                    playback_duration_for_asset(
+                        asset,
+                        resolved_category,
+                    ),
+                    3,
                 ),
                 "volume": round(
                     volume,
@@ -2083,6 +2877,28 @@ def prepare_events(
         )
         recent_assets.append(
             str(asset)
+        )
+        category_counts[
+            resolved_category
+        ] = (
+            category_counts.get(
+                resolved_category,
+                0,
+            )
+            + 1
+        )
+        asset_use_counts[
+            str(
+                asset
+            )
+        ] = (
+            asset_use_counts.get(
+                str(
+                    asset
+                ),
+                0,
+            )
+            + 1
         )
 
     return planned, skipped
@@ -2837,6 +3653,204 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def transcript_category_and_score(
+    text: str,
+    index: int,
+) -> tuple[str, float, str]:
+
+    normalized = " ".join(
+        str(
+            text
+            or ""
+        ).lower().split()
+    )
+
+    if any(
+        token in normalized
+        for token in (
+            "money",
+            "cash",
+            "coin",
+            "coins",
+            "dollar",
+            "prize",
+            "rich",
+        )
+    ):
+        return "money", 72.0, "money/reward dialogue beat"
+
+    if any(
+        token in normalized
+        for token in (
+            "wow",
+            "whoa",
+            "what?",
+            "really",
+            "seriously",
+            "no way",
+            "oh my",
+            "crazy",
+        )
+    ) or "!" in text:
+        return "reaction", 66.0, "reaction dialogue beat"
+
+    if any(
+        token in normalized
+        for token in (
+            "yes",
+            "yeah",
+            "finally",
+            "got it",
+            "got you",
+            "love",
+            "great",
+            "good",
+            "win",
+            "won",
+            "success",
+        )
+    ):
+        return "bell", 62.0, "positive dialogue beat"
+
+    if any(
+        token in normalized
+        for token in (
+            "wrong",
+            "fail",
+            "failed",
+            "never",
+            "lost",
+            "gone",
+            "bad",
+            "error",
+        )
+    ):
+        return "beep", 58.0, "negative dialogue beat"
+
+    if "?" in text:
+        return "ding", 60.0, "question/reveal beat"
+
+    # Ordinary dialogue beats intentionally alternate between small bright
+    # accents rather than hammering every line with the same sound family.
+    if index % 3 == 2:
+        return "bell", 45.0, "dialogue beat"
+    if index % 2:
+        return "pop", 43.0, "dialogue beat"
+    return "ding", 46.0, "dialogue beat"
+
+
+def transcript_editor_candidates(
+    selection_start: float,
+    selection_end: float,
+) -> list[dict[str, Any]]:
+
+    transcript = read_json(
+        SUBTITLES_PATH
+    )
+    raw_segments = transcript.get(
+        "segments",
+        [],
+    )
+    if not isinstance(
+        raw_segments,
+        list,
+    ):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for index, segment in enumerate(
+        raw_segments
+    ):
+        if not isinstance(
+            segment,
+            dict,
+        ):
+            continue
+
+        start = as_float(
+            segment.get(
+                "start",
+                0.0,
+            )
+        )
+        end = as_float(
+            segment.get(
+                "end",
+                start,
+            ),
+            start,
+        )
+        if (
+            end <= selection_start
+            or start >= selection_end
+        ):
+            continue
+
+        text = str(
+            segment.get(
+                "text",
+                "",
+            )
+            or ""
+        ).strip()
+        if not text:
+            continue
+
+        category, score, reason = transcript_category_and_score(
+            text,
+            index,
+        )
+
+        # Accent the end of the spoken thought rather than spraying effects
+        # at arbitrary percentages of the timeline. Keep a small lead-in so
+        # the sound lands with the last word instead of noticeably after it.
+        accent_time = max(
+            selection_start,
+            min(
+                selection_end - 0.05,
+                end - 0.08,
+            ),
+        )
+        if accent_time < selection_start or accent_time >= selection_end:
+            continue
+
+        candidates.append(
+            {
+                "start": round(
+                    accent_time,
+                    3,
+                ),
+                "end": round(
+                    min(
+                        selection_end,
+                        accent_time
+                        + CATEGORY_DURATIONS.get(
+                            category,
+                            0.25,
+                        ),
+                    ),
+                    3,
+                ),
+                "category": category,
+                "label": CATEGORY_LABELS.get(
+                    category,
+                    category.upper(),
+                ),
+                "score": score,
+                "reason": reason,
+                "source_event_type": "transcript_accent",
+                "source_treatment": "accent",
+                "recipe": "transcript_semantic",
+                "trigger": text[:120],
+                "stack_id": "",
+                "hero": score >= 70.0,
+                "time_basis": "source",
+            }
+        )
+
+    return candidates
+
+
 def fallback_editor_candidates(
     selection_start: float,
     selection_end: float,
@@ -2851,28 +3865,37 @@ def fallback_editor_candidates(
     if duration <= 0.5:
         return []
 
+    # Fallback planning has no semantic edit events to work from, so avoid
+    # pretending every clip entrance needs a whoosh and every ending needs an
+    # impact. Use light accents instead; real motion/slam events from the
+    # visual plan can still request those heavier categories explicitly.
+    first_start = (
+        selection_start
+        + duration
+        * 0.38
+    )
     candidates = [
         {
             "start": round(
-                selection_start,
+                first_start,
                 3,
             ),
             "end": round(
                 min(
                     selection_end,
-                    selection_start
-                    + 0.38,
+                    first_start
+                    + CATEGORY_DURATIONS["ding"],
                 ),
                 3,
             ),
-            "category": "whoosh",
-            "label": CATEGORY_LABELS["whoosh"],
-            "score": 64.0,
-            "reason": "editor selection entrance",
+            "category": "ding",
+            "label": CATEGORY_LABELS["ding"],
+            "score": 58.0,
+            "reason": "editor fallback emphasis",
             "source_event_type": "editor_fallback",
-            "source_treatment": "transition",
+            "source_treatment": "accent",
             "recipe": "editor_fallback",
-            "trigger": "selection_start",
+            "trigger": "fallback_emphasis",
             "stack_id": "",
             "hero": False,
             "time_basis": "source",
@@ -2880,29 +3903,33 @@ def fallback_editor_candidates(
     ]
 
     if duration >= 3.0:
+        second_start = (
+            selection_start
+            + duration
+            * 0.68
+        )
         candidates.append(
             {
                 "start": round(
-                    selection_start
-                    + duration
-                    * 0.5,
+                    second_start,
                     3,
                 ),
                 "end": round(
-                    selection_start
-                    + duration
-                    * 0.5
-                    + 0.2,
+                    min(
+                        selection_end,
+                        second_start
+                        + CATEGORY_DURATIONS["pop"],
+                    ),
                     3,
                 ),
                 "category": "pop",
                 "label": CATEGORY_LABELS["pop"],
-                "score": 45.0,
-                "reason": "editor midpoint accent",
+                "score": 46.0,
+                "reason": "editor fallback light accent",
                 "source_event_type": "editor_fallback",
                 "source_treatment": "accent",
                 "recipe": "editor_fallback",
-                "trigger": "midpoint",
+                "trigger": "fallback_accent",
                 "stack_id": "",
                 "hero": False,
                 "time_basis": "source",
@@ -2910,35 +3937,40 @@ def fallback_editor_candidates(
         )
 
     if duration >= 5.0 or energy == "MAXIMUM":
-        impact_start = max(
-            selection_start,
+        bell_start = min(
             selection_end
-            - 0.72,
+            - 0.2,
+            selection_start
+            + duration
+            * 0.88,
         )
         candidates.append(
             {
                 "start": round(
-                    impact_start,
+                    max(
+                        selection_start,
+                        bell_start,
+                    ),
                     3,
                 ),
                 "end": round(
                     min(
                         selection_end,
-                        impact_start
-                        + 0.28,
+                        bell_start
+                        + CATEGORY_DURATIONS["bell"],
                     ),
                     3,
                 ),
-                "category": "impact",
-                "label": CATEGORY_LABELS["impact"],
-                "score": 72.0,
-                "reason": "editor selection payoff",
+                "category": "bell",
+                "label": CATEGORY_LABELS["bell"],
+                "score": 62.0,
+                "reason": "editor fallback payoff chime",
                 "source_event_type": "editor_fallback",
-                "source_treatment": "impact",
+                "source_treatment": "accent",
                 "recipe": "editor_fallback",
-                "trigger": "selection_end",
+                "trigger": "fallback_payoff",
                 "stack_id": "",
-                "hero": True,
+                "hero": False,
                 "time_basis": "source",
             }
         )
@@ -3005,8 +4037,18 @@ def editor_candidates(
             item
         )
 
-    if source_candidates:
-        return source_candidates
+    transcript_candidates = transcript_editor_candidates(
+        selection_start,
+        selection_end,
+    )
+
+    # Visual/temporal events are often sparse and can cluster in the first few
+    # seconds. Add dialogue-beat candidates from the already-loaded transcript
+    # so automatic SFX can continue across the full selected clip. select_events
+    # still enforces the LOW/PUNCHY/MAXIMUM event cap and spacing.
+    combined = source_candidates + transcript_candidates
+    if combined:
+        return combined
 
     return fallback_editor_candidates(
         selection_start,
@@ -3042,8 +4084,13 @@ def write_editor_sfx_plan(
             energy,
         ),
         energy,
+        selection_start=selection_start,
+        selection_end=selection_end,
     )
     local_assets = index_local_assets()
+    plan["local_asset_counts"] = local_asset_counts(
+        local_assets
+    )
     prepared, skipped = prepare_events(
         selected,
         energy,
@@ -3271,6 +4318,9 @@ def main() -> int:
         energy,
     )
     local_assets = index_local_assets()
+    plan["local_asset_counts"] = local_asset_counts(
+        local_assets
+    )
     prepared, skipped = prepare_events(
         selected,
         energy,

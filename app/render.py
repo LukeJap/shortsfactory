@@ -58,6 +58,15 @@ DEFAULT_SOURCE_VIDEO = (
     ROOT / "input" / "short1.mp4"
 )
 
+OUTPUT_WIDTH = 1080
+OUTPUT_HEIGHT = 1920
+
+# Keep captions around the lower-center of the Shorts canvas rather
+# than near the bottom UI controls.
+CAPTION_SAFE_MARGIN_LEFT = 110
+CAPTION_SAFE_MARGIN_RIGHT = 180
+CAPTION_SAFE_MARGIN_BOTTOM = 980
+
 
 # ============================================================
 # PIPELINE SCRIPTS
@@ -497,9 +506,14 @@ def render_base_video(
 
         "-vf",
         (
-            "scale=1080:1920:"
-            "force_original_aspect_ratio=increase,"
-            "crop=1080:1920"
+            # Preserve the complete source frame. Landscape video is
+            # fitted to the Shorts width and letterboxed vertically
+            # instead of being enlarged and center-cropped.
+            f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
+            "force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
+            "(ow-iw)/2:(oh-ih)/2:black,"
+            "setsar=1"
         ),
 
         "-c:v",
@@ -748,7 +762,12 @@ def burn_captions() -> None:
         str(TIGHT_OUTPUT_PATH),
 
         "-vf",
-        "ass=output/captions.ass",
+        (
+            "subtitles=output/captions.ass:"
+            f"force_style='Alignment=2,MarginL={CAPTION_SAFE_MARGIN_LEFT},"
+            f"MarginR={CAPTION_SAFE_MARGIN_RIGHT},"
+            f"MarginV={CAPTION_SAFE_MARGIN_BOTTOM}'"
+        ),
 
         "-c:v",
         "libx264",

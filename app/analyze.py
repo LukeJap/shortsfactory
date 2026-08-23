@@ -21,8 +21,9 @@ DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 REQUEST_TIMEOUT_SECONDS = 180
 MIN_CLIP_SECONDS = 15
 PREFERRED_MIN_CLIP_SECONDS = 20
-PREFERRED_MAX_CLIP_SECONDS = 35
-MAX_CLIP_SECONDS = 45
+PREFERRED_MAX_CLIP_SECONDS = 45
+EXTENDED_CLIP_MIN_SECONDS = 45
+MAX_CLIP_SECONDS = 60
 MAX_VALID_WINDOWS_FOR_PROMPT = 30
 TIMESTAMP_MATCH_TOLERANCE_SECONDS = 0.05
 
@@ -556,86 +557,177 @@ def generate_valid_windows(segments: list[TranscriptSegment]) -> list[CandidateW
     if len(windows) <= MAX_VALID_WINDOWS_FOR_PROMPT:
         return windows
 
-    def prompt_rank(window: CandidateWindow) -> tuple[float, float, int, float]:
+    # Preserve duration diversity before Ollama ranks the windows. A previous
+    # version mostly kept windows near 30 seconds, which meant a complete
+    # 45-60 second setup/payoff could be discarded before the model ever saw
+    # it. Keep concise, standard, and extended options across the full source.
+    def duration_band(window: CandidateWindow) -> int:
         duration = window.duration_seconds
+        if duration < 30.0:
+            return 0
+        if duration < EXTENDED_CLIP_MIN_SECONDS:
+            return 1
+        return 2
 
-        if PREFERRED_MIN_CLIP_SECONDS <= duration <= PREFERRED_MAX_CLIP_SECONDS:
-            duration_penalty = 0.0
-        else:
-            duration_penalty = min(
-                abs(duration - PREFERRED_MIN_CLIP_SECONDS),
-                abs(duration - PREFERRED_MAX_CLIP_SECONDS),
+    band_targets = {
+        0: 24.0,
+        1: 37.5,
+        2: 52.5,
+    }
+
+    def prompt_rank(window: CandidateWindow) -> tuple[float, float, float]:
+        duration = window.duration_seconds
+        target = band_targets[
+            duration_band(
+                window
             )
+        ]
+        speech_density = len(
+            window.text
+        ) / max(
+            1.0,
+            duration,
+        )
 
-        # Prefer a useful Shorts duration, then denser spoken windows.
+        # Within each duration band, favor a useful representative length and
+        # denser spoken content. The semantic ranker still makes the final
+        # decision about whether the extra seconds are actually worthwhile.
         return (
-            duration_penalty,
-            abs(duration - 30),
-            -len(window.text),
+            abs(
+                duration
+                - target
+            ),
+            -speech_density,
             window.start,
         )
 
-    # IMPORTANT FOR LONG VIDEOS:
-    #
-    # Do not simply take the first 30 good-duration windows. That can
-    # cause a movie/episode/podcast to be represented mostly by its
-    # beginning. Instead, divide the full timeline into buckets and
-    # choose the strongest-duration window from each part of the video.
-    timeline_start = min(window.start for window in windows)
-    timeline_end = max(window.end for window in windows)
-    timeline_span = max(0.001, timeline_end - timeline_start)
+    timeline_start = min(
+        window.start
+        for window in windows
+    )
+    timeline_end = max(
+        window.end
+        for window in windows
+    )
+    timeline_span = max(
+        0.001,
+        timeline_end
+        - timeline_start,
+    )
 
-    best_by_bucket: dict[int, CandidateWindow] = {}
+    duration_band_count = 3
+    bucket_count = max(
+        1,
+        MAX_VALID_WINDOWS_FOR_PROMPT
+        // duration_band_count,
+    )
+
+    best_by_bucket_band: dict[
+        tuple[int, int],
+        CandidateWindow,
+    ] = {}
 
     for window in windows:
-
-        progress = (window.start - timeline_start) / timeline_span
+        midpoint = (
+            window.start
+            + window.end
+        ) / 2.0
+        progress = (
+            midpoint
+            - timeline_start
+        ) / timeline_span
 
         bucket = min(
-            MAX_VALID_WINDOWS_FOR_PROMPT - 1,
+            bucket_count
+            - 1,
             max(
                 0,
-                int(progress * MAX_VALID_WINDOWS_FOR_PROMPT),
+                int(
+                    progress
+                    * bucket_count
+                ),
             ),
         )
-
-        previous = best_by_bucket.get(bucket)
+        key = (
+            bucket,
+            duration_band(
+                window
+            ),
+        )
+        previous = best_by_bucket_band.get(
+            key
+        )
 
         if (
             previous is None
-            or prompt_rank(window) < prompt_rank(previous)
+            or prompt_rank(
+                window
+            ) < prompt_rank(
+                previous
+            )
         ):
-            best_by_bucket[bucket] = window
+            best_by_bucket_band[
+                key
+            ] = window
 
-    selected = list(best_by_bucket.values())
+    selected = list(
+        best_by_bucket_band.values()
+    )
 
-    # If sparse speech left some buckets empty, fill the remaining slots
-    # with the best unused windows globally.
+    # Sparse transcripts may leave some bucket/band combinations empty. Fill
+    # the remaining prompt slots with strong unused windows without removing
+    # the duration-diverse representatives already selected above.
     if len(selected) < MAX_VALID_WINDOWS_FOR_PROMPT:
-
         selected_keys = {
-            (window.start, window.end)
+            (
+                window.start,
+                window.end,
+            )
             for window in selected
         }
 
-        for window in sorted(windows, key=prompt_rank):
+        global_ranked = sorted(
+            windows,
+            key=lambda window: (
+                prompt_rank(
+                    window
+                ),
+                duration_band(
+                    window
+                ),
+            ),
+        )
 
-            key = (window.start, window.end)
+        for window in global_ranked:
+            key = (
+                window.start,
+                window.end,
+            )
 
             if key in selected_keys:
                 continue
 
-            selected.append(window)
-            selected_keys.add(key)
+            selected.append(
+                window
+            )
+            selected_keys.add(
+                key
+            )
 
-            if len(selected) >= MAX_VALID_WINDOWS_FOR_PROMPT:
+            if len(
+                selected
+            ) >= MAX_VALID_WINDOWS_FOR_PROMPT:
                 break
 
     return sorted(
-        selected[:MAX_VALID_WINDOWS_FOR_PROMPT],
-        key=lambda window: (window.start, window.end),
+        selected[
+            :MAX_VALID_WINDOWS_FOR_PROMPT
+        ],
+        key=lambda window: (
+            window.start,
+            window.end,
+        ),
     )
-
 
 def truncate_for_prompt(text: str, max_chars: int = 320) -> str:
     clean_text = " ".join(text.split())
@@ -647,7 +739,7 @@ def truncate_for_prompt(text: str, max_chars: int = 320) -> str:
 def format_valid_windows_for_prompt(windows: list[CandidateWindow]) -> str:
     if not windows:
         return (
-            "No valid 15-45 second timestamp-aligned windows were found. "
+            "No valid 15-60 second timestamp-aligned windows were found. "
             "Return candidate_clips as an empty array and selected_clip with empty timestamps."
         )
 
@@ -713,7 +805,7 @@ def build_prompt(
         "best_hook": "string",
         "recommended_clip_start_timestamp": "HH:MM:SS.mmm",
         "recommended_clip_end_timestamp": "HH:MM:SS.mmm",
-        "recommended_short_length_seconds": "number from 15 to 45, or 0 if no viable clip",
+        "recommended_short_length_seconds": "number from 15 to 60, or 0 if no viable clip",
         "why_selected_section_is_interesting": "string",
         "proposed_original_narration_commentary_concept": "string",
         "suggested_ending_payoff": "string",
@@ -730,7 +822,7 @@ def build_prompt(
             {
                 "start_timestamp": "HH:MM:SS.mmm from a valid window",
                 "end_timestamp": "HH:MM:SS.mmm from the same valid window",
-                "duration_seconds": "number from 15 to 45",
+                "duration_seconds": "number from 15 to 60",
                 "hook": "specific non-clickbait hook",
                 "description": "string",
                 "score": "integer from 0 to 100",
@@ -740,7 +832,7 @@ def build_prompt(
         "selected_clip": {
             "start_timestamp": "HH:MM:SS.mmm from one candidate clip, or empty string",
             "end_timestamp": "HH:MM:SS.mmm from the same candidate clip, or empty string",
-            "duration_seconds": "number from 15 to 45, or 0",
+            "duration_seconds": "number from 15 to 60, or 0",
             "hook": "specific non-clickbait hook, or empty string",
             "reason": "string",
         },
@@ -803,8 +895,12 @@ def build_prompt(
                 "Critical timing constraints:",
         (
             f"Every candidate and selected clip must be {MIN_CLIP_SECONDS}-{MAX_CLIP_SECONDS} seconds. "
-            f"Strongly prefer {PREFERRED_MIN_CLIP_SECONDS}-{PREFERRED_MAX_CLIP_SECONDS} seconds. "
-            "Never select the entire transcript unless the entire transcript is within the required duration."
+            f"Prefer {PREFERRED_MIN_CLIP_SECONDS}-{PREFERRED_MAX_CLIP_SECONDS} seconds when that range contains "
+            "the complete setup, key moment, and payoff. Do NOT cut a strong sequence short just to stay near "
+            "30 seconds. A 45-60 second window is valid when the added context materially improves the hook, "
+            "story, joke, emotional beat, or payoff. When two overlapping windows are equally strong and complete, "
+            "prefer the shorter one. Never select the entire transcript unless the entire transcript is within "
+            "the required duration."
         ),
         "Moment timestamp rules:",
         (
@@ -970,7 +1066,10 @@ A strong Short should:
 - have a natural beginning and ending
 - avoid long stretches of filler conversation
 - avoid generic statements
-- work as a standalone 15-45 second clip
+- work as a standalone 15-60 second clip
+- use the shortest window that still preserves the complete setup, key moment, and payoff
+- NOT truncate a great scene merely to stay near 30 seconds
+- allow 45-60 seconds when those extra seconds materially improve context, escalation, emotion, comedy, or payoff
 
 Return ONLY this JSON structure:
 
@@ -1006,6 +1105,9 @@ Rules:
 9. Avoid returning multiple windows that cover essentially the same scene or conversation beat.
 10. Reasons must mention concrete words, people, objects, places, or actions from that window.
 11. Do not write phrases such as "clear setup and payoff", "engaging conversation", or "becomes the center of attention".
+12. Do not automatically favor a 20-30 second window over a stronger 30-60 second window.
+13. If two overlapping windows are equally strong and both feel complete, prefer the shorter one.
+14. Rank a 45-60 second window highly only when its extra context or payoff is materially better than the shorter overlapping alternatives.
 
 PRE-APPROVED WINDOWS:
 
@@ -1432,12 +1534,21 @@ def normalize_candidate_clips(
         ranked_windows = sorted(
             valid_windows,
             key=lambda window: (
-                abs(window.duration_seconds - 30),
                 0
                 if PREFERRED_MIN_CLIP_SECONDS
                 <= window.duration_seconds
                 <= PREFERRED_MAX_CLIP_SECONDS
                 else 1,
+                min(
+                    abs(
+                        window.duration_seconds
+                        - PREFERRED_MIN_CLIP_SECONDS
+                    ),
+                    abs(
+                        window.duration_seconds
+                        - PREFERRED_MAX_CLIP_SECONDS
+                    ),
+                ),
                 window.start,
             ),
         )
@@ -1532,7 +1643,7 @@ def normalize_selected_clip(
 
         reason = (
             reason
-            or "No strong 15-45 second segment-aligned clip was selected."
+            or "No strong 15-60 second segment-aligned clip was selected."
         )
 
         return empty_selected_clip(reason)
@@ -1571,7 +1682,7 @@ def validate_normalized_analysis(analysis: dict[str, Any]) -> list[str]:
 
     if duration_float:
         if not MIN_CLIP_SECONDS <= duration_float <= MAX_CLIP_SECONDS:
-            issues.append("selected_clip duration is outside the required 15-45 second range.")
+            issues.append("selected_clip duration is outside the required 15-60 second range.")
         if is_generic_hook(str(selected.get("hook", ""))):
             issues.append("selected_clip hook is generic instead of specific.")
     elif not str(analysis.get("no_viable_clip_reason", "")).strip() and not str(
@@ -1849,7 +1960,7 @@ def main() -> int:
     log(f"Timestamped transcript segments: {len(transcript.segments)}")
     log(f"Requested clip candidates: {target_clip_count}")
     valid_windows = generate_valid_windows(transcript.segments)
-    log(f"Valid 15-45 second segment-aligned windows: {len(valid_windows)}")
+    log(f"Valid 15-60 second segment-aligned windows: {len(valid_windows)}")
 
     host = normalize_ollama_host(os.environ.get("OLLAMA_HOST"))
     log(f"Checking Ollama at {host}...")
