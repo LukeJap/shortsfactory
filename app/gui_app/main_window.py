@@ -388,6 +388,23 @@ class ShortsFactoryWindow(
             )
             or DEFAULT_ENERGY
         )
+        try:
+            self.fx_intensity = min(
+                2.0,
+                max(
+                    0.0,
+                    float(
+                        self.settings.value(
+                            "render/fx_intensity",
+                            1.0,
+                        )
+                        or 1.0
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            self.fx_intensity = 1.0
+
         self.sfx_mode = normalize_sfx_mode(
             self.settings.value(
                 "render/sfx_mode",
@@ -700,6 +717,33 @@ class ShortsFactoryWindow(
             edit_style_buttons.addWidget(button, 1)
 
         edit_style_layout.addLayout(edit_style_buttons)
+
+        fx_intensity_row = QHBoxLayout()
+        fx_intensity_row.setSpacing(8)
+
+        fx_intensity_title = QLabel("FILTER INTENSITY")
+        fx_intensity_title.setObjectName("TinyLabel")
+
+        self.fx_intensity_label = QLabel(
+            f"{round(self.fx_intensity * 100)}%"
+        )
+        self.fx_intensity_label.setObjectName("MusicVolumeLabel")
+
+        self.fx_intensity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fx_intensity_slider.setObjectName("MusicVolumeSlider")
+        self.fx_intensity_slider.setRange(0, 200)
+        self.fx_intensity_slider.setValue(round(self.fx_intensity * 100))
+        self.fx_intensity_slider.setToolTip(
+            "Scales the color grade/vignette strength for the selected edit "
+            "style. 100% is the style's normal look; 0% disables it."
+        )
+        self.fx_intensity_slider.valueChanged.connect(self.fx_intensity_changed)
+
+        fx_intensity_row.addWidget(fx_intensity_title)
+        fx_intensity_row.addWidget(self.fx_intensity_slider, 1)
+        fx_intensity_row.addWidget(self.fx_intensity_label)
+
+        edit_style_layout.addLayout(fx_intensity_row)
 
         self.generate_button = QPushButton("Generate Short")
         self.generate_button.setObjectName("GenerateButton")

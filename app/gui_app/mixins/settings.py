@@ -96,6 +96,56 @@ class SettingsMixin:
         )
 
 
+    def fx_intensity_changed(
+        self,
+        value: int,
+    ):
+
+        intensity = min(
+            2.0,
+            max(
+                0.0,
+                value / 100.0,
+            ),
+        )
+
+        self.fx_intensity = intensity
+        self.settings.setValue(
+            "render/fx_intensity",
+            intensity,
+        )
+
+        if hasattr(
+            self,
+            "fx_intensity_label",
+        ):
+            self.fx_intensity_label.setText(
+                f"{value}%"
+            )
+
+
+    def current_fx_intensity(self) -> float:
+
+        try:
+            intensity = float(
+                getattr(
+                    self,
+                    "fx_intensity",
+                    1.0,
+                )
+            )
+        except (TypeError, ValueError):
+            return 1.0
+
+        return min(
+            2.0,
+            max(
+                0.0,
+                intensity,
+            ),
+        )
+
+
     def sfx_mode_changed(
         self,
         value: str,
@@ -127,6 +177,7 @@ class SettingsMixin:
 
         payload = {
             "edit_energy": self.current_edit_energy(),
+            "fx_intensity": self.current_fx_intensity(),
             "sfx_mode": self.current_sfx_mode(),
             "source_video": (
                 str(

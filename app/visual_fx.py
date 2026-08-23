@@ -961,33 +961,128 @@ def build_fx_events(
     )
 
 
+def coerce_fx_intensity(
+    value: Any,
+) -> float:
+
+    try:
+        intensity = float(
+            value
+        )
+    except (TypeError, ValueError):
+        return 1.0
+
+    if intensity != intensity:  # NaN
+        return 1.0
+
+    return min(
+        2.0,
+        max(
+            0.0,
+            intensity,
+        ),
+    )
+
+
+def _scaled_eq(
+    contrast: float,
+    saturation: float,
+    brightness: float,
+    intensity: float,
+    gamma: float | None = None,
+) -> str:
+
+    # Scales each value's *deviation* from the neutral eq() baseline
+    # (contrast=1.0, saturation=1.0, brightness=0.0, gamma=1.0) by
+    # intensity, so intensity=1.0 reproduces the tier's original values
+    # exactly and intensity=0.0 fully neutralizes the color grade.
+    parts = (
+        f"contrast={1.0 + (contrast - 1.0) * intensity:.4f}:"
+        f"saturation={1.0 + (saturation - 1.0) * intensity:.4f}:"
+        f"brightness={brightness * intensity:.4f}"
+    )
+
+    if gamma is not None:
+        parts += f":gamma={1.0 + (gamma - 1.0) * intensity:.4f}"
+
+    return f"eq={parts}"
+
+
+def _scaled_unsharp(
+    amount: float,
+    camount: float,
+    intensity: float,
+) -> str:
+
+    return (
+        f"unsharp=5:5:{amount * intensity:.4f}:"
+        f"3:3:{camount * intensity:.4f}"
+    )
+
+
+def _scaled_vignette(
+    denominator: float,
+    intensity: float,
+) -> str | None:
+
+    if intensity <= 0.0:
+        return None
+
+    return f"vignette=PI/{denominator / intensity:.4f}"
+
+
 def baseline_filters(
     energy: str,
+    intensity: float = 1.0,
 ) -> list[str]:
 
     energy = normalize_energy(
         energy
     )
+    intensity = coerce_fx_intensity(
+        intensity
+    )
 
     if energy == "LOW":
         return [
-            "eq=contrast=1.08:saturation=1.12:brightness=0.004",
-            "unsharp=5:5:0.32:3:3:0.12",
+            _scaled_eq(1.08, 1.12, 0.004, intensity),
+            _scaled_unsharp(0.32, 0.12, intensity),
         ]
 
     if energy == "MAXIMUM":
-        return [
-            "eq=contrast=1.42:saturation=1.62:brightness=0.010:gamma=0.96",
-            "unsharp=5:5:0.86:3:3:0.26",
-            "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.035:t=fill",
-            "vignette=PI/4.2",
+        filters = [
+            _scaled_eq(1.42, 1.62, 0.010, intensity, gamma=0.96),
+            _scaled_unsharp(0.86, 0.26, intensity),
         ]
 
-    return [
-        "eq=contrast=1.18:saturation=1.28:brightness=0.008",
-        "unsharp=5:5:0.52:3:3:0.18",
-        "vignette=PI/7",
+        darken_alpha = min(
+            1.0,
+            max(
+                0.0,
+                0.035 * intensity,
+            ),
+        )
+        if darken_alpha > 0.0:
+            filters.append(
+                f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{darken_alpha:.4f}:t=fill"
+            )
+
+        vignette = _scaled_vignette(4.2, intensity)
+        if vignette:
+            filters.append(vignette)
+
+        return filters
+
+    filters = [
+        _scaled_eq(1.18, 1.28, 0.008, intensity),
+        _scaled_unsharp(0.52, 0.18, intensity),
     ]
+
+    vignette = _scaled_vignette(7, intensity)
+    if vignette:
+        filters.append(vignette)
+
+    return filters
 
 
 def enable_between(
@@ -1230,10 +1325,12 @@ def filters_for_event(
 def build_filter_chain(
     energy: str,
     events: list[dict[str, Any]],
+    intensity: float = 1.0,
 ) -> str:
 
     filters = baseline_filters(
-        energy
+        energy,
+        intensity,
     )
 
     for index, event in enumerate(
@@ -1337,11 +1434,13 @@ def apply_visual_fx(
     energy: str,
     events: list[dict[str, Any]],
     content_rect: tuple[int, int, int, int] = (0, 0, 1080, 1920),
+    intensity: float = 1.0,
 ) -> None:
 
     filter_chain = build_filter_chain(
         energy,
         events,
+        intensity,
     )
 
     (
@@ -1442,6 +1541,12 @@ def main() -> int:
             DEFAULT_ENERGY,
         )
     )
+    intensity = coerce_fx_intensity(
+        settings.get(
+            "fx_intensity",
+            1.0,
+        )
+    )
 
     transcript = load_json(
         TRANSCRIPT_PATH
@@ -1475,6 +1580,10 @@ def main() -> int:
 
     print(
         f"Edit energy: {energy}",
+        flush=True,
+    )
+    print(
+        f"FX intensity: {intensity:.2f}",
         flush=True,
     )
     print(
@@ -1524,6 +1633,7 @@ def main() -> int:
             content_rect_from_settings(
                 settings
             ),
+            intensity,
         )
     except subprocess.CalledProcessError as exc:
         if TEMP_PATH.exists():
