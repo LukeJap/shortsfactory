@@ -190,6 +190,12 @@ class SettingsMixin:
             "selection_end": self.end_ms / 1000,
         }
 
+        caption_position_x = getattr(self, "caption_position_x", None)
+        caption_position_y = getattr(self, "caption_position_y", None)
+        if caption_position_x is not None and caption_position_y is not None:
+            payload["caption_position_x"] = caption_position_x
+            payload["caption_position_y"] = caption_position_y
+
         try:
 
             write_render_settings(

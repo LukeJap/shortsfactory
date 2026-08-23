@@ -369,6 +369,9 @@ class PlaybackMixin:
             self.update_emoji_preview_overlay(
                 self.start_ms
             )
+            self.update_caption_preview_overlay(
+                self.start_ms
+            )
             return
 
         if not self.timeline.isSliderDown():
@@ -406,6 +409,9 @@ class PlaybackMixin:
             position
         )
         self.update_emoji_preview_overlay(
+            position
+        )
+        self.update_caption_preview_overlay(
             position
         )
 
@@ -488,6 +494,9 @@ class PlaybackMixin:
             position
         )
         self.update_emoji_preview_overlay(
+            position
+        )
+        self.update_caption_preview_overlay(
             position
         )
 

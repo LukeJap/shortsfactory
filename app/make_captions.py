@@ -478,6 +478,31 @@ def ass_time(seconds: float) -> str:
     )
 
 
+def caption_position_override_tag(render_settings: dict) -> str:
+    """
+    ASS \\pos(x,y) override tag for a manually-dragged caption block
+    position, or "" to use the style's default MarginV-based placement.
+
+    (x, y) is the anchor point the style's own Alignment value (2 =
+    bottom-center, unchanged by this) is measured from, so this only needs
+    to override position, not alignment.
+    """
+
+    position_x = render_settings.get("caption_position_x")
+    position_y = render_settings.get("caption_position_y")
+
+    if position_x is None or position_y is None:
+        return ""
+
+    try:
+        x = max(0.0, min(1.0, float(position_x))) * 1080
+        y = max(0.0, min(1.0, float(position_y))) * 1920
+    except (TypeError, ValueError):
+        return ""
+
+    return f"{{\\pos({x:.1f},{y:.1f})}}"
+
+
 def escape_ass_text(text: str) -> str:
     return (
         text.replace("\\", r"\\")
@@ -1276,6 +1301,10 @@ def main() -> int:
 
     print(f"Edit energy: {edit_energy}")
 
+    caption_position_tag = caption_position_override_tag(render_settings)
+    if caption_position_tag:
+        print(f"Caption position override: {caption_position_tag}")
+
     if not INPUT_PATH.exists():
         print(f"ERROR: Missing {INPUT_PATH}")
         return 1
@@ -1355,7 +1384,7 @@ def main() -> int:
                     (
                         ass_time(event_start),
                         ass_time(event_end),
-                        text,
+                        caption_position_tag + text,
                     )
                 )
 

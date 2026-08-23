@@ -42,6 +42,7 @@ from .mixins.ai_clip_hunter import AIClipHunterMixin
 from .mixins.ai_visual_pipeline import AIVisualPipelineMixin
 from .mixins.ai_visual_preview import AIVisualPreviewMixin
 from .mixins.ai_visual_slots import AIVisualSlotsMixin
+from .mixins.caption_preview import CaptionPreviewMixin
 from .mixins.editor_assets import EditorAssetsMixin
 from .mixins.emoji_preview import EmojiPreviewMixin
 from .mixins.image_ai import ImageAIMixin
@@ -68,6 +69,7 @@ class ShortsFactoryWindow(
     EditorAssetsMixin,
     AIVisualPreviewMixin,
     EmojiPreviewMixin,
+    CaptionPreviewMixin,
 ):
 
     def __init__(self):
@@ -199,6 +201,13 @@ class ShortsFactoryWindow(
         self.emoji_preview_drag_start_y = 0.0
         self.emoji_preview_active: list = []
         self.emoji_preview_labels: list = []
+
+        self.caption_position_x: float | None = None
+        self.caption_position_y: float | None = None
+        self.caption_preview_dragging = False
+        self.caption_preview_drag_origin = QPoint()
+        self.caption_preview_drag_start_x = 0.0
+        self.caption_preview_drag_start_y = 0.0
 
         self.visual_plan_slots: list[dict] = []
         self.visual_deleted_slots: list[dict] = []
@@ -2236,6 +2245,36 @@ class ShortsFactoryWindow(
             return True
 
         if (
+            not self.visual_preview_dragging
+            and not getattr(self, "emoji_preview_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and (
+                watched is video_widget
+                or watched is getattr(self, "caption_preview_label", None)
+            )
+        ):
+            if self.begin_caption_preview_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "caption_preview_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_caption_preview_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "caption_preview_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_caption_preview_drag()
+            event.accept()
+            return True
+
+        if (
             watched is video_widget
             and event.type() == QEvent.Type.Resize
             and hasattr(self, "ai_visual_preview_overlay")
@@ -2249,6 +2288,12 @@ class ShortsFactoryWindow(
             QTimer.singleShot(
                 0,
                 lambda: self.update_emoji_preview_overlay(
+                    self.player.position()
+                ),
+            )
+            QTimer.singleShot(
+                0,
+                lambda: self.update_caption_preview_overlay(
                     self.player.position()
                 ),
             )
