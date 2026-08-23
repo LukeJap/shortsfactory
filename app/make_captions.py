@@ -28,6 +28,17 @@ except ImportError:
         write_visual_edit_plan,
     )
 
+try:
+    from .emoji_overlay import (
+        emoji_pixel_to_fraction,
+        event_default_position_px,
+    )
+except ImportError:
+    from emoji_overlay import (
+        emoji_pixel_to_fraction,
+        event_default_position_px,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -862,6 +873,17 @@ def choose_emoji_events(
                     optional_key
                 ]
 
+        default_x, default_y = event_default_position_px(
+            len(selected)
+        )
+        (
+            event["position_x"],
+            event["position_y"],
+        ) = emoji_pixel_to_fraction(
+            default_x,
+            default_y,
+        )
+
         selected.append(
             event
         )
@@ -904,6 +926,12 @@ def choose_emoji_events(
             or middle_time
         )
 
+        fallback_x, fallback_y = event_default_position_px(0)
+        fallback_position_x, fallback_position_y = emoji_pixel_to_fraction(
+            fallback_x,
+            fallback_y,
+        )
+
         selected.append(
             {
                 "start": fallback_start,
@@ -914,10 +942,81 @@ def choose_emoji_events(
                 ),
                 "emoji": FALLBACK_EMOJI,
                 "matched_word": "fallback_reaction",
+                "position_x": fallback_position_x,
+                "position_y": fallback_position_y,
             }
         )
 
     return selected[:max_emoji_events]
+
+
+EMOJI_POSITION_MERGE_TOLERANCE_SECONDS = 1.2
+
+
+def apply_emoji_position_overrides(
+    events: list[dict],
+    previous_events: list[dict],
+) -> list[dict]:
+    """
+    Carry forward a manually-dragged position from a previous emoji_events.json
+    onto the freshly-chosen events, matched by matched_word/asset identity plus
+    a close start time. Events are compared/stored using the same clip-relative
+    time convention on both sides (subtitles.json is always clip-relative to
+    whichever video was most recently transcribed, so no rebasing is needed
+    here -- the caller is responsible for feeding in two lists on the same
+    time base).
+    """
+
+    manual_previous = [
+        previous
+        for previous in previous_events
+        if isinstance(previous, dict)
+        and previous.get("manual_override")
+    ]
+
+    if not manual_previous:
+        return events
+
+    def identity(event: dict) -> str:
+        return str(
+            event.get("asset_path", "")
+            or event.get("matched_word", "")
+            or event.get("emoji", "")
+        )
+
+    updated = []
+
+    for event in events:
+        event = dict(event)
+        event_identity = identity(event)
+        try:
+            event_start = float(event.get("start", 0.0))
+        except (TypeError, ValueError):
+            event_start = 0.0
+
+        best_match = None
+        best_distance = EMOJI_POSITION_MERGE_TOLERANCE_SECONDS
+
+        for previous in manual_previous:
+            if identity(previous) != event_identity:
+                continue
+            try:
+                previous_start = float(previous.get("start", 0.0))
+            except (TypeError, ValueError):
+                continue
+            distance = abs(previous_start - event_start)
+            if distance <= best_distance:
+                best_distance = distance
+                best_match = previous
+
+        if best_match is not None:
+            event["position_x"] = best_match.get("position_x", event.get("position_x"))
+            event["position_y"] = best_match.get("position_y", event.get("position_y"))
+            event["manual_override"] = True
+
+        updated.append(event)
+
+    return updated
 
 
 # ============================================================
@@ -1319,6 +1418,48 @@ def main() -> int:
         edit_energy,
     )
 
+    previous_emoji_events = []
+    if EMOJI_OUTPUT_PATH.exists():
+        try:
+            previous_emoji_data = json.loads(
+                EMOJI_OUTPUT_PATH.read_text(encoding="utf-8")
+            )
+            previous_emoji_events = previous_emoji_data.get("events", [])
+            if not isinstance(previous_emoji_events, list):
+                previous_emoji_events = []
+
+            # The preview-only planner (emoji_planner.py) writes events in
+            # absolute source-video time, since it runs before the clip is
+            # ever cropped. This real pass always works in clip-relative
+            # time (this file's own `words` come from the already-cropped
+            # clip's transcript) -- rebase before comparing so a manual drag
+            # made in the pre-render preview still matches up correctly.
+            if previous_emoji_data.get("time_base") == "absolute":
+                previous_selection_start = float(
+                    previous_emoji_data.get("selection_start", 0.0) or 0.0
+                )
+                rebased = []
+                for previous_event in previous_emoji_events:
+                    if not isinstance(previous_event, dict):
+                        continue
+                    previous_event = dict(previous_event)
+                    try:
+                        previous_event["start"] = (
+                            float(previous_event.get("start", 0.0))
+                            - previous_selection_start
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    rebased.append(previous_event)
+                previous_emoji_events = rebased
+        except (OSError, json.JSONDecodeError):
+            previous_emoji_events = []
+
+    emoji_events = apply_emoji_position_overrides(
+        emoji_events,
+        previous_emoji_events,
+    )
+
     visual_plan = build_visual_edit_plan(
         render_settings,
         caption_emphasis_events,
@@ -1358,7 +1499,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with EMOJI_OUTPUT_PATH.open("w", encoding="utf-8") as f:
         json.dump(
             {
-                "events": emoji_events
+                "version": 1,
+                "time_base": "clip_relative",
+                "selection_start": render_settings.get("selection_start", 0.0),
+                "selection_end": render_settings.get("selection_end", 0.0),
+                "events": emoji_events,
             },
             f,
             indent=2,

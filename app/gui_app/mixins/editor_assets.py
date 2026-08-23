@@ -221,6 +221,9 @@ class EditorAssetsMixin:
             self.update_ai_visual_preview_overlay(
                 self.player.position()
             )
+            self.update_emoji_preview_overlay(
+                self.player.position()
+            )
 
 
     def find_editor_clip(

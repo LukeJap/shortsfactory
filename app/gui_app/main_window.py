@@ -43,6 +43,7 @@ from .mixins.ai_visual_pipeline import AIVisualPipelineMixin
 from .mixins.ai_visual_preview import AIVisualPreviewMixin
 from .mixins.ai_visual_slots import AIVisualSlotsMixin
 from .mixins.editor_assets import EditorAssetsMixin
+from .mixins.emoji_preview import EmojiPreviewMixin
 from .mixins.image_ai import ImageAIMixin
 from .mixins.music import MusicMixin
 from .mixins.playback import PlaybackMixin
@@ -66,6 +67,7 @@ class ShortsFactoryWindow(
     RenderPipelineMixin,
     EditorAssetsMixin,
     AIVisualPreviewMixin,
+    EmojiPreviewMixin,
 ):
 
     def __init__(self):
@@ -175,6 +177,28 @@ class ShortsFactoryWindow(
         self.visual_process.finished.connect(
             self.visual_plan_finished
         )
+
+        self.emoji_preview_process = QProcess(self)
+
+        self.emoji_preview_process.setWorkingDirectory(
+            str(ROOT)
+        )
+
+        self.emoji_preview_process.setProcessEnvironment(
+            process_env
+        )
+
+        self.emoji_preview_process.finished.connect(
+            self.emoji_preview_plan_finished
+        )
+
+        self.emoji_preview_dragging = False
+        self.emoji_preview_drag_slot = None
+        self.emoji_preview_drag_origin = QPoint()
+        self.emoji_preview_drag_start_x = 0.0
+        self.emoji_preview_drag_start_y = 0.0
+        self.emoji_preview_active: list = []
+        self.emoji_preview_labels: list = []
 
         self.visual_plan_slots: list[dict] = []
         self.visual_deleted_slots: list[dict] = []
@@ -2183,6 +2207,35 @@ class ShortsFactoryWindow(
             return True
 
         if (
+            not self.visual_preview_dragging
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and (
+                watched is video_widget
+                or watched in getattr(self, "emoji_preview_labels", [])
+            )
+        ):
+            if self.begin_emoji_preview_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "emoji_preview_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_emoji_preview_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "emoji_preview_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_emoji_preview_drag()
+            event.accept()
+            return True
+
+        if (
             watched is video_widget
             and event.type() == QEvent.Type.Resize
             and hasattr(self, "ai_visual_preview_overlay")
@@ -2190,6 +2243,12 @@ class ShortsFactoryWindow(
             QTimer.singleShot(
                 0,
                 lambda: self.update_ai_visual_preview_overlay(
+                    self.player.position()
+                ),
+            )
+            QTimer.singleShot(
+                0,
+                lambda: self.update_emoji_preview_overlay(
                     self.player.position()
                 ),
             )

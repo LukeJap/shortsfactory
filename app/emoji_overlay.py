@@ -36,6 +36,65 @@ TWEMOJI_BASE = (
 EMOJI_DURATION = 1.50
 EMOJI_SIZE = 175
 
+CANVAS_WIDTH = 1080
+CANVAS_HEIGHT = 1920
+
+# Legacy fixed round-robin corner positions (top-left of the EMOJI_SIZE box,
+# in canvas pixels). Still used as the *default* position for any emoji
+# event that has no stored position_x/position_y (new events get one of
+# these converted to a fraction; events predating this feature have neither
+# field and fall back to this table directly).
+EMOJI_DEFAULT_POSITIONS_PX = [
+    (760, 1300),
+    (170, 1340),
+    (750, 1430),
+    (190, 1460),
+]
+
+
+def coerce_emoji_fraction(value) -> float:
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    return max(0.0, min(1.0, number))
+
+
+def emoji_pixel_to_fraction(x: float, y: float) -> tuple[float, float]:
+    # (x, y) is the top-left corner of the EMOJI_SIZE box, in canvas
+    # pixels. 0.0 = flush against the left/top edge, 1.0 = flush against
+    # the right/bottom edge.
+    x_span = max(1, CANVAS_WIDTH - EMOJI_SIZE)
+    y_span = max(1, CANVAS_HEIGHT - EMOJI_SIZE)
+
+    return (
+        coerce_emoji_fraction(x / x_span),
+        coerce_emoji_fraction(y / y_span),
+    )
+
+
+def emoji_fraction_to_pixel(
+    position_x,
+    position_y,
+) -> tuple[float, float]:
+
+    x_span = max(1, CANVAS_WIDTH - EMOJI_SIZE)
+    y_span = max(1, CANVAS_HEIGHT - EMOJI_SIZE)
+
+    return (
+        coerce_emoji_fraction(position_x) * x_span,
+        coerce_emoji_fraction(position_y) * y_span,
+    )
+
+
+def event_default_position_px(index: int) -> tuple[int, int]:
+
+    return EMOJI_DEFAULT_POSITIONS_PX[
+        index % len(EMOJI_DEFAULT_POSITIONS_PX)
+    ]
+
 
 def normalize_emoji(emoji: str) -> str:
 
@@ -346,6 +405,8 @@ def main() -> int:
                 "end":
                     start
                     + EMOJI_DURATION,
+                "position_x": event.get("position_x"),
+                "position_y": event.get("position_y"),
             }
         )
 
@@ -416,13 +477,6 @@ def main() -> int:
 
     current = "[0:v]"
 
-    positions = [
-        (760, 1300),
-        (170, 1340),
-        (750, 1430),
-        (190, 1460),
-    ]
-
     for index, event in enumerate(
         prepared
     ):
@@ -447,9 +501,18 @@ def main() -> int:
             event["end"]
         )
 
-        x, y = positions[
-            index % len(positions)
-        ]
+        stored_x = event.get("position_x")
+        stored_y = event.get("position_y")
+
+        if stored_x is not None and stored_y is not None:
+            x, y = emoji_fraction_to_pixel(
+                stored_x,
+                stored_y,
+            )
+        else:
+            x, y = event_default_position_px(
+                index
+            )
 
         # Prepare a normal static full-color emoji.
         #

@@ -518,6 +518,8 @@ class AIVisualPipelineMixin:
             ],
         )
 
+        self.plan_emoji_preview()
+
 
     def load_ai_visual_plan(self):
 
