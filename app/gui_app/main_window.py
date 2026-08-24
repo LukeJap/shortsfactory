@@ -2428,6 +2428,90 @@ class ShortsFactoryWindow(
             event.accept()
             return True
 
+        emoji_handle_widgets = [
+            handle
+            for handles in getattr(self, "emoji_resize_handles", [])
+            for handle in handles.values()
+        ]
+
+        if (
+            event.type() == QEvent.Type.Enter
+            and (
+                watched in getattr(self, "emoji_preview_labels", [])
+                or watched in emoji_handle_widgets
+            )
+        ):
+            hover_index = None
+            for index, label in enumerate(
+                getattr(self, "emoji_preview_labels", [])
+            ):
+                if watched is label:
+                    hover_index = index
+                    break
+            if hover_index is None:
+                for index, handles in enumerate(
+                    getattr(self, "emoji_resize_handles", [])
+                ):
+                    if watched in handles.values():
+                        hover_index = index
+                        break
+            if hover_index is not None:
+                self.set_emoji_resize_hover(hover_index)
+        elif (
+            event.type() == QEvent.Type.Leave
+            and (
+                watched in getattr(self, "emoji_preview_labels", [])
+                or watched in emoji_handle_widgets
+            )
+            and not getattr(self, "emoji_resize_dragging", False)
+        ):
+            self.set_emoji_resize_hover(None)
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and watched is video_widget
+            and not getattr(self, "emoji_preview_dragging", False)
+            and not getattr(self, "emoji_resize_dragging", False)
+        ):
+            hover_slot = None
+            try:
+                point = event.position().toPoint()
+                for index, label in enumerate(
+                    getattr(self, "emoji_preview_labels", [])
+                ):
+                    if label.isVisible() and label.geometry().adjusted(
+                        -8, -8, 8, 8
+                    ).contains(point):
+                        hover_slot = index
+                        break
+            except Exception:
+                hover_slot = None
+            self.set_emoji_resize_hover(hover_slot)
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "emoji_resize_handles")
+        ):
+            if self.begin_emoji_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "emoji_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_emoji_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "emoji_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_emoji_resize_drag()
+            event.accept()
+            return True
+
         if (
             not self.visual_preview_dragging
             and event.type() == QEvent.Type.MouseButtonPress
