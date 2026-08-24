@@ -7,6 +7,7 @@ from PySide6.QtCore import QCoreApplication, QTimer, QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
 from ..helpers import format_precise_time, format_time
+from ..settings_keys import PREVIEW_VOLUME
 
 
 class PlaybackMixin:
@@ -1152,7 +1153,7 @@ class PlaybackMixin:
         )
 
         self.settings.setValue(
-            "preview/volume",
+            PREVIEW_VOLUME,
             self.preview_volume,
         )
 

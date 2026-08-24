@@ -7,6 +7,8 @@ from visual_emphasis import (
     write_render_settings,
 )
 
+from ..settings_keys import EDIT_ENERGY, FX_INTENSITY, SFX_MODE, TRANSCRIPTION_QUALITY
+
 
 class SettingsMixin:
 
@@ -40,7 +42,7 @@ class SettingsMixin:
 
         self.transcription_quality = quality
         self.settings.setValue(
-            "transcription/quality",
+            TRANSCRIPTION_QUALITY,
             quality,
         )
 
@@ -80,7 +82,7 @@ class SettingsMixin:
 
         self.edit_energy = energy
         self.settings.setValue(
-            "render/edit_energy",
+            EDIT_ENERGY,
             energy,
         )
 
@@ -111,7 +113,7 @@ class SettingsMixin:
 
         self.fx_intensity = intensity
         self.settings.setValue(
-            "render/fx_intensity",
+            FX_INTENSITY,
             intensity,
         )
 
@@ -156,7 +158,7 @@ class SettingsMixin:
         )
         self.sfx_mode = mode
         self.settings.setValue(
-            "render/sfx_mode",
+            SFX_MODE,
             mode,
         )
         self.save_render_settings()

@@ -34,6 +34,13 @@ from editor_asset_plan import load_editor_asset_plan
 from visual_emphasis import DEFAULT_ENERGY, normalize_energy, normalize_sfx_mode
 
 from .constants import ROOT
+from .settings_keys import (
+    EDIT_ENERGY,
+    FX_INTENSITY,
+    PREVIEW_VOLUME,
+    SFX_MODE,
+    TRANSCRIPTION_QUALITY,
+)
 from .style import STYLESHEET
 from .timeline_widget import SuggestionSlider
 from .widgets import DropZone, TimelineNavigator
@@ -399,7 +406,7 @@ class ShortsFactoryWindow(
         )
         self.preview_volume = int(
             self.settings.value(
-                "preview/volume",
+                PREVIEW_VOLUME,
                 80,
             )
             or 80
@@ -413,7 +420,7 @@ class ShortsFactoryWindow(
         )
         self.transcription_quality = str(
             self.settings.value(
-                "transcription/quality",
+                TRANSCRIPTION_QUALITY,
                 "AUTO",
             )
             or "AUTO"
@@ -427,7 +434,7 @@ class ShortsFactoryWindow(
 
         self.edit_energy = normalize_energy(
             self.settings.value(
-                "render/edit_energy",
+                EDIT_ENERGY,
                 DEFAULT_ENERGY,
             )
             or DEFAULT_ENERGY
@@ -439,7 +446,7 @@ class ShortsFactoryWindow(
                     0.0,
                     float(
                         self.settings.value(
-                            "render/fx_intensity",
+                            FX_INTENSITY,
                             1.0,
                         )
                         or 1.0
@@ -451,7 +458,7 @@ class ShortsFactoryWindow(
 
         self.sfx_mode = normalize_sfx_mode(
             self.settings.value(
-                "render/sfx_mode",
+                SFX_MODE,
                 "AUTO",
             )
             or "AUTO"
