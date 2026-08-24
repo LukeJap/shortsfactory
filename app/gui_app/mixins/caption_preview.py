@@ -21,6 +21,35 @@ from render import (
     OUTPUT_WIDTH,
     clamp_caption_drag_position,
 )
+from .resize_geometry import (
+    CORNER_NAMES,
+    corner_handle_rects,
+    corner_point,
+    format_scale_readout,
+    uniform_scale_ratio,
+)
+
+
+CAPTION_SCALE_MIN = 0.7
+CAPTION_SCALE_MAX = 1.6
+CAPTION_BASE_FONT_PX = 15
+
+CAPTION_CORNER_CURSORS = {
+    "nw": Qt.CursorShape.SizeFDiagCursor,
+    "se": Qt.CursorShape.SizeFDiagCursor,
+    "ne": Qt.CursorShape.SizeBDiagCursor,
+    "sw": Qt.CursorShape.SizeBDiagCursor,
+}
+
+
+def coerce_caption_scale(value) -> float:
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+
+    return max(CAPTION_SCALE_MIN, min(CAPTION_SCALE_MAX, number))
 
 
 # Matches today's *actual* default caption placement with no override.
@@ -71,10 +100,19 @@ class CaptionPreviewMixin:
         )
 
 
+    def current_caption_scale(self) -> float:
+
+        scale = getattr(self, "caption_scale", None)
+        if scale is None:
+            return 1.0
+        return coerce_caption_scale(scale)
+
+
     def reset_caption_position(self):
 
         self.caption_position_x = None
         self.caption_position_y = None
+        self.caption_scale = None
         self.save_render_settings()
         if hasattr(self, "player"):
             self.update_caption_preview_overlay(self.player.position())
@@ -98,6 +136,19 @@ class CaptionPreviewMixin:
         return PLACEHOLDER_CAPTION_TEXT
 
 
+    def caption_preview_stylesheet(self, scale: float) -> str:
+
+        font_px = max(1, round(CAPTION_BASE_FONT_PX * scale))
+        return (
+            "background-color: rgba(0, 0, 0, 140);"
+            "color: #FFFFFF;"
+            "font-weight: 700;"
+            f"font-size: {font_px}px;"
+            "border: 1px dashed rgba(255, 255, 255, 120);"
+            "padding: 4px 8px;"
+        )
+
+
     def ensure_caption_preview_label(self):
 
         if hasattr(self, "caption_preview_label"):
@@ -116,16 +167,28 @@ class CaptionPreviewMixin:
         label.setToolTip(
             "Drag to reposition captions in the final render."
         )
-        label.setStyleSheet(
-            "background-color: rgba(0, 0, 0, 140);"
-            "color: #FFFFFF;"
-            "font-weight: 700;"
-            "font-size: 15px;"
-            "border: 1px dashed rgba(255, 255, 255, 120);"
-            "padding: 4px 8px;"
-        )
+        label.setStyleSheet(self.caption_preview_stylesheet(1.0))
         label.hide()
         self.caption_preview_label = label
+
+        self.caption_resize_handles = {}
+        for corner in CORNER_NAMES:
+            handle = QLabel(self.video_widget)
+            handle.setObjectName("CaptionResizeHandle")
+            handle.setCursor(CAPTION_CORNER_CURSORS[corner])
+            handle.hide()
+            self.caption_resize_handles[corner] = handle
+
+        self.caption_resize_readout = QLabel("", self.video_widget)
+        self.caption_resize_readout.setObjectName("CaptionResizeReadout")
+        self.caption_resize_readout.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+        self.caption_resize_readout.hide()
+
+        self.caption_resize_hovering = False
+        self.caption_resize_dragging = False
 
 
     def update_caption_preview_overlay(self, position_ms: int):
@@ -141,6 +204,9 @@ class CaptionPreviewMixin:
         )
 
         label.setText(self.representative_caption_text(position_ms))
+        label.setStyleSheet(
+            self.caption_preview_stylesheet(self.current_caption_scale())
+        )
 
         box_width = min(canvas_width - 24, max(160, int(canvas_width * 0.8)))
         label.setFixedWidth(box_width)
@@ -153,7 +219,10 @@ class CaptionPreviewMixin:
 
         # ASS \pos() with Alignment=2 anchors bottom-center -- mirror that
         # here so the preview box lines up with where the real burn-in
-        # will land.
+        # will land. Because the box is always repositioned from this same
+        # anchor point regardless of its current size, growing/shrinking
+        # the font via a corner-resize drag naturally stays pinned to this
+        # point without any extra anchor-preserving math.
         screen_x = anchor_x - label.width() // 2
         screen_y = anchor_y - label.height()
 
@@ -161,11 +230,153 @@ class CaptionPreviewMixin:
         label.raise_()
         label.show()
 
+        self.layout_caption_resize_handles()
+
 
     def hide_caption_preview_overlay(self):
 
         if hasattr(self, "caption_preview_label"):
             self.caption_preview_label.hide()
+        self.hide_caption_resize_handles()
+
+
+    def hide_caption_resize_handles(self):
+
+        for handle in getattr(self, "caption_resize_handles", {}).values():
+            handle.hide()
+        if hasattr(self, "caption_resize_readout"):
+            self.caption_resize_readout.hide()
+
+
+    def layout_caption_resize_handles(self):
+
+        if not hasattr(self, "caption_resize_handles"):
+            return
+
+        label = self.caption_preview_label
+        if not label.isVisible():
+            self.hide_caption_resize_handles()
+            return
+
+        geometry = label.geometry()
+        rects = corner_handle_rects(
+            geometry.x(), geometry.y(), geometry.width(), geometry.height()
+        )
+        for corner, rect in rects.items():
+            self.caption_resize_handles[corner].setGeometry(rect)
+
+        active = (
+            getattr(self, "caption_resize_hovering", False)
+            or getattr(self, "caption_resize_dragging", False)
+        )
+        for handle in self.caption_resize_handles.values():
+            if active:
+                handle.raise_()
+                handle.show()
+            else:
+                handle.hide()
+
+
+    def set_caption_resize_hover(self, hovering: bool):
+
+        if not hasattr(self, "caption_resize_handles"):
+            return
+        if self.caption_resize_hovering == hovering:
+            return
+        self.caption_resize_hovering = hovering
+        self.layout_caption_resize_handles()
+
+
+    def caption_resize_handle_at(self, event, watched):
+
+        for corner, handle in getattr(
+            self, "caption_resize_handles", {}
+        ).items():
+            if not handle.isVisible():
+                continue
+            hit = watched is handle
+            if watched is self.video_widget:
+                try:
+                    hit = handle.geometry().contains(
+                        event.position().toPoint()
+                    )
+                except Exception:
+                    hit = False
+            if hit:
+                return corner
+        return None
+
+
+    def begin_caption_resize_drag(self, event, watched) -> bool:
+
+        corner = self.caption_resize_handle_at(event, watched)
+        if corner is None:
+            return False
+
+        label = self.caption_preview_label
+        geometry = label.geometry()
+
+        # The caption box is always repositioned from a single fixed
+        # bottom-center anchor point regardless of size (see
+        # update_caption_preview_overlay()), so that anchor -- not the
+        # geometric opposite corner -- is what a resize drag should stay
+        # pinned to.
+        anchor_point = (
+            geometry.x() + geometry.width() // 2,
+            geometry.y() + geometry.height(),
+        )
+        start_point = corner_point(
+            corner, geometry.x(), geometry.y(), geometry.width(), geometry.height()
+        )
+
+        self.caption_resize_dragging = True
+        self.caption_resize_handle = corner
+        self.caption_resize_anchor = anchor_point
+        self.caption_resize_start_point = start_point
+        self.caption_resize_start_scale = self.current_caption_scale()
+        return True
+
+
+    def update_caption_resize_drag(self, event):
+
+        if not getattr(self, "caption_resize_dragging", False):
+            return
+
+        mouse = event.globalPosition().toPoint()
+        anchor_x, anchor_y = self.caption_resize_anchor
+        start_x, start_y = self.caption_resize_start_point
+
+        ratio = uniform_scale_ratio(
+            anchor_x, anchor_y, start_x, start_y, mouse.x(), mouse.y()
+        )
+        new_scale = coerce_caption_scale(
+            self.caption_resize_start_scale * ratio
+        )
+
+        self.caption_scale = round(new_scale, 2)
+        self.update_caption_preview_overlay(self.player.position())
+
+        label = self.caption_preview_label
+        readout = self.caption_resize_readout
+        readout.setText(format_scale_readout(new_scale))
+        readout.adjustSize()
+        readout.move(
+            label.x() + label.width() // 2 - readout.width() // 2,
+            max(0, label.y() - readout.height() - 4),
+        )
+        readout.raise_()
+        readout.show()
+
+
+    def finish_caption_resize_drag(self):
+
+        if not getattr(self, "caption_resize_dragging", False):
+            return
+
+        self.caption_resize_dragging = False
+        if hasattr(self, "caption_resize_readout"):
+            self.caption_resize_readout.hide()
+        self.save_render_settings()
 
 
     def begin_caption_preview_drag(self, event, watched) -> bool:

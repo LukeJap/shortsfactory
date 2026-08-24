@@ -237,6 +237,7 @@ class ShortsFactoryWindow(
 
         self.caption_position_x: float | None = None
         self.caption_position_y: float | None = None
+        self.caption_scale: float | None = None
         self.caption_preview_dragging = False
         self.caption_preview_drag_origin = QPoint()
         self.caption_preview_drag_start_x = 0.0
@@ -2558,6 +2559,63 @@ class ShortsFactoryWindow(
                     self.open_emoji_picker(slot_index)
                     event.accept()
                     return True
+
+        caption_handle_widgets = list(
+            getattr(self, "caption_resize_handles", {}).values()
+        )
+        caption_label = getattr(self, "caption_preview_label", None)
+
+        if (
+            event.type() == QEvent.Type.Enter
+            and (watched is caption_label or watched in caption_handle_widgets)
+        ):
+            self.set_caption_resize_hover(True)
+        elif (
+            event.type() == QEvent.Type.Leave
+            and (watched is caption_label or watched in caption_handle_widgets)
+            and not getattr(self, "caption_resize_dragging", False)
+        ):
+            self.set_caption_resize_hover(False)
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and watched is video_widget
+            and caption_label is not None
+            and caption_label.isVisible()
+            and not getattr(self, "caption_preview_dragging", False)
+            and not getattr(self, "caption_resize_dragging", False)
+        ):
+            try:
+                hovering = caption_label.geometry().adjusted(
+                    -8, -8, 8, 8
+                ).contains(event.position().toPoint())
+            except Exception:
+                hovering = False
+            self.set_caption_resize_hover(hovering)
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "caption_resize_handles")
+        ):
+            if self.begin_caption_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "caption_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_caption_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "caption_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_caption_resize_drag()
+            event.accept()
+            return True
 
         if (
             not self.visual_preview_dragging

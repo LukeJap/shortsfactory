@@ -1138,12 +1138,30 @@ def apply_emoji_position_overrides(
 # KARAOKE CAPTION
 # ============================================================
 
+def coerce_caption_scale(value) -> float:
+    """
+    Clamp for the manual font-size scale a corner-resize drag on the
+    placement editor's caption preview writes into render_settings.json
+    (gui_app/mixins/caption_preview.py). Bounds mirror that mixin's own
+    CAPTION_SCALE_MIN/MAX -- kept as a plain constant pair here rather
+    than imported, since make_captions.py must not depend on the GUI.
+    """
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+
+    return max(0.7, min(1.6, number))
+
+
 def caption_size(
     level: str,
     energy: str,
+    scale: float = 1.0,
 ) -> int:
 
-    return int(
+    base = int(
         CAPTION_SIZES.get(
             energy,
             CAPTION_SIZES[DEFAULT_ENERGY],
@@ -1151,6 +1169,11 @@ def caption_size(
             level,
             FONT_SIZE,
         )
+    )
+
+    return max(
+        1,
+        round(base * coerce_caption_scale(scale)),
     )
 
 
@@ -1180,6 +1203,7 @@ def caption_word_text(
     classification: dict,
     highlighted: bool,
     energy: str,
+    scale: float = 1.0,
 ) -> str:
 
     safe_word = escape_ass_text(
@@ -1196,6 +1220,7 @@ def caption_word_text(
     size = caption_size(
         level,
         energy,
+        scale,
     )
 
     color = caption_color_tag(
@@ -1320,6 +1345,7 @@ def build_caption(
     words: list[dict],
     highlight_index: int,
     energy: str,
+    scale: float = 1.0,
 ) -> str:
     """
     Render one 2-3 word caption chunk while highlighting exactly
@@ -1368,6 +1394,7 @@ def build_caption(
                 classification,
                 i == highlight_index,
                 energy,
+                scale,
             )
         )
 
@@ -1538,6 +1565,13 @@ def main() -> int:
 
     print(f"Edit energy: {edit_energy}")
 
+    caption_scale = coerce_caption_scale(
+        render_settings.get(
+            "caption_scale",
+            1.0,
+        )
+    )
+
     caption_position_tag = caption_position_override_tag(render_settings)
     if caption_position_tag:
         print(f"Caption position override: {caption_position_tag}")
@@ -1614,6 +1648,7 @@ def main() -> int:
                 group,
                 highlight_index,
                 edit_energy,
+                caption_scale,
             )
 
             if text:
@@ -1754,7 +1789,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Shorts,Arial,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,8,4,2,70,70,250,1
+Style: Shorts,Arial,{max(1, round(FONT_SIZE * caption_scale))},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,8,4,2,70,70,250,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

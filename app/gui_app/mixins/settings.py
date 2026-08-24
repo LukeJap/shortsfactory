@@ -208,6 +208,10 @@ class SettingsMixin:
             payload["caption_position_x"] = caption_position_x
             payload["caption_position_y"] = caption_position_y
 
+        caption_scale = getattr(self, "caption_scale", None)
+        if caption_scale is not None:
+            payload["caption_scale"] = caption_scale
+
         try:
 
             write_render_settings(
