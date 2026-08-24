@@ -1366,6 +1366,290 @@ def write_combined_plan(
     )
 
 
+def check_duration_matches_selection(
+    duration: float,
+    settings: dict[str, Any],
+) -> str | None:
+    """
+    Sanity-check the probed base-video duration against the selection the
+    user actually made. BASE_VIDEO was just trimmed to exactly that range
+    by render_base_video(), so its real duration should closely match. A
+    wild mismatch here (seen in practice: probing the full ~24-minute
+    source instead of a ~50-second selection) means something else wrote
+    to this shared, fixed output path while this pipeline was still
+    running -- most likely another render overlapping this one. Rather
+    than silently build a trim/concat filter that reads far past the end
+    of the real (correct) video data -- which produces corrupted,
+    garbage output -- fail loudly here instead. Returns an error
+    message, or None if the duration is plausible.
+    """
+    try:
+        expected_duration = (
+            float(
+                settings.get(
+                    "selection_end",
+                    0.0,
+                )
+            )
+            - float(
+                settings.get(
+                    "selection_start",
+                    0.0,
+                )
+            )
+        )
+    except (TypeError, ValueError):
+        expected_duration = 0.0
+
+    if (
+        expected_duration > 0.0
+        and duration
+        > expected_duration + 5.0
+    ):
+        return (
+            f"ERROR: {BASE_VIDEO.name} is {duration:.2f}s long, but the "
+            f"selected clip is only {expected_duration:.2f}s. This "
+            "usually means another render overwrote this file while this "
+            "one was still running. Refusing to continue -- please "
+            "re-run Generate Short once no other render is in progress."
+        )
+
+    return None
+
+
+def load_and_merge_cuts(
+    duration: float,
+    settings: dict[str, Any],
+    pause_plan: dict[str, Any],
+) -> tuple[
+    list[Any],
+    list[Any],
+    list[Any],
+    list[Any],
+    list[Any],
+    str,
+]:
+    """
+    Load the semantic and manual cut plans, apply automatic-cut safety to
+    the pause/semantic cuts, and merge everything (pause + semantic +
+    manual) into the final keep segments. Returns (pause_cuts,
+    semantic_cuts, manual_cuts, merged_cuts, keep_segments,
+    automatic_warning).
+    """
+    semantic_plan = load_json(
+        SEMANTIC_PLAN
+    )
+
+    manual_plan = load_json(
+        MANUAL_PLAN
+    )
+
+    pause_cuts = extract_pause_cuts(
+        pause_plan
+    )
+
+    semantic_cuts = extract_semantic_cuts(
+        semantic_plan
+    )
+
+    energy = normalize_energy(
+        settings.get(
+            "edit_energy",
+            "PUNCHY",
+        )
+    )
+    profile = energy_profile(
+        energy
+    )
+
+    pause_cuts, semantic_cuts, automatic_warning = (
+        apply_automatic_cut_safety(
+            pause_cuts,
+            semantic_cuts,
+            duration,
+            profile=profile,
+            energy=energy,
+        )
+    )
+
+    manual_cuts = manual_cuts_relative_to_base(
+        manual_plan,
+        duration,
+    )
+
+    all_cuts = (
+        pause_cuts
+        + semantic_cuts
+        + manual_cuts
+    )
+
+    merged_cuts = merge_cuts(
+        all_cuts,
+        duration,
+    )
+
+    keep_segments = keep_segments_from_cuts(
+        duration,
+        merged_cuts,
+    )
+
+    return (
+        pause_cuts,
+        semantic_cuts,
+        manual_cuts,
+        merged_cuts,
+        keep_segments,
+        automatic_warning,
+    )
+
+
+def write_passthrough_tight_video() -> int:
+    """
+    No approved or manual cuts at all -- just copy the base video
+    through as the tight video rather than running it through ffmpeg
+    unnecessarily.
+    """
+    log("")
+    log(
+        "No approved or manual cuts."
+    )
+
+    log(
+        "Creating passthrough short1_tight.mp4..."
+    )
+
+    shutil.copyfile(
+        BASE_VIDEO,
+        TIGHT_VIDEO,
+    )
+
+    log("")
+    log(
+        f"Combined plan: {COMBINED_PLAN}"
+    )
+
+    log(
+        f"Tight video: {TIGHT_VIDEO}"
+    )
+
+    log("")
+    log(
+        "Done."
+    )
+
+    return 0
+
+
+def retry_with_manual_cuts_only(
+    duration: float,
+    manual_cuts: list[Any],
+    pause_cuts: list[Any],
+    semantic_cuts: list[Any],
+) -> tuple[list[Any], list[Any]] | None:
+    """
+    When the combined pause+semantic+manual cuts would remove the entire
+    clip, retry using only the user's explicit manual transcript cuts --
+    never let automatic planning alone destroy the whole Short. Returns
+    (merged_cuts, keep_segments), or None when there were no automatic
+    cuts to retry without (i.e. the manual cuts alone already emptied
+    the clip, which the caller should treat as a hard error).
+    """
+    if not (
+        pause_cuts
+        or semantic_cuts
+    ):
+        return None
+
+    log("")
+    log(
+        "WARNING: Combined automatic edits would remove the entire clip."
+    )
+
+    log(
+        "Retrying this render using manual transcript cuts only."
+    )
+
+    merged_cuts = merge_cuts(
+        manual_cuts,
+        duration,
+    )
+
+    keep_segments = keep_segments_from_cuts(
+        duration,
+        merged_cuts,
+    )
+
+    write_combined_plan(
+        duration,
+        [],
+        [],
+        manual_cuts,
+        merged_cuts,
+        keep_segments,
+    )
+
+    return merged_cuts, keep_segments
+
+
+def render_or_reuse_tight_video(
+    keep_segments: list[Any],
+    pause_plan: dict[str, Any],
+) -> int | None:
+    """
+    Render the tight video from the final keep segments, unless a
+    TIGHT_VIDEO already rendered by the Smart Edit stage's pause-only cut
+    already matches these keep segments exactly (skip a redundant
+    re-encode in that case). Returns an error exit code on ffmpeg
+    failure, or None on success (whether reused or freshly rendered).
+    """
+    if TIGHT_VIDEO.exists() and keep_segments_match_existing_tight_video(
+        keep_segments,
+        pause_plan,
+    ):
+
+        log("")
+        log(
+            "Final keep segments are identical to the pause-only cut "
+            "already rendered by the Smart Edit stage -- reusing "
+            f"{TIGHT_VIDEO.name} instead of re-encoding it."
+        )
+
+        return None
+
+    log("")
+    log(
+        "Rendering approved pause + semantic + manual transcript edits..."
+    )
+
+    try:
+
+        render_keep_segments(
+            BASE_VIDEO,
+            TIGHT_VIDEO,
+            keep_segments,
+        )
+
+    except subprocess.CalledProcessError as exc:
+
+        log("")
+        log(
+            f"ERROR: FFmpeg failed with exit code {exc.returncode}"
+        )
+
+        return exc.returncode or 1
+
+    except RuntimeError as exc:
+
+        log("")
+        log(
+            f"ERROR: {exc}"
+        )
+
+        return 1
+
+    return None
+
+
 def main() -> int:
 
     log(
@@ -1407,46 +1691,14 @@ def main() -> int:
 
     settings = load_render_settings()
 
-    # Sanity-check the probed duration against the selection the user
-    # actually made. BASE_VIDEO was just trimmed to exactly that range by
-    # render_base_video(), so its real duration should closely match. A
-    # wild mismatch here (seen in practice: probing the full ~24-minute
-    # source instead of a ~50-second selection) means something else wrote
-    # to this shared, fixed output path while this pipeline was still
-    # running -- most likely another render overlapping this one. Rather
-    # than silently build a trim/concat filter that reads far past the end
-    # of the real (correct) video data -- which produces corrupted,
-    # garbage output -- fail loudly here instead.
-    try:
-        expected_duration = (
-            float(
-                settings.get(
-                    "selection_end",
-                    0.0,
-                )
-            )
-            - float(
-                settings.get(
-                    "selection_start",
-                    0.0,
-                )
-            )
-        )
-    except (TypeError, ValueError):
-        expected_duration = 0.0
-
-    if (
-        expected_duration > 0.0
-        and duration
-        > expected_duration + 5.0
-    ):
+    duration_error = check_duration_matches_selection(
+        duration,
+        settings,
+    )
+    if duration_error:
 
         log(
-            f"ERROR: {BASE_VIDEO.name} is {duration:.2f}s long, but the "
-            f"selected clip is only {expected_duration:.2f}s. This "
-            "usually means another render overwrote this file while this "
-            "one was still running. Refusing to continue -- please "
-            "re-run Generate Short once no other render is in progress."
+            duration_error
         )
 
         return 1
@@ -1455,40 +1707,17 @@ def main() -> int:
         PAUSE_PLAN
     )
 
-    semantic_plan = load_json(
-        SEMANTIC_PLAN
-    )
-
-    manual_plan = load_json(
-        MANUAL_PLAN
-    )
-
-    pause_cuts = extract_pause_cuts(
-        pause_plan
-    )
-
-    semantic_cuts = extract_semantic_cuts(
-        semantic_plan
-    )
-
-    energy = normalize_energy(
-        settings.get(
-            "edit_energy",
-            "PUNCHY",
-        )
-    )
-    profile = energy_profile(
-        energy
-    )
-
-    pause_cuts, semantic_cuts, automatic_warning = (
-        apply_automatic_cut_safety(
-            pause_cuts,
-            semantic_cuts,
-            duration,
-            profile=profile,
-            energy=energy,
-        )
+    (
+        pause_cuts,
+        semantic_cuts,
+        manual_cuts,
+        merged_cuts,
+        keep_segments,
+        automatic_warning,
+    ) = load_and_merge_cuts(
+        duration,
+        settings,
+        pause_plan,
     )
 
     if automatic_warning:
@@ -1501,27 +1730,6 @@ def main() -> int:
         log(
             automatic_warning
         )
-
-    manual_cuts = manual_cuts_relative_to_base(
-        manual_plan,
-        duration,
-    )
-
-    all_cuts = (
-        pause_cuts
-        + semantic_cuts
-        + manual_cuts
-    )
-
-    merged_cuts = merge_cuts(
-        all_cuts,
-        duration,
-    )
-
-    keep_segments = keep_segments_from_cuts(
-        duration,
-        merged_cuts,
-    )
 
     removed = sum(
         cut["duration"]
@@ -1575,79 +1783,24 @@ def main() -> int:
     )
 
     if not merged_cuts:
-
-        log("")
-        log(
-            "No approved or manual cuts."
-        )
-
-        log(
-            "Creating passthrough short1_tight.mp4..."
-        )
-
-        shutil.copyfile(
-            BASE_VIDEO,
-            TIGHT_VIDEO,
-        )
-
-        log("")
-        log(
-            f"Combined plan: {COMBINED_PLAN}"
-        )
-
-        log(
-            f"Tight video: {TIGHT_VIDEO}"
-        )
-
-        log("")
-        log(
-            "Done."
-        )
-
-        return 0
+        return write_passthrough_tight_video()
 
     if not keep_segments:
 
         # Never let automatic planning destroy the whole Short.
         # If manual cuts alone remove everything, that is an explicit
         # user edit and should still stop with an error.
-        if pause_cuts or semantic_cuts:
+        retried = retry_with_manual_cuts_only(
+            duration,
+            manual_cuts,
+            pause_cuts,
+            semantic_cuts,
+        )
 
-            log("")
-            log(
-                "WARNING: Combined automatic edits would remove the entire clip."
-            )
-
-            log(
-                "Retrying this render using manual transcript cuts only."
-            )
-
+        if retried is not None:
             pause_cuts = []
             semantic_cuts = []
-
-            merged_cuts = merge_cuts(
-                manual_cuts,
-                duration,
-            )
-
-            keep_segments = keep_segments_from_cuts(
-                duration,
-                merged_cuts,
-            )
-
-            removed = sum(
-                cut["duration"]
-                for cut in merged_cuts
-            )
-
-            write_combined_plan(
-                duration,
-                pause_cuts,
-                semantic_cuts,
-                manual_cuts,
-                merged_cuts,
-                keep_segments,
-            )
+            merged_cuts, keep_segments = retried
 
         if not keep_segments:
 
@@ -1658,50 +1811,12 @@ def main() -> int:
 
             return 1
 
-    if TIGHT_VIDEO.exists() and keep_segments_match_existing_tight_video(
+    render_error = render_or_reuse_tight_video(
         keep_segments,
         pause_plan,
-    ):
-
-        log("")
-        log(
-            "Final keep segments are identical to the pause-only cut "
-            "already rendered by the Smart Edit stage -- reusing "
-            f"{TIGHT_VIDEO.name} instead of re-encoding it."
-        )
-
-    else:
-
-        log("")
-        log(
-            "Rendering approved pause + semantic + manual transcript edits..."
-        )
-
-        try:
-
-            render_keep_segments(
-                BASE_VIDEO,
-                TIGHT_VIDEO,
-                keep_segments,
-            )
-
-        except subprocess.CalledProcessError as exc:
-
-            log("")
-            log(
-                f"ERROR: FFmpeg failed with exit code {exc.returncode}"
-            )
-
-            return exc.returncode or 1
-
-        except RuntimeError as exc:
-
-            log("")
-            log(
-                f"ERROR: {exc}"
-            )
-
-            return 1
+    )
+    if render_error is not None:
+        return render_error
 
     log("")
     log(
