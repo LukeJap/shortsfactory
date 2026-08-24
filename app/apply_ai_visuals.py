@@ -749,6 +749,624 @@ def build_filter(
     )
 
 
+def compute_keeps(
+    combined_plan: dict[str, Any],
+) -> list[Any]:
+    """
+    Resolve the kept-segment timeline (source-video seconds) that source
+    intervals get mapped through, using the combined edit plan's recorded
+    original duration when present and probing the tight video otherwise.
+    """
+    try:
+        original_duration = float(
+            combined_plan.get(
+                "original_duration_seconds",
+                probe_duration(
+                    VIDEO_PATH
+                ),
+            )
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        original_duration = probe_duration(
+            VIDEO_PATH
+        )
+
+    return keep_segments(
+        combined_plan,
+        original_duration,
+    )
+
+
+def build_asset_maps(
+    assets: list[Any],
+) -> tuple[
+    dict[int, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    """
+    Index the generated-asset manifest both by slot_index and by slot_id,
+    so a visual slot can be matched to its generated asset either way.
+    """
+    asset_map_by_index = {
+        int(
+            item.get(
+                "slot_index",
+                0,
+            )
+        ): item
+        for item in assets
+        if isinstance(
+            item,
+            dict,
+        )
+    }
+
+    asset_map_by_id = {
+        str(
+            item.get(
+                "slot_id",
+                "",
+            )
+            or ""
+        ): item
+        for item in assets
+        if isinstance(
+            item,
+            dict,
+        )
+        and item.get(
+            "slot_id"
+        )
+    }
+
+    return asset_map_by_index, asset_map_by_id
+
+
+def load_render_context() -> tuple[
+    list[dict[str, Any]],
+    dict[str, Any],
+    float,
+    float,
+]:
+    """
+    Load render settings and, when the editor's asset plan still matches
+    the current source video/selection, the active AI_VISUAL clips it
+    defines. Returns (editor_visual_clips, render_settings,
+    selection_start, selection_end); editor_visual_clips is empty when
+    there is no editor asset plan or it no longer matches the current
+    selection, in which case the caller falls back to the raw visual
+    plan's slots instead.
+    """
+    editor_asset_plan = load_editor_asset_plan()
+    render_settings = load_render_settings()
+    source_video = str(
+        render_settings.get(
+            "source_video",
+            "",
+        )
+        or ""
+    )
+    try:
+        selection_start = float(
+            render_settings.get(
+                "selection_start",
+                -1.0,
+            )
+        )
+        selection_end = float(
+            render_settings.get(
+                "selection_end",
+                -1.0,
+            )
+        )
+    except (TypeError, ValueError):
+        selection_start = -1.0
+        selection_end = -1.0
+
+    if editor_plan_context_matches(
+        editor_asset_plan,
+        source_video,
+        selection_start,
+        selection_end,
+    ):
+        editor_visual_clips = clips_of_kind(
+            editor_asset_plan,
+            "AI_VISUAL",
+            active_only=True,
+        )
+    else:
+        editor_visual_clips = []
+
+    return (
+        editor_visual_clips,
+        render_settings,
+        selection_start,
+        selection_end,
+    )
+
+
+def build_visual_items(
+    editor_visual_clips: list[dict[str, Any]],
+    slots: list[Any],
+) -> list[tuple[int, dict[str, Any]]]:
+    """
+    Build the (index, slot-like-dict) items the per-slot mapping loop
+    iterates over. When the editor asset plan has active AI_VISUAL clips,
+    those take priority (and are reshaped into the same slot-dict shape
+    the loop expects); otherwise falls back to the raw visual plan's
+    slots.
+    """
+    if editor_visual_clips:
+        visual_items: list[tuple[int, dict[str, Any]]] = []
+        for clip_index, clip in enumerate(
+            editor_visual_clips,
+            start=1,
+        ):
+            slot = {
+                "slot_id": clip.get(
+                    "slot_id",
+                    clip.get(
+                        "id",
+                        "",
+                    ),
+                ),
+                "label": clip.get(
+                    "label",
+                    f"Visual {clip_index}",
+                ),
+                "start": clip.get(
+                    "start",
+                    0.0,
+                ),
+                "end": clip.get(
+                    "end",
+                    clip.get(
+                        "start",
+                        0.0,
+                    ),
+                ),
+                "asset_path": clip.get(
+                    "asset_path",
+                    clip.get(
+                        "active_variant_path",
+                        "",
+                    ),
+                ),
+                "enabled": clip.get(
+                    "active",
+                    True,
+                ),
+                "state": "READY",
+                "editor_clip_id": clip.get(
+                    "id",
+                    "",
+                ),
+                "display_mode": clip.get(
+                    "display_mode",
+                    "OVERLAY_CARD",
+                ),
+                "scale": clip.get(
+                    "scale",
+                    1.0,
+                ),
+                "position_x": clip.get(
+                    "position_x",
+                    0.0,
+                ),
+                "position_y": clip.get(
+                    "position_y",
+                    0.0,
+                ),
+                "source_type": clip.get(
+                    "source_type",
+                    "ai_generated",
+                ),
+            }
+            visual_items.append(
+                (
+                    clip_index,
+                    slot,
+                )
+            )
+        return visual_items
+
+    return list(
+        enumerate(
+            slots,
+            start=1,
+        )
+    )
+
+
+def resolve_mapped_asset(
+    slot_index: int,
+    slot: dict[str, Any],
+    asset_map_by_id: dict[str, dict[str, Any]],
+    asset_map_by_index: dict[int, dict[str, Any]],
+    selection_start: float,
+    keeps: list[Any],
+    temporal_plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    Resolve one visual slot to its generated asset and map its source-
+    video interval onto the final (post-cut, post-temporal-edit) tight
+    timeline. Returns None whenever the slot should be skipped -- no
+    matching/ready asset, the interval was entirely cut, or what remains
+    is too short to be worth compositing.
+    """
+    if slot.get(
+        "enabled",
+        True,
+    ) is False:
+        return None
+
+    slot_state = str(
+        slot.get(
+            "state",
+            "",
+        )
+        or ""
+    ).upper()
+
+    if slot_state == "FAILED":
+        return None
+
+    slot_id = str(
+        slot.get(
+            "slot_id",
+            "",
+        )
+        or ""
+    )
+
+    direct_asset_path = str(
+        slot.get(
+            "asset_path",
+            "",
+        )
+        or ""
+    )
+
+    asset = None
+
+    if direct_asset_path:
+        direct_path = Path(
+            direct_asset_path
+        )
+        if direct_path.exists():
+            asset = {
+                "path": str(
+                    direct_path
+                ),
+                "state": "READY",
+            }
+
+    if asset is None:
+        asset = (
+            asset_map_by_id.get(
+                slot_id
+            )
+            if slot_id
+            else None
+        )
+
+    if asset is None:
+        asset = asset_map_by_index.get(
+            slot_index
+        )
+
+    if not asset:
+        return None
+
+    asset_state = str(
+        asset.get(
+            "state",
+            "",
+        )
+        or ""
+    ).upper()
+
+    if asset_state == "FAILED":
+        return None
+
+    path = Path(
+        str(
+            asset.get(
+                "path",
+                "",
+            )
+        )
+    )
+
+    if not path.exists():
+        return None
+
+    try:
+        source_start = float(
+            slot.get(
+                "start",
+                0.0,
+            )
+        )
+        source_end = float(
+            slot.get(
+                "end",
+                source_start,
+            )
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    mapped = map_source_interval_to_tight(
+        source_start,
+        source_end,
+        selection_start,
+        keeps,
+    )
+
+    if mapped is None:
+        return None
+
+    tight_start, tight_end = mapped
+    tight_start, tight_end = map_tight_interval_to_final(
+        tight_start,
+        tight_end,
+        temporal_plan,
+    )
+
+    if tight_end - tight_start < 0.5:
+        return None
+
+    return {
+        "path": path,
+        "tight_start": tight_start,
+        "tight_end": tight_end,
+        "label": slot.get(
+            "label",
+            f"Visual {slot_index}",
+        ),
+        "display_mode": normalize_display_mode(
+            slot.get(
+                "display_mode",
+                "OVERLAY_CARD",
+            )
+        ),
+        "scale": round(
+            coerce_scale(
+                slot.get(
+                    "scale",
+                    1.0,
+                )
+            ),
+            2,
+        ),
+        "position_x": round(
+            coerce_position(
+                slot.get(
+                    "position_x",
+                    0.0,
+                )
+            ),
+            3,
+        ),
+        "position_y": round(
+            coerce_position(
+                slot.get(
+                    "position_y",
+                    0.0,
+                )
+            ),
+            3,
+        ),
+        "source_type": str(
+            slot.get(
+                "source_type",
+                "ai_generated",
+            )
+            or "ai_generated"
+        ),
+    }
+
+
+def write_mapped_plan(
+    mapped_assets: list[dict[str, Any]],
+    temporal_plan: dict[str, Any],
+) -> None:
+    """
+    Write the resolved, tight-timeline-mapped visual plan to disk for
+    diagnostics/debugging (the ffmpeg command itself is built straight
+    from mapped_assets, not re-read from this file).
+    """
+    MAPPED_PLAN_PATH.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_plan": str(
+                    PLAN_PATH
+                ),
+                "temporal_plan": str(
+                    TEMPORAL_PLAN_PATH
+                ),
+                "temporal_applied": bool(
+                    temporal_plan.get(
+                        "applied",
+                        False,
+                    )
+                ),
+                "asset_count": len(
+                    mapped_assets
+                ),
+                "assets": [
+                    {
+                        "path": str(
+                            asset["path"]
+                        ),
+                        "start": round(
+                            float(
+                                asset["tight_start"]
+                            ),
+                            4,
+                        ),
+                        "end": round(
+                            float(
+                                asset["tight_end"]
+                            ),
+                            4,
+                        ),
+                        "label": asset.get(
+                            "label",
+                            "",
+                        ),
+                        "display_mode": asset.get(
+                            "display_mode",
+                            "OVERLAY_CARD",
+                        ),
+                        "scale": asset.get(
+                            "scale",
+                            1.0,
+                        ),
+                        "position_x": asset.get(
+                            "position_x",
+                            0.0,
+                        ),
+                        "position_y": asset.get(
+                            "position_y",
+                            0.0,
+                        ),
+                        "source_type": asset.get(
+                            "source_type",
+                            "ai_generated",
+                        ),
+                    }
+                    for asset in mapped_assets
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def build_ffmpeg_command(
+    mapped_assets: list[dict[str, Any]],
+    render_settings: dict[str, Any],
+) -> list[str]:
+    """
+    Build the ffmpeg command that overlays every mapped visual onto the
+    tight video, one input per asset plus the content-rect-aware filter
+    graph from build_filter().
+    """
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(
+            VIDEO_PATH
+        ),
+    ]
+
+    for asset in mapped_assets:
+
+        command.extend(
+            [
+                "-loop",
+                "1",
+                "-i",
+                str(
+                    asset["path"]
+                ),
+            ]
+        )
+
+    filter_complex = build_filter(
+        mapped_assets,
+        content_rect_from_settings(
+            render_settings
+        ),
+    )
+
+    command.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[outv]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "20",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            str(
+                TEMP_PATH
+            ),
+        ]
+    )
+
+    return command
+
+
+def composite_and_replace_video(
+    command: list[str],
+) -> bool:
+    """
+    Run the ffmpeg compositing command and, on success, atomically
+    replace the tight video with its composited output. On failure,
+    cleans up the partial temp file and leaves the source footage
+    untouched -- a failed visual composite should never abort the
+    pipeline.
+    """
+    try:
+
+        subprocess.run(
+            command,
+            cwd=ROOT,
+            check=True,
+        )
+
+    except subprocess.CalledProcessError as exc:
+
+        if TEMP_PATH.exists():
+
+            try:
+                TEMP_PATH.unlink()
+            except OSError:
+                pass
+
+        print(
+            (
+                "WARNING: AI visual compositing failed with "
+                f"exit code {exc.returncode}. "
+                "Continuing with the source footage."
+            ),
+            flush=True,
+        )
+
+        return False
+
+    os.replace(
+        TEMP_PATH,
+        VIDEO_PATH,
+    )
+
+    return True
+
+
 def main() -> int:
 
     print(
@@ -832,184 +1450,29 @@ def main() -> int:
         TEMPORAL_PLAN_PATH
     )
 
-    try:
-        original_duration = float(
-            combined_plan.get(
-                "original_duration_seconds",
-                probe_duration(
-                    VIDEO_PATH
-                ),
-            )
-        )
-    except (
-        TypeError,
-        ValueError,
-    ):
-        original_duration = probe_duration(
-            VIDEO_PATH
-        )
-
-    keeps = keep_segments(
-        combined_plan,
-        original_duration,
+    keeps = compute_keeps(
+        combined_plan
     )
 
-    asset_map_by_index = {
-        int(
-            item.get(
-                "slot_index",
-                0,
-            )
-        ): item
-        for item in assets
-        if isinstance(
-            item,
-            dict,
-        )
-    }
-
-    asset_map_by_id = {
-        str(
-            item.get(
-                "slot_id",
-                "",
-            )
-            or ""
-        ): item
-        for item in assets
-        if isinstance(
-            item,
-            dict,
-        )
-        and item.get(
-            "slot_id"
-        )
-    }
-
-    editor_asset_plan = load_editor_asset_plan()
-    render_settings = load_render_settings()
-    source_video = str(
-        render_settings.get(
-            "source_video",
-            "",
-        )
-        or ""
+    asset_map_by_index, asset_map_by_id = build_asset_maps(
+        assets
     )
-    try:
-        selection_start = float(
-            render_settings.get(
-                "selection_start",
-                -1.0,
-            )
-        )
-        selection_end = float(
-            render_settings.get(
-                "selection_end",
-                -1.0,
-            )
-        )
-    except (TypeError, ValueError):
-        selection_start = -1.0
-        selection_end = -1.0
 
-    if editor_plan_context_matches(
-        editor_asset_plan,
-        source_video,
+    (
+        editor_visual_clips,
+        render_settings,
         selection_start,
         selection_end,
-    ):
-        editor_visual_clips = clips_of_kind(
-            editor_asset_plan,
-            "AI_VISUAL",
-            active_only=True,
-        )
-    else:
-        editor_visual_clips = []
+    ) = load_render_context()
 
     mapped_assets: list[
         dict[str, Any]
     ] = []
 
-    visual_items: list[tuple[int, dict[str, Any]]] = []
-
-    if editor_visual_clips:
-        for clip_index, clip in enumerate(
-            editor_visual_clips,
-            start=1,
-        ):
-            slot = {
-                "slot_id": clip.get(
-                    "slot_id",
-                    clip.get(
-                        "id",
-                        "",
-                    ),
-                ),
-                "label": clip.get(
-                    "label",
-                    f"Visual {clip_index}",
-                ),
-                "start": clip.get(
-                    "start",
-                    0.0,
-                ),
-                "end": clip.get(
-                    "end",
-                    clip.get(
-                        "start",
-                        0.0,
-                    ),
-                ),
-                "asset_path": clip.get(
-                    "asset_path",
-                    clip.get(
-                        "active_variant_path",
-                        "",
-                    ),
-                ),
-                "enabled": clip.get(
-                    "active",
-                    True,
-                ),
-                "state": "READY",
-                "editor_clip_id": clip.get(
-                    "id",
-                    "",
-                ),
-                "display_mode": clip.get(
-                    "display_mode",
-                    "OVERLAY_CARD",
-                ),
-                "scale": clip.get(
-                    "scale",
-                    1.0,
-                ),
-                "position_x": clip.get(
-                    "position_x",
-                    0.0,
-                ),
-                "position_y": clip.get(
-                    "position_y",
-                    0.0,
-                ),
-                "source_type": clip.get(
-                    "source_type",
-                    "ai_generated",
-                ),
-            }
-            visual_items.append(
-                (
-                    clip_index,
-                    slot,
-                )
-            )
-    else:
-        visual_items = list(
-            enumerate(
-                slots,
-                start=1,
-            )
-        )
+    visual_items = build_visual_items(
+        editor_visual_clips,
+        slots,
+    )
 
     for slot_index, slot in visual_items:
 
@@ -1019,183 +1482,20 @@ def main() -> int:
         ):
             continue
 
-        if slot.get(
-            "enabled",
-            True,
-        ) is False:
-            continue
-
-        slot_state = str(
-            slot.get(
-                "state",
-                "",
-            )
-            or ""
-        ).upper()
-
-        if slot_state == "FAILED":
-            continue
-
-        slot_id = str(
-            slot.get(
-                "slot_id",
-                "",
-            )
-            or ""
-        )
-
-        direct_asset_path = str(
-            slot.get(
-                "asset_path",
-                "",
-            )
-            or ""
-        )
-
-        asset = None
-
-        if direct_asset_path:
-            direct_path = Path(
-                direct_asset_path
-            )
-            if direct_path.exists():
-                asset = {
-                    "path": str(
-                        direct_path
-                    ),
-                    "state": "READY",
-                }
-
-        if asset is None:
-            asset = (
-                asset_map_by_id.get(
-                    slot_id
-                )
-                if slot_id
-                else None
-            )
-
-        if asset is None:
-            asset = asset_map_by_index.get(
-                slot_index
-            )
-
-        if not asset:
-            continue
-
-        asset_state = str(
-            asset.get(
-                "state",
-                "",
-            )
-            or ""
-        ).upper()
-
-        if asset_state == "FAILED":
-            continue
-
-        path = Path(
-            str(
-                asset.get(
-                    "path",
-                    "",
-                )
-            )
-        )
-
-        if not path.exists():
-            continue
-
-        try:
-            source_start = float(
-                slot.get(
-                    "start",
-                    0.0,
-                )
-            )
-            source_end = float(
-                slot.get(
-                    "end",
-                    source_start,
-                )
-            )
-        except (
-            TypeError,
-            ValueError,
-        ):
-            continue
-
-        mapped = map_source_interval_to_tight(
-            source_start,
-            source_end,
+        mapped_asset = resolve_mapped_asset(
+            slot_index,
+            slot,
+            asset_map_by_id,
+            asset_map_by_index,
             selection_start,
             keeps,
-        )
-
-        if mapped is None:
-            continue
-
-        tight_start, tight_end = mapped
-        tight_start, tight_end = map_tight_interval_to_final(
-            tight_start,
-            tight_end,
             temporal_plan,
         )
 
-        if tight_end - tight_start < 0.5:
-            continue
-
-        mapped_assets.append(
-            {
-                "path": path,
-                "tight_start": tight_start,
-                "tight_end": tight_end,
-                "label": slot.get(
-                    "label",
-                    f"Visual {slot_index}",
-                ),
-                "display_mode": normalize_display_mode(
-                    slot.get(
-                        "display_mode",
-                        "OVERLAY_CARD",
-                    )
-                ),
-                "scale": round(
-                    coerce_scale(
-                        slot.get(
-                            "scale",
-                            1.0,
-                        )
-                    ),
-                    2,
-                ),
-                "position_x": round(
-                    coerce_position(
-                        slot.get(
-                            "position_x",
-                            0.0,
-                        )
-                    ),
-                    3,
-                ),
-                "position_y": round(
-                    coerce_position(
-                        slot.get(
-                            "position_y",
-                            0.0,
-                        )
-                    ),
-                    3,
-                ),
-                "source_type": str(
-                    slot.get(
-                        "source_type",
-                        "ai_generated",
-                    )
-                    or "ai_generated"
-                ),
-            }
-        )
+        if mapped_asset is not None:
+            mapped_assets.append(
+                mapped_asset
+            )
 
     if not mapped_assets:
 
@@ -1205,129 +1505,14 @@ def main() -> int:
         )
         return 0
 
-    MAPPED_PLAN_PATH.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "source_plan": str(
-                    PLAN_PATH
-                ),
-                "temporal_plan": str(
-                    TEMPORAL_PLAN_PATH
-                ),
-                "temporal_applied": bool(
-                    temporal_plan.get(
-                        "applied",
-                        False,
-                    )
-                ),
-                "asset_count": len(
-                    mapped_assets
-                ),
-                "assets": [
-                    {
-                        "path": str(
-                            asset["path"]
-                        ),
-                        "start": round(
-                            float(
-                                asset["tight_start"]
-                            ),
-                            4,
-                        ),
-                        "end": round(
-                            float(
-                                asset["tight_end"]
-                            ),
-                            4,
-                        ),
-                        "label": asset.get(
-                            "label",
-                            "",
-                        ),
-                        "display_mode": asset.get(
-                            "display_mode",
-                            "OVERLAY_CARD",
-                        ),
-                        "scale": asset.get(
-                            "scale",
-                            1.0,
-                        ),
-                        "position_x": asset.get(
-                            "position_x",
-                            0.0,
-                        ),
-                        "position_y": asset.get(
-                            "position_y",
-                            0.0,
-                        ),
-                        "source_type": asset.get(
-                            "source_type",
-                            "ai_generated",
-                        ),
-                    }
-                    for asset in mapped_assets
-                ],
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(
-            VIDEO_PATH
-        ),
-    ]
-
-    for asset in mapped_assets:
-
-        command.extend(
-            [
-                "-loop",
-                "1",
-                "-i",
-                str(
-                    asset["path"]
-                ),
-            ]
-        )
-
-    filter_complex = build_filter(
+    write_mapped_plan(
         mapped_assets,
-        content_rect_from_settings(
-            render_settings
-        ),
+        temporal_plan,
     )
 
-    command.extend(
-        [
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[outv]",
-            "-map",
-            "0:a?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
-            "-c:a",
-            "copy",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(
-                TEMP_PATH
-            ),
-        ]
+    command = build_ffmpeg_command(
+        mapped_assets,
+        render_settings,
     )
 
     print(
@@ -1350,38 +1535,10 @@ def main() -> int:
             flush=True,
         )
 
-    try:
-
-        subprocess.run(
-            command,
-            cwd=ROOT,
-            check=True,
-        )
-
-    except subprocess.CalledProcessError as exc:
-
-        if TEMP_PATH.exists():
-
-            try:
-                TEMP_PATH.unlink()
-            except OSError:
-                pass
-
-        print(
-            (
-                "WARNING: AI visual compositing failed with "
-                f"exit code {exc.returncode}. "
-                "Continuing with the source footage."
-            ),
-            flush=True,
-        )
-
+    if not composite_and_replace_video(
+        command
+    ):
         return 0
-
-    os.replace(
-        TEMP_PATH,
-        VIDEO_PATH,
-    )
 
     print(
         "AI visual cutaways composited into tight video.",
