@@ -14,10 +14,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from ollama_config import OLLAMA_HOST as DEFAULT_OLLAMA_HOST
+
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 TRANSCRIPT_EXTENSIONS = {".json", ".txt"}
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 REQUEST_TIMEOUT_SECONDS = 180
 MIN_CLIP_SECONDS = 15
 PREFERRED_MIN_CLIP_SECONDS = 20

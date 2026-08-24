@@ -89,6 +89,13 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".flac",
 }
 
+# Deliberately separate from visual_emphasis.py's ENERGY_PROFILES (the
+# canonical LOW/PUNCHY/MAXIMUM energy-tier table used for captions/visual
+# grade/motion) -- SFX event density and volume are tuned independently
+# per subsystem, not derived from the same underlying numbers. Same for
+# VOLUME_BY_ENERGY below. Not a duplication bug; don't merge these into
+# ENERGY_PROFILES without deliberately deciding SFX should follow the
+# same tuning as the other subsystems.
 ENERGY_LIMITS = {
     "LOW": {
         "max_events": 2,
@@ -206,6 +213,8 @@ CATEGORY_EVENT_CAPS = {
     },
 }
 
+# See the comment on ENERGY_LIMITS above -- independently tuned per-tier
+# volume table, not sourced from visual_emphasis.py's ENERGY_PROFILES.
 VOLUME_BY_ENERGY = {
     "LOW": {
         "impact": 0.24,

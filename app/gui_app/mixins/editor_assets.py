@@ -21,6 +21,8 @@ from sfx_engine import asset_metadata_for_path
 
 from ..constants import ROOT
 
+SFX_DIR = ROOT / "assets" / "sfx"
+
 
 class EditorAssetsMixin:
 
@@ -688,7 +690,7 @@ class EditorAssetsMixin:
 
     def available_sfx_files(self) -> list[Path]:
 
-        sfx_dir = ROOT / "assets" / "sfx"
+        sfx_dir = SFX_DIR
         if not sfx_dir.exists():
             return []
 
@@ -730,7 +732,7 @@ class EditorAssetsMixin:
             )
             return
 
-        sfx_dir = ROOT / "assets" / "sfx"
+        sfx_dir = SFX_DIR
         labels = [
             str(
                 path.relative_to(
@@ -1283,7 +1285,7 @@ class EditorAssetsMixin:
 
     def open_sfx_folder(self):
 
-        sfx_dir = ROOT / "assets" / "sfx"
+        sfx_dir = SFX_DIR
         try:
             sfx_dir.mkdir(
                 parents=True,

@@ -71,6 +71,20 @@ MIN_WORDS = 2
 MAX_WORDS = 3
 
 FONT_SIZE = 78
+
+# Written into each Dialogue line's own MarginV field below, but this is
+# NOT what actually determines the default caption position in a real
+# render: render.py's burn_captions() (STEP 8) burns with its own
+# force_style='...MarginV=980...' (CAPTION_SAFE_MARGIN_BOTTOM), which
+# completely overrides a Dialogue line's per-line MarginV. This constant
+# only matters if captions.ass is ever rendered directly without going
+# through that burn step (e.g. previewed in a standalone media player).
+# A caption_position_x/y override (caption_position_override_tag() below)
+# is unaffected either way -- ASS \pos() bypasses margin-based placement
+# entirely, regardless of which MarginV would otherwise apply. See
+# gui_app/mixins/caption_preview.py for the GUI-side placement-editor
+# preview, which correctly derives its default from render.py's real
+# CAPTION_SAFE_MARGIN_* values, not this constant.
 MARGIN_V = 250
 
 # Only two caption colors.
