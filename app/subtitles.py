@@ -1396,334 +1396,296 @@ def maybe_apply_visual_fx(
 
 
 
-def main() -> int:
-
-    args = parse_args()
-
-    video_path = Path(
-        args.video
-    ).expanduser()
-
-    if not video_path.is_absolute():
-
-        video_path = (
-            ROOT
-            / video_path
-        )
-
-    video_path = video_path.resolve()
+def finish_pipeline_stages(
+    video_path: Path,
+) -> int:
+    """
+    Run every downstream post-transcription pipeline stage (transcript
+    corrections, temporal edit, smart motion, AI visuals, visual FX) and
+    report success. Shared by every main() exit path that produced a
+    usable transcript -- remap-through-cuts, a cache hit, and a fresh
+    Whisper transcription all end the same way.
+    """
+    maybe_apply_transcript_corrections(
+        video_path
+    )
+    maybe_apply_temporal_edit(
+        video_path
+    )
+    maybe_apply_smart_motion(
+        video_path
+    )
+    maybe_apply_ai_visuals(
+        video_path
+    )
+    maybe_apply_visual_fx(
+        video_path
+    )
 
     print(
-        "ShortsFactory subtitle generator starting...",
+        "Done.",
         flush=True,
     )
+    return 0
 
+
+def run_remap_through_cuts(
+    video_path: Path,
+) -> int:
+    """
+    Reuse the already-selected transcript, remapped through the smart
+    jump cuts just applied, instead of re-running Whisper. Used when the
+    editor already has a validated transcript and only the temporal
+    edit changed.
+    """
     print(
-        f"Project folder: {ROOT}",
+        "",
         flush=True,
     )
-
     print(
-        f"Input video: {video_path}",
+        "Reusing selected transcript after smart jump cuts.",
         flush=True,
     )
-
-    quality = normalize_quality(
-        args.quality
-    )
-
     print(
-        f"Transcription quality: {quality}",
-        flush=True,
-    )
-
-    if not video_path.exists():
-
-        print(
-            f"ERROR: Video not found: {video_path}",
-            flush=True,
-        )
-
-        return 1
-
-    if args.remap_through_cuts:
-        print(
-            "",
-            flush=True,
-        )
-        print(
-            "Reusing selected transcript after smart jump cuts.",
-            flush=True,
-        )
-        print(
-            "Skipping Whisper transcription for short1_tight.mp4.",
-            flush=True,
-        )
-
-        try:
-            output_for_run = remap_current_transcript_after_smart_edit(
-                video_path
-            )
-        except Exception as exc:
-            print(
-                f"ERROR: Could not remap transcript through smart edits: {exc}",
-                flush=True,
-            )
-            return 1
-
-        write_output(
-            output_for_run
-        )
-
-        print(
-            (
-                "Tight transcript remapped from "
-                f"{output_for_run.get('keep_segment_count', 0)} "
-                "retained segment(s)."
-            ),
-            flush=True,
-        )
-        print(
-            f"Words retained: {len(output_for_run.get('words', []))}",
-            flush=True,
-        )
-        print(
-            f"Speech segments retained: {len(output_for_run.get('segments', []))}",
-            flush=True,
-        )
-
-        maybe_apply_transcript_corrections(
-            video_path
-        )
-        maybe_apply_temporal_edit(
-            video_path
-        )
-        maybe_apply_smart_motion(
-            video_path
-        )
-        maybe_apply_ai_visuals(
-            video_path
-        )
-        maybe_apply_visual_fx(
-            video_path
-        )
-
-        print(
-            "Done.",
-            flush=True,
-        )
-        return 0
-
-    model_candidates = model_candidates_for_quality(
-        quality
-    )
-
-    print(
-        (
-            "Whisper model candidates: "
-            + ", ".join(
-                model_candidates
-            )
-        ),
+        "Skipping Whisper transcription for short1_tight.mp4.",
         flush=True,
     )
 
     try:
+        output_for_run = remap_current_transcript_after_smart_edit(
+            video_path
+        )
+    except Exception as exc:
+        print(
+            f"ERROR: Could not remap transcript through smart edits: {exc}",
+            flush=True,
+        )
+        return 1
 
-        cache_candidates = []
-        for model_name in model_candidates:
-            cache_path, identity = cache_path_for_video(
-                video_path,
-                quality,
-                model_name,
+    write_output(
+        output_for_run
+    )
+
+    print(
+        (
+            "Tight transcript remapped from "
+            f"{output_for_run.get('keep_segment_count', 0)} "
+            "retained segment(s)."
+        ),
+        flush=True,
+    )
+    print(
+        f"Words retained: {len(output_for_run.get('words', []))}",
+        flush=True,
+    )
+    print(
+        f"Speech segments retained: {len(output_for_run.get('segments', []))}",
+        flush=True,
+    )
+
+    return finish_pipeline_stages(
+        video_path
+    )
+
+
+def build_cache_candidates(
+    video_path: Path,
+    quality: str,
+    model_candidates: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Build the ordered list of transcript-cache files to check, one per
+    Whisper model candidate for this quality tier, plus a legacy
+    (pre-quality-aware) cache entry when "base" is among the candidates.
+    May raise OSError if the source video cannot be inspected.
+    """
+    cache_candidates = []
+    for model_name in model_candidates:
+        cache_path, identity = cache_path_for_video(
+            video_path,
+            quality,
+            model_name,
+        )
+        cache_candidates.append(
+            {
+                "path": cache_path,
+                "identity": identity,
+                "model": model_name,
+                "legacy": False,
+                "modern_path": cache_path,
+                "modern_identity": identity,
+            }
+        )
+
+        if model_name == "base":
+            legacy_path, legacy_identity = legacy_cache_path_for_video(
+                video_path
             )
             cache_candidates.append(
                 {
-                    "path": cache_path,
-                    "identity": identity,
+                    "path": legacy_path,
+                    "identity": legacy_identity,
                     "model": model_name,
-                    "legacy": False,
+                    "legacy": True,
                     "modern_path": cache_path,
                     "modern_identity": identity,
                 }
             )
 
-            if model_name == "base":
-                legacy_path, legacy_identity = legacy_cache_path_for_video(
-                    video_path
-                )
-                cache_candidates.append(
-                    {
-                        "path": legacy_path,
-                        "identity": legacy_identity,
-                        "model": model_name,
-                        "legacy": True,
-                        "modern_path": cache_path,
-                        "modern_identity": identity,
-                    }
-                )
+    return cache_candidates
 
-    except OSError as exc:
 
-        print(
-            f"ERROR: Could not inspect source video: {exc}",
-            flush=True,
-        )
-
-        return 1
-
-    CACHE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
+def try_cache_hit(
+    cache_candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    quality: str,
+    video_path: Path,
+) -> tuple[int | None, bool]:
+    """
+    Scan cache_candidates for the first still-valid transcript cache and,
+    if found, finish the run from it (migrating a legacy cache to the
+    modern format first if needed). Returns (exit_code, stale_cache_seen);
+    exit_code is None when no candidate matched, meaning the caller
+    should fall through to a fresh Whisper transcription.
+    """
     stale_cache_seen = False
 
-    if not args.no_cache:
+    for candidate in cache_candidates:
 
-        for candidate in cache_candidates:
+        cache_path = candidate["path"]
+        identity = candidate["identity"]
 
-            cache_path = candidate["path"]
-            identity = candidate["identity"]
+        cached = read_json(
+            cache_path
+        )
 
-            cached = read_json(
-                cache_path
-            )
+        if cached is not None and not cache_is_valid(
+            cached,
+            identity,
+        ):
+            stale_cache_seen = True
 
-            if cached is not None and not cache_is_valid(
+        if not (
+            cached is not None
+            and cache_is_valid(
                 cached,
                 identity,
-            ):
-                stale_cache_seen = True
+            )
+        ):
+            continue
 
-            if not (
-                cached is not None
-                and cache_is_valid(
-                    cached,
-                    identity,
-                )
-            ):
-                continue
-
-            if candidate["legacy"]:
-                cached = migrate_cached_transcript(
-                    cached,
-                    candidate["modern_identity"],
-                    quality,
-                    candidate["model"],
-                )
-                try:
-                    candidate["modern_path"].write_text(
-                        json.dumps(
-                            cached,
-                            indent=2,
-                            ensure_ascii=False,
-                        )
-                        + "\n",
-                        encoding="utf-8",
+        if candidate["legacy"]:
+            cached = migrate_cached_transcript(
+                cached,
+                candidate["modern_identity"],
+                quality,
+                candidate["model"],
+            )
+            try:
+                candidate["modern_path"].write_text(
+                    json.dumps(
+                        cached,
+                        indent=2,
+                        ensure_ascii=False,
                     )
-                    print(
-                        "Migrated legacy base transcript cache to the current quality-aware cache.",
-                        flush=True,
-                    )
-                except OSError as exc:
-                    print(
-                        f"WARNING: Could not migrate transcript cache: {exc}",
-                        flush=True,
-                    )
-
-            print(
-                "",
-                flush=True,
-            )
-
-            print(
-                "Transcript cache HIT.",
-                flush=True,
-            )
-
-            print(
-                "Skipping Whisper transcription for this unchanged video.",
-                flush=True,
-            )
-
-            output_for_run = (
-                slice_transcript_to_selection(
-                    cached,
-                    args.selection_start,
-                    args.selection_end,
+                    + "\n",
+                    encoding="utf-8",
                 )
-                if (
-                    args.selection_start is not None
-                    and args.selection_end is not None
-                )
-                else cached
-            )
-
-            write_output(
-                output_for_run
-            )
-
-            if (
-                args.selection_start is not None
-                and args.selection_end is not None
-            ):
                 print(
-                    (
-                        "Prepared selected transcript from cached source: "
-                        f"{args.selection_start:.3f}s -> "
-                        f"{args.selection_end:.3f}s."
-                    ),
+                    "Migrated legacy base transcript cache to the current quality-aware cache.",
+                    flush=True,
+                )
+            except OSError as exc:
+                print(
+                    f"WARNING: Could not migrate transcript cache: {exc}",
                     flush=True,
                 )
 
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "Transcript cache HIT.",
+            flush=True,
+        )
+
+        print(
+            "Skipping Whisper transcription for this unchanged video.",
+            flush=True,
+        )
+
+        output_for_run = (
+            slice_transcript_to_selection(
+                cached,
+                args.selection_start,
+                args.selection_end,
+            )
+            if (
+                args.selection_start is not None
+                and args.selection_end is not None
+            )
+            else cached
+        )
+
+        write_output(
+            output_for_run
+        )
+
+        if (
+            args.selection_start is not None
+            and args.selection_end is not None
+        ):
             print(
-                f"Cached transcript: {cache_path}",
+                (
+                    "Prepared selected transcript from cached source: "
+                    f"{args.selection_start:.3f}s -> "
+                    f"{args.selection_end:.3f}s."
+                ),
                 flush=True,
             )
 
-            print(
-                f"Subtitle data saved to: {OUTPUT_PATH}",
-                flush=True,
-            )
+        print(
+            f"Cached transcript: {cache_path}",
+            flush=True,
+        )
 
-            print(
-                f"Words detected: {len(output_for_run.get('words', []))}",
-                flush=True,
-            )
+        print(
+            f"Subtitle data saved to: {OUTPUT_PATH}",
+            flush=True,
+        )
 
-            print(
-                f"Speech segments detected: {len(output_for_run.get('segments', []))}",
-                flush=True,
-            )
+        print(
+            f"Words detected: {len(output_for_run.get('words', []))}",
+            flush=True,
+        )
 
-            maybe_apply_transcript_corrections(
+        print(
+            f"Speech segments detected: {len(output_for_run.get('segments', []))}",
+            flush=True,
+        )
+
+        return (
+            finish_pipeline_stages(
                 video_path
-            )
+            ),
+            stale_cache_seen,
+        )
 
-            maybe_apply_temporal_edit(
-                video_path
-            )
+    return None, stale_cache_seen
 
-            maybe_apply_smart_motion(
-                video_path
-            )
 
-            maybe_apply_ai_visuals(
-                video_path
-            )
-
-            maybe_apply_visual_fx(
-                video_path
-            )
-
-            print(
-                "Done.",
-                flush=True,
-            )
-
-            return 0
-
+def run_fresh_transcription(
+    video_path: Path,
+    quality: str,
+    args: argparse.Namespace,
+    stale_cache_seen: bool,
+) -> int:
+    """
+    Run Whisper transcription from scratch, having found no usable
+    cache, and cache the result for future runs.
+    """
     print(
         "",
         flush=True,
@@ -1849,32 +1811,118 @@ def main() -> int:
         flush=True,
     )
 
-    maybe_apply_transcript_corrections(
+    return finish_pipeline_stages(
         video_path
     )
 
-    maybe_apply_temporal_edit(
-        video_path
-    )
 
-    maybe_apply_smart_motion(
-        video_path
-    )
+def main() -> int:
 
-    maybe_apply_ai_visuals(
-        video_path
-    )
+    args = parse_args()
 
-    maybe_apply_visual_fx(
-        video_path
-    )
+    video_path = Path(
+        args.video
+    ).expanduser()
+
+    if not video_path.is_absolute():
+
+        video_path = (
+            ROOT
+            / video_path
+        )
+
+    video_path = video_path.resolve()
 
     print(
-        "Done.",
+        "ShortsFactory subtitle generator starting...",
         flush=True,
     )
 
-    return 0
+    print(
+        f"Project folder: {ROOT}",
+        flush=True,
+    )
+
+    print(
+        f"Input video: {video_path}",
+        flush=True,
+    )
+
+    quality = normalize_quality(
+        args.quality
+    )
+
+    print(
+        f"Transcription quality: {quality}",
+        flush=True,
+    )
+
+    if not video_path.exists():
+
+        print(
+            f"ERROR: Video not found: {video_path}",
+            flush=True,
+        )
+
+        return 1
+
+    if args.remap_through_cuts:
+        return run_remap_through_cuts(
+            video_path
+        )
+
+    model_candidates = model_candidates_for_quality(
+        quality
+    )
+
+    print(
+        (
+            "Whisper model candidates: "
+            + ", ".join(
+                model_candidates
+            )
+        ),
+        flush=True,
+    )
+
+    try:
+        cache_candidates = build_cache_candidates(
+            video_path,
+            quality,
+            model_candidates,
+        )
+    except OSError as exc:
+
+        print(
+            f"ERROR: Could not inspect source video: {exc}",
+            flush=True,
+        )
+
+        return 1
+
+    CACHE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    stale_cache_seen = False
+
+    if not args.no_cache:
+        hit_exit_code, stale_cache_seen = try_cache_hit(
+            cache_candidates,
+            args,
+            quality,
+            video_path,
+        )
+        if hit_exit_code is not None:
+            return hit_exit_code
+
+    return run_fresh_transcription(
+        video_path,
+        quality,
+        args,
+        stale_cache_seen,
+    )
 
 
 if __name__ == "__main__":
