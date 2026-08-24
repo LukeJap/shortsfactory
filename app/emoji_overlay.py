@@ -381,14 +381,31 @@ def prepare_emoji_events(
             )
         )
 
+        try:
+            requested_end = float(
+                event.get(
+                    "end",
+                    start + EMOJI_DURATION,
+                )
+            )
+        except (TypeError, ValueError):
+            requested_end = start + EMOJI_DURATION
+
+        # Trust a stored end (e.g. lengthened/shortened by a manual drag
+        # on the editor timeline) over the default duration -- only fall
+        # back to it when the stored value is missing or invalid.
+        end = (
+            requested_end
+            if requested_end > start
+            else start + EMOJI_DURATION
+        )
+
         prepared.append(
             {
                 "emoji": emoji_label,
                 "path": path,
                 "start": start,
-                "end":
-                    start
-                    + EMOJI_DURATION,
+                "end": end,
                 "position_x": event.get("position_x"),
                 "position_y": event.get("position_y"),
             }
@@ -488,6 +505,16 @@ def build_emoji_filter_complex(
             event["end"]
         )
 
+        # The trimmed clip and its float-upward animation must span the
+        # actual requested display window (which may have been lengthened
+        # or shortened by a manual drag on the editor timeline), not a
+        # fixed constant -- otherwise the overlay silently vanishes at
+        # the old fixed duration regardless of what `end` says.
+        duration = max(
+            0.1,
+            end - start,
+        )
+
         stored_x = event.get("position_x")
         stored_y = event.get("position_y")
 
@@ -511,7 +538,7 @@ def build_emoji_filter_complex(
             f"{EMOJI_SIZE}:"
             f"{EMOJI_SIZE},"
             f"trim="
-            f"duration={EMOJI_DURATION},"
+            f"duration={duration},"
             f"setpts="
             f"PTS-STARTPTS+{start}/TB"
             f"{emoji_label}"
@@ -538,7 +565,7 @@ def build_emoji_filter_complex(
             f"{y}"
             f"-22*"
             f"({local_time}/"
-            f"{EMOJI_DURATION})"
+            f"{duration})"
         )
 
         filters.append(
