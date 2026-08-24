@@ -30,14 +30,24 @@ except ImportError:
         semantic_recipe,
     )
 
+try:
+    from .pipeline_paths import (
+        SUBTITLES_PATH as TRANSCRIPT_PATH,
+        TEMPORAL_EDIT_PLAN_PATH as PLAN_PATH,
+        TEMPORAL_SCENE_PLAN_PATH as SCENE_PLAN_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        SUBTITLES_PATH as TRANSCRIPT_PATH,
+        TEMPORAL_EDIT_PLAN_PATH as PLAN_PATH,
+        TEMPORAL_SCENE_PLAN_PATH as SCENE_PLAN_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
 VIDEO_PATH = ROOT / "output" / "rendered" / "short1_tight.mp4"
 TEMP_PATH = ROOT / "output" / "rendered" / "short1_temporal_tmp.mp4"
-TRANSCRIPT_PATH = ROOT / "output" / "subtitles.json"
-PLAN_PATH = ROOT / "output" / "temporal_edit_plan.json"
-SCENE_PLAN_PATH = ROOT / "output" / "temporal_scene_plan.json"
 
 MIN_SOURCE_SEGMENT_SECONDS = 0.045
 MIN_EVENT_SPACING_SECONDS = 1.15

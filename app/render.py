@@ -29,13 +29,23 @@ try:
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 
+try:
+    from .pipeline_paths import (
+        CAPTIONS_PATH,
+        SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN_PATH,
+        SHORT_PLAN_PATH as PLAN_PATH,
+        SUBTITLES_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        CAPTIONS_PATH,
+        SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN_PATH,
+        SHORT_PLAN_PATH as PLAN_PATH,
+        SUBTITLES_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
-
-PLAN_PATH = ROOT / "output" / "short_plan.json"
-SEMANTIC_PLAN_PATH = (
-    ROOT / "output" / "semantic_edit_plan.json"
-)
 
 OUTPUT_DIR = ROOT / "output" / "rendered"
 
@@ -51,14 +61,6 @@ TIGHT_OUTPUT_PATH = (
 
 CAPTION_OUTPUT_PATH = (
     OUTPUT_DIR / "short1_captioned.mp4"
-)
-
-CAPTIONS_PATH = (
-    ROOT / "output" / "captions.ass"
-)
-
-SUBTITLES_PATH = (
-    ROOT / "output" / "subtitles.json"
 )
 
 DEFAULT_SOURCE_VIDEO = (

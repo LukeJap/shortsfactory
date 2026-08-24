@@ -42,11 +42,15 @@ try:
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 
+try:
+    from .pipeline_paths import SUBTITLES_PATH as TRANSCRIPT_PATH
+except ImportError:
+    from pipeline_paths import SUBTITLES_PATH as TRANSCRIPT_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
 VIDEO_PATH = ROOT / "output" / "rendered" / "short1_tight.mp4"
-TRANSCRIPT_PATH = ROOT / "output" / "subtitles.json"
 TEMP_PATH = ROOT / "output" / "rendered" / "short1_fx_tmp.mp4"
 
 def _default_font_candidates() -> list[Path]:

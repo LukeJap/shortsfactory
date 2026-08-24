@@ -50,6 +50,25 @@ except ImportError:
         normalize_sfx_mode,
     )
 
+try:
+    from .pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH,
+        EDITOR_ASSET_PLAN_PATH,
+        SFX_PLAN_PATH,
+        SUBTITLES_PATH,
+        TEMPORAL_EDIT_PLAN_PATH,
+        VISUAL_EDIT_PLAN_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH,
+        EDITOR_ASSET_PLAN_PATH,
+        SFX_PLAN_PATH,
+        SUBTITLES_PATH,
+        TEMPORAL_EDIT_PLAN_PATH,
+        VISUAL_EDIT_PLAN_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,12 +76,6 @@ OUTPUT_DIR = ROOT / "output"
 RENDERED_DIR = OUTPUT_DIR / "rendered"
 VIDEO_PATH = RENDERED_DIR / "short1_captioned.mp4"
 TEMP_VIDEO_PATH = RENDERED_DIR / "short1_sfx_tmp.mp4"
-
-VISUAL_EDIT_PLAN_PATH = OUTPUT_DIR / "visual_edit_plan.json"
-COMBINED_EDIT_PLAN_PATH = OUTPUT_DIR / "combined_edit_plan.json"
-TEMPORAL_EDIT_PLAN_PATH = OUTPUT_DIR / "temporal_edit_plan.json"
-SFX_PLAN_PATH = OUTPUT_DIR / "sfx_plan.json"
-SUBTITLES_PATH = OUTPUT_DIR / "subtitles.json"
 
 SFX_DIR = ROOT / "assets" / "sfx"
 GENERATED_SFX_DIR = SFX_DIR / "generated"
@@ -4177,9 +4190,7 @@ def write_editor_sfx_plan(
             ],
             "skipped": skipped,
             "editor_asset_plan": str(
-                ROOT
-                / "output"
-                / "editor_asset_plan.json"
+                EDITOR_ASSET_PLAN_PATH
             ),
             "mix": {
                 "applied": False,
@@ -4340,9 +4351,7 @@ def main() -> int:
             "final_events": final_events,
             "skipped": skipped,
             "editor_asset_plan": str(
-                ROOT
-                / "output"
-                / "editor_asset_plan.json"
+                EDITOR_ASSET_PLAN_PATH
             ),
             "mix": {
                 "applied": bool(

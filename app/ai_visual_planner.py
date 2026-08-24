@@ -14,14 +14,21 @@ try:
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
 
+try:
+    from .pipeline_paths import (
+        AI_VISUAL_PLAN_PATH as DEFAULT_OUTPUT,
+        MANUAL_EDIT_PLAN_PATH,
+        TRANSCRIPT_CORRECTIONS_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        AI_VISUAL_PLAN_PATH as DEFAULT_OUTPUT,
+        MANUAL_EDIT_PLAN_PATH,
+        TRANSCRIPT_CORRECTIONS_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
-
-DEFAULT_OUTPUT = (
-    ROOT
-    / "output"
-    / "ai_visual_plan.json"
-)
 
 MIN_SLOT_SECONDS = 1.4
 MAX_SLOT_SECONDS = 3.8
@@ -61,20 +68,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--corrections",
-        default=str(
-            ROOT
-            / "output"
-            / "transcript_corrections.json"
-        ),
+        default=str(TRANSCRIPT_CORRECTIONS_PATH),
     )
 
     parser.add_argument(
         "--manual-cuts",
-        default=str(
-            ROOT
-            / "output"
-            / "manual_edit_plan.json"
-        ),
+        default=str(MANUAL_EDIT_PLAN_PATH),
     )
 
     parser.add_argument(

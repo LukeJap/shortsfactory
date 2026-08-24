@@ -7,9 +7,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from .pipeline_paths import SFX_PLAN_PATH
+except ImportError:
+    from pipeline_paths import SFX_PLAN_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
-SFX_PLAN_PATH = ROOT / "output" / "sfx_plan.json"
 
 
 def parse_args() -> argparse.Namespace:

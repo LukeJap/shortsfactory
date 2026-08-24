@@ -14,6 +14,10 @@ try:
         load_render_settings,
         normalize_energy,
     )
+    from .pipeline_paths import (
+        SEMANTIC_EDIT_PLAN_PATH as OUTPUT_PATH,
+        SUBTITLES_PATH,
+    )
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
     from visual_emphasis import (
@@ -21,12 +25,13 @@ except ImportError:
         load_render_settings,
         normalize_energy,
     )
+    from pipeline_paths import (
+        SEMANTIC_EDIT_PLAN_PATH as OUTPUT_PATH,
+        SUBTITLES_PATH,
+    )
 
 
 ROOT = Path(__file__).resolve().parent.parent
-
-SUBTITLES_PATH = ROOT / "output" / "subtitles.json"
-OUTPUT_PATH = ROOT / "output" / "semantic_edit_plan.json"
 
 
 def load_json(path: Path) -> dict[str, Any]:

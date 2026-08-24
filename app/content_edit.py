@@ -12,10 +12,14 @@ try:
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
 
+try:
+    from .pipeline_paths import SUBTITLES_PATH
+except ImportError:
+    from pipeline_paths import SUBTITLES_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SUBTITLES_PATH = ROOT / "output" / "subtitles.json"
 OUTPUT_PATH = ROOT / "output" / "content_edit_plan.json"
 
 

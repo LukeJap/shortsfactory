@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..constants import ROOT
 from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+from pipeline_paths import EMOJI_EVENTS_PATH
 from emoji_overlay import (
     EMOJI_DIR,
     EMOJI_SIZE,
@@ -32,7 +33,6 @@ from emoji_overlay import (
 from make_captions import load_local_reaction_assets, relative_asset_path
 
 
-EMOJI_EVENTS_PATH = ROOT / "output" / "emoji_events.json"
 EMOJI_PLANNER_SCRIPT = ROOT / "app" / "emoji_planner.py"
 
 

@@ -18,15 +18,16 @@ except ImportError:
         normalize_energy,
     )
 
+try:
+    from .pipeline_paths import EDIT_PLAN_PATH, SUBTITLES_PATH
+except ImportError:
+    from pipeline_paths import EDIT_PLAN_PATH, SUBTITLES_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SUBTITLES_PATH = ROOT / "output" / "subtitles.json"
-
 INPUT_VIDEO = ROOT / "output" / "rendered" / "short1_base.mp4"
 OUTPUT_VIDEO = ROOT / "output" / "rendered" / "short1_tight.mp4"
-
-EDIT_PLAN_PATH = ROOT / "output" / "edit_plan.json"
 
 
 # ============================================================

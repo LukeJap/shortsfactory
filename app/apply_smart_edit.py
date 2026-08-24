@@ -20,6 +20,21 @@ except ImportError:
         normalize_energy,
     )
 
+try:
+    from .pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH as COMBINED_PLAN,
+        EDIT_PLAN_PATH as PAUSE_PLAN,
+        MANUAL_EDIT_PLAN_PATH as MANUAL_PLAN,
+        SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN,
+    )
+except ImportError:
+    from pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH as COMBINED_PLAN,
+        EDIT_PLAN_PATH as PAUSE_PLAN,
+        MANUAL_EDIT_PLAN_PATH as MANUAL_PLAN,
+        SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,30 +50,6 @@ TIGHT_VIDEO = (
     / "output"
     / "rendered"
     / "short1_tight.mp4"
-)
-
-PAUSE_PLAN = (
-    ROOT
-    / "output"
-    / "edit_plan.json"
-)
-
-SEMANTIC_PLAN = (
-    ROOT
-    / "output"
-    / "semantic_edit_plan.json"
-)
-
-MANUAL_PLAN = (
-    ROOT
-    / "output"
-    / "manual_edit_plan.json"
-)
-
-COMBINED_PLAN = (
-    ROOT
-    / "output"
-    / "combined_edit_plan.json"
 )
 
 MIN_CUT_SECONDS = 0.025

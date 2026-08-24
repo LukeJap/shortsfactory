@@ -15,15 +15,10 @@ from image_backend_status import (
     WebUIImageProvider,
     status_with_optional_launch,
 )
+from pipeline_paths import AI_VISUAL_PLAN_PATH as DEFAULT_PLAN
 
 
 ROOT = Path(__file__).resolve().parent.parent
-
-DEFAULT_PLAN = (
-    ROOT
-    / "output"
-    / "ai_visual_plan.json"
-)
 
 DEFAULT_ASSET_DIR = (
     ROOT

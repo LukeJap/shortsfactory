@@ -44,12 +44,22 @@ try:
 except ImportError:
     from render import OUTPUT_HEIGHT, OUTPUT_WIDTH, clamp_caption_drag_position
 
+try:
+    from .pipeline_paths import (
+        CAPTIONS_PATH as OUTPUT_PATH,
+        EMOJI_EVENTS_PATH as EMOJI_OUTPUT_PATH,
+        SUBTITLES_PATH as INPUT_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        CAPTIONS_PATH as OUTPUT_PATH,
+        EMOJI_EVENTS_PATH as EMOJI_OUTPUT_PATH,
+        SUBTITLES_PATH as INPUT_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
-INPUT_PATH = ROOT / "output" / "subtitles.json"
-OUTPUT_PATH = ROOT / "output" / "captions.ass"
-EMOJI_OUTPUT_PATH = ROOT / "output" / "emoji_events.json"
 EMOJI_DIR = ROOT / "assets" / "emoji"
 
 

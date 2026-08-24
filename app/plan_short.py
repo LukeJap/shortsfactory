@@ -12,11 +12,15 @@ try:
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
 
+try:
+    from .pipeline_paths import SHORT_PLAN_PATH as OUTPUT_PATH
+except ImportError:
+    from pipeline_paths import SHORT_PLAN_PATH as OUTPUT_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 ANALYSIS_PATH = ROOT / "output" / "analysis.json"
 TRANSCRIPT_PATH = ROOT / "short1.json"
-OUTPUT_PATH = ROOT / "output" / "short_plan.json"
 
 
 def log(message: str) -> None:

@@ -36,6 +36,21 @@ try:
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT as FRAME_HEIGHT, OUTPUT_WIDTH as FRAME_WIDTH
 
+try:
+    from .pipeline_paths import (
+        AI_VISUAL_MAPPED_PLAN_PATH as MAPPED_PLAN_PATH,
+        AI_VISUAL_PLAN_PATH as PLAN_PATH,
+        COMBINED_EDIT_PLAN_PATH as COMBINED_PLAN_PATH,
+        TEMPORAL_EDIT_PLAN_PATH as TEMPORAL_PLAN_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        AI_VISUAL_MAPPED_PLAN_PATH as MAPPED_PLAN_PATH,
+        AI_VISUAL_PLAN_PATH as PLAN_PATH,
+        COMBINED_EDIT_PLAN_PATH as COMBINED_PLAN_PATH,
+        TEMPORAL_EDIT_PLAN_PATH as TEMPORAL_PLAN_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,35 +61,11 @@ VIDEO_PATH = (
     / "short1_tight.mp4"
 )
 
-PLAN_PATH = (
-    ROOT
-    / "output"
-    / "ai_visual_plan.json"
-)
-
 MANIFEST_PATH = (
     ROOT
     / "output"
     / "ai_visual_assets"
     / "manifest.json"
-)
-
-COMBINED_PLAN_PATH = (
-    ROOT
-    / "output"
-    / "combined_edit_plan.json"
-)
-
-TEMPORAL_PLAN_PATH = (
-    ROOT
-    / "output"
-    / "temporal_edit_plan.json"
-)
-
-MAPPED_PLAN_PATH = (
-    ROOT
-    / "output"
-    / "ai_visual_mapped_plan.json"
 )
 
 TEMP_PATH = (

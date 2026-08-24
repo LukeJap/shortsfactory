@@ -32,6 +32,21 @@ try:
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 
+try:
+    from .pipeline_paths import (
+        MOTION_SCENE_PLAN_PATH as MOTION_SCENE_PLAN,
+        SHOT_TYPE_MOTION_PLAN_PATH as MOTION_SHOT_PLAN,
+        SMART_MOTION_PLAN_PATH as PLAN_PATH,
+        SUBTITLES_PATH as TRANSCRIPT_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        MOTION_SCENE_PLAN_PATH as MOTION_SCENE_PLAN,
+        SHOT_TYPE_MOTION_PLAN_PATH as MOTION_SHOT_PLAN,
+        SMART_MOTION_PLAN_PATH as PLAN_PATH,
+        SUBTITLES_PATH as TRANSCRIPT_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,30 +55,6 @@ VIDEO_PATH = (
     / "output"
     / "rendered"
     / "short1_tight.mp4"
-)
-
-TRANSCRIPT_PATH = (
-    ROOT
-    / "output"
-    / "subtitles.json"
-)
-
-PLAN_PATH = (
-    ROOT
-    / "output"
-    / "smart_motion_plan.json"
-)
-
-MOTION_SCENE_PLAN = (
-    ROOT
-    / "output"
-    / "motion_scene_plan.json"
-)
-
-MOTION_SHOT_PLAN = (
-    ROOT
-    / "output"
-    / "shot_type_motion_plan.json"
 )
 
 TEMP_PATH = (

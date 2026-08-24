@@ -10,16 +10,27 @@ try:
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 
+try:
+    from .pipeline_paths import (
+        AI_VISUAL_MAPPED_PLAN_PATH,
+        AI_VISUAL_PLAN_PATH,
+        RENDER_SETTINGS_PATH,
+        SMART_MOTION_PLAN_PATH,
+        TEMPORAL_EDIT_PLAN_PATH,
+        VISUAL_EDIT_PLAN_PATH,
+        VISUAL_FX_PLAN_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        AI_VISUAL_MAPPED_PLAN_PATH,
+        AI_VISUAL_PLAN_PATH,
+        RENDER_SETTINGS_PATH,
+        SMART_MOTION_PLAN_PATH,
+        TEMPORAL_EDIT_PLAN_PATH,
+        VISUAL_EDIT_PLAN_PATH,
+        VISUAL_FX_PLAN_PATH,
+    )
 
-ROOT = Path(__file__).resolve().parent.parent
-
-RENDER_SETTINGS_PATH = ROOT / "output" / "render_settings.json"
-VISUAL_EDIT_PLAN_PATH = ROOT / "output" / "visual_edit_plan.json"
-SMART_MOTION_PLAN_PATH = ROOT / "output" / "smart_motion_plan.json"
-AI_VISUAL_PLAN_PATH = ROOT / "output" / "ai_visual_plan.json"
-AI_VISUAL_MAPPED_PLAN_PATH = ROOT / "output" / "ai_visual_mapped_plan.json"
-VISUAL_FX_PLAN_PATH = ROOT / "output" / "visual_fx_plan.json"
-TEMPORAL_EDIT_PLAN_PATH = ROOT / "output" / "temporal_edit_plan.json"
 
 ENERGY_LEVELS = {
     "LOW",

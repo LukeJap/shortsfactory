@@ -12,6 +12,17 @@ from typing import Any
 
 import whisper
 
+try:
+    from .pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH,
+        SUBTITLES_PATH as OUTPUT_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH,
+        SUBTITLES_PATH as OUTPUT_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -22,22 +33,10 @@ DEFAULT_VIDEO_PATH = (
     / "short1_base.mp4"
 )
 
-OUTPUT_PATH = (
-    ROOT
-    / "output"
-    / "subtitles.json"
-)
-
 CACHE_DIR = (
     ROOT
     / "output"
     / "transcript_cache"
-)
-
-COMBINED_EDIT_PLAN_PATH = (
-    ROOT
-    / "output"
-    / "combined_edit_plan.json"
 )
 
 DEFAULT_QUALITY = "AUTO"

@@ -10,10 +10,13 @@ try:
 except ImportError:
     from make_captions import choose_emoji_events, find_emoji
 
+try:
+    from .pipeline_paths import EMOJI_EVENTS_PATH as DEFAULT_OUTPUT
+except ImportError:
+    from pipeline_paths import EMOJI_EVENTS_PATH as DEFAULT_OUTPUT
+
 
 ROOT = Path(__file__).resolve().parent.parent
-
-DEFAULT_OUTPUT = ROOT / "output" / "emoji_events.json"
 
 
 def parse_args() -> argparse.Namespace:

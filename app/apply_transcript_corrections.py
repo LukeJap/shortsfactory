@@ -6,12 +6,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from .pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH as COMBINED_PLAN_PATH,
+        SUBTITLES_PATH,
+        TRANSCRIPT_CORRECTIONS_PATH as CORRECTIONS_PATH,
+    )
+except ImportError:
+    from pipeline_paths import (
+        COMBINED_EDIT_PLAN_PATH as COMBINED_PLAN_PATH,
+        SUBTITLES_PATH,
+        TRANSCRIPT_CORRECTIONS_PATH as CORRECTIONS_PATH,
+    )
+
 
 ROOT = Path(__file__).resolve().parent.parent
-
-SUBTITLES_PATH = ROOT / "output" / "subtitles.json"
-CORRECTIONS_PATH = ROOT / "output" / "transcript_corrections.json"
-COMBINED_PLAN_PATH = ROOT / "output" / "combined_edit_plan.json"
 
 
 def load_json(path: Path) -> dict[str, Any]:

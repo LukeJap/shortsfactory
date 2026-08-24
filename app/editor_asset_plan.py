@@ -4,9 +4,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+try:
+    from .pipeline_paths import EDITOR_ASSET_PLAN_PATH as PLAN_PATH
+except ImportError:
+    from pipeline_paths import EDITOR_ASSET_PLAN_PATH as PLAN_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
-PLAN_PATH = ROOT / "output" / "editor_asset_plan.json"
 
 
 def read_json(

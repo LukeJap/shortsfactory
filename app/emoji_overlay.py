@@ -10,10 +10,14 @@ try:
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT as CANVAS_HEIGHT, OUTPUT_WIDTH as CANVAS_WIDTH
 
+try:
+    from .pipeline_paths import EMOJI_EVENTS_PATH as EVENTS_PATH
+except ImportError:
+    from pipeline_paths import EMOJI_EVENTS_PATH as EVENTS_PATH
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
-EVENTS_PATH = ROOT / "output" / "emoji_events.json"
 EMOJI_DIR = ROOT / "assets" / "emoji"
 
 INPUT_PATH = (
