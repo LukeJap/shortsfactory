@@ -318,6 +318,7 @@ class AIClipHunterMixin:
         self.update_selection_label()
         self.clear_visual_plan_display()
         self.selected_sfx_clip_id = None
+        self.selected_emoji_clip_id = None
         self.refresh_editor_asset_timeline()
 
         if hasattr(
@@ -754,6 +755,7 @@ class AIClipHunterMixin:
 
         self.update_selection_label()
         self.selected_sfx_clip_id = None
+        self.selected_emoji_clip_id = None
         self.refresh_editor_asset_timeline()
 
         self.seek_video(

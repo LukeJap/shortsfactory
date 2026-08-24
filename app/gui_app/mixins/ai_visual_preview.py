@@ -793,6 +793,7 @@ class AIVisualPreviewMixin:
                 continue
             self.selected_visual_slot_index = index
             self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
             self.timeline.set_selected_asset_clip(
                 normalized_id
             )

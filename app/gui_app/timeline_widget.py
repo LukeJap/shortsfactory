@@ -200,8 +200,9 @@ class SuggestionSlider(QSlider):
         )
 
         if height < 218:
-            # Compact layout: preserve all four editor lanes rather than
-            # sacrificing SFX when the center workspace is vertically tight.
+            # Compact layout: preserve all five editor lanes rather than
+            # sacrificing SFX/EMOJI when the center workspace is vertically
+            # tight.
             ruler_top = 8
             ruler_bottom = 30
             video_top = 36
@@ -211,7 +212,7 @@ class SuggestionSlider(QSlider):
                 4,
                 height
                 - video_top
-                - lane_gap * 3
+                - lane_gap * 4
                 - bottom_margin,
             )
             video_height = max(
@@ -235,12 +236,21 @@ class SuggestionSlider(QSlider):
                     * 0.27
                 ),
             )
-            sfx_height = max(
-                1,
+            remaining_height = max(
+                2,
                 available_lane_height
                 - video_height
                 - edit_height
                 - visual_height,
+            )
+            sfx_height = max(
+                1,
+                remaining_height // 2,
+            )
+            emoji_height = max(
+                1,
+                remaining_height
+                - sfx_height,
             )
         else:
             ruler_top = 14
@@ -297,12 +307,24 @@ class SuggestionSlider(QSlider):
         sfx_top = visual_top + visual_height + lane_gap
 
         if height >= 218:
-            sfx_height = max(
-                1,
+            remaining_height = max(
+                2,
                 height
                 - sfx_top
+                - lane_gap
                 - bottom_margin,
             )
+            sfx_height = max(
+                1,
+                remaining_height // 2,
+            )
+            emoji_height = max(
+                1,
+                remaining_height
+                - sfx_height,
+            )
+
+        emoji_top = sfx_top + sfx_height + lane_gap
 
         return {
             "ruler_top": ruler_top,
@@ -315,8 +337,10 @@ class SuggestionSlider(QSlider):
             "visual_height": visual_height,
             "sfx_top": sfx_top,
             "sfx_height": sfx_height,
-            "lane_bottom": sfx_top
-            + sfx_height,
+            "emoji_top": emoji_top,
+            "emoji_height": emoji_height,
+            "lane_bottom": emoji_top
+            + emoji_height,
         }
 
     def emit_viewport_changed(self):
@@ -1291,6 +1315,15 @@ class SuggestionSlider(QSlider):
                 max(
                     18,
                     lanes["sfx_height"] - 8,
+                ),
+            )
+
+        if kind == "EMOJI":
+            return (
+                lanes["emoji_top"] + 4,
+                max(
+                    18,
+                    lanes["emoji_height"] - 8,
                 ),
             )
 
@@ -2561,6 +2594,19 @@ class SuggestionSlider(QSlider):
                 156,
                 245,
             )
+        elif kind == "EMOJI":
+            fill = QColor(
+                224,
+                186,
+                46,
+                238 if active else 88,
+            )
+            edge = QColor(
+                255,
+                236,
+                168,
+                245,
+            )
         else:
             fill = QColor(
                 72,
@@ -2726,6 +2772,8 @@ class SuggestionSlider(QSlider):
         visual_height = lanes["visual_height"]
         sfx_top = lanes["sfx_top"]
         sfx_height = lanes["sfx_height"]
+        emoji_top = lanes["emoji_top"]
+        emoji_height = lanes["emoji_height"]
         lane_bottom = min(
             height
             - 10,
@@ -2798,6 +2846,11 @@ class SuggestionSlider(QSlider):
                 "SFX",
                 sfx_top,
                 sfx_height,
+            ),
+            (
+                "EMOJI",
+                emoji_top,
+                emoji_height,
             ),
         ]
 
@@ -2877,6 +2930,8 @@ class SuggestionSlider(QSlider):
             + visual_height,
             sfx_top
             + sfx_height,
+            emoji_top
+            + emoji_height,
         ):
             painter.drawLine(
                 left,

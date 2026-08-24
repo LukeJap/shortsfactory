@@ -250,6 +250,7 @@ class ShortsFactoryWindow(
         self.pending_visual_selected_slot_id: str | None = None
         self.editor_asset_plan: dict = load_editor_asset_plan()
         self.selected_sfx_clip_id: str | None = None
+        self.selected_emoji_clip_id: str | None = None
         self.sfx_preview_triggered: set[str] = set()
         self.active_visual_preview_clip_id: str | None = None
         self.active_visual_preview_signature: tuple | None = None
@@ -1275,6 +1276,48 @@ class ShortsFactoryWindow(
         sfx_context_layout.addWidget(self.disable_sfx_button)
         sfx_context_layout.addWidget(self.delete_sfx_button)
 
+        self.emoji_context_frame = QFrame()
+        self.emoji_context_frame.setObjectName("SubPanel")
+        self.emoji_context_frame.setVisible(False)
+
+        emoji_context_layout = QHBoxLayout(self.emoji_context_frame)
+        emoji_context_layout.setContentsMargins(8, 6, 8, 6)
+        emoji_context_layout.setSpacing(8)
+
+        emoji_selected_label = QLabel("Selected Emoji")
+        emoji_selected_label.setObjectName("MicroLabel")
+
+        self.emoji_clip_label = QLabel("No emoji selected")
+        self.emoji_clip_label.setObjectName("MusicLabel")
+        self.emoji_clip_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        self.swap_emoji_button = QPushButton("Swap")
+        self.swap_emoji_button.setObjectName("QuietButton")
+        self.swap_emoji_button.setEnabled(False)
+        self.swap_emoji_button.setToolTip(
+            "Replace the selected emoji reaction while keeping its timing."
+        )
+        self.swap_emoji_button.clicked.connect(self.swap_selected_emoji_clip)
+
+        self.disable_emoji_button = QPushButton("Disable")
+        self.disable_emoji_button.setObjectName("QuietButton")
+        self.disable_emoji_button.setEnabled(False)
+        self.disable_emoji_button.clicked.connect(self.toggle_selected_emoji_clip)
+
+        self.delete_emoji_button = QPushButton("Delete")
+        self.delete_emoji_button.setObjectName("CutButton")
+        self.delete_emoji_button.setEnabled(False)
+        self.delete_emoji_button.clicked.connect(self.delete_selected_emoji_clip)
+
+        emoji_context_layout.addWidget(emoji_selected_label)
+        emoji_context_layout.addWidget(self.emoji_clip_label, 1)
+        emoji_context_layout.addWidget(self.swap_emoji_button)
+        emoji_context_layout.addWidget(self.disable_emoji_button)
+        emoji_context_layout.addWidget(self.delete_emoji_button)
+
         audio_top_row.addWidget(audio_title)
         audio_top_row.addSpacing(12)
         audio_top_row.addWidget(sfx_mode_label)
@@ -2044,6 +2087,9 @@ class ShortsFactoryWindow(
         )
         visual_layout.addWidget(
             self.visual_inspector
+        )
+        visual_layout.addWidget(
+            self.emoji_context_frame
         )
 
         transcript_frame = QFrame()

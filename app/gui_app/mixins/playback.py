@@ -106,6 +106,7 @@ class PlaybackMixin:
         self.timeline.clear_suggestions()
         self.timeline.clear_editor_overlays()
         self.selected_sfx_clip_id = None
+        self.selected_emoji_clip_id = None
         self.load_editor_asset_plan_state()
 
         self.ai_candidates = []
@@ -995,6 +996,7 @@ class PlaybackMixin:
         else:
             self.clear_visual_plan_display()
             self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
             self.refresh_editor_asset_timeline()
 
         if hasattr(

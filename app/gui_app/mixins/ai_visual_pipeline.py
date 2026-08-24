@@ -1126,6 +1126,7 @@ class AIVisualPipelineMixin:
 
         self.selected_visual_slot_index = slot_index
         self.selected_sfx_clip_id = None
+        self.selected_emoji_clip_id = None
 
         self.player.setPosition(
             position

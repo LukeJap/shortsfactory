@@ -12,10 +12,22 @@ import json
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QProcess, QSize, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtWidgets import (
+    QDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from editor_asset_plan import (
     clips_of_kind,
@@ -25,6 +37,8 @@ from editor_asset_plan import (
     set_editor_plan_context,
     upsert_clip,
 )
+from emoji_overlay import normalize_emoji
+from make_captions import load_local_reaction_assets
 from sfx_engine import asset_metadata_for_path
 
 from ..constants import ROOT
@@ -79,6 +93,7 @@ class EditorAssetsMixin:
             clear_clips_on_change=clear_on_change,
         )
         self.selected_sfx_clip_id = None
+        self.selected_emoji_clip_id = None
         self.save_editor_asset_plan_state()
         self.refresh_editor_asset_timeline()
 
@@ -172,6 +187,7 @@ class EditorAssetsMixin:
             if kind not in {
                 "SFX",
                 "AI_VISUAL",
+                "EMOJI",
             }:
                 continue
 
@@ -202,7 +218,10 @@ class EditorAssetsMixin:
                 self.visible_editor_asset_clips()
             )
 
-            selected_asset_id = self.selected_sfx_clip_id
+            selected_asset_id = (
+                self.selected_sfx_clip_id
+                or self.selected_emoji_clip_id
+            )
             if (
                 self.selected_visual_slot_index is not None
                 and 0
@@ -227,6 +246,7 @@ class EditorAssetsMixin:
                 selected_asset_id
             )
         self.update_sfx_inspector()
+        self.update_emoji_inspector()
         if hasattr(self, "ai_visual_preview_overlay"):
             self.update_ai_visual_preview_overlay(
                 self.player.position()
@@ -293,6 +313,18 @@ class EditorAssetsMixin:
         )
 
 
+    def selected_emoji_clip(self) -> dict | None:
+
+        if not self.editor_asset_context_matches_current_selection():
+            return None
+        if not self.selected_emoji_clip_id:
+            return None
+        return self.find_editor_clip(
+            "EMOJI",
+            self.selected_emoji_clip_id,
+        )
+
+
     def editor_asset_clip_selected(
         self,
         kind: str,
@@ -310,6 +342,7 @@ class EditorAssetsMixin:
 
         if normalized_kind == "AI_VISUAL":
             self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
 
             for index, slot in enumerate(
                 self.visual_plan_slots
@@ -381,10 +414,61 @@ class EditorAssetsMixin:
 
             return
 
+        if normalized_kind == "EMOJI":
+            self.selected_visual_slot_index = None
+            self.selected_sfx_clip_id = None
+            self.refresh_visual_plan_display()
+
+            self.selected_emoji_clip_id = str(
+                clip_id
+                or ""
+            )
+            self.timeline.set_selected_asset_clip(
+                self.selected_emoji_clip_id
+            )
+            self.update_emoji_inspector()
+
+            clip = self.selected_emoji_clip()
+            if clip is not None:
+                try:
+                    start_ms = int(
+                        round(
+                            float(
+                                clip.get(
+                                    "start",
+                                    0.0,
+                                )
+                                or 0.0
+                            )
+                            * 1000
+                        )
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    start_ms = self.player.position()
+
+                self.player.setPosition(
+                    start_ms
+                )
+                self.timeline.setValue(
+                    start_ms
+                )
+                self.reveal_timeline_time(
+                    start_ms
+                )
+                self.update_emoji_preview_overlay(
+                    self.player.position()
+                )
+
+            return
+
         if normalized_kind != "SFX":
             return
 
         self.selected_visual_slot_index = None
+        self.selected_emoji_clip_id = None
         self.refresh_visual_plan_display()
 
         self.selected_sfx_clip_id = str(
@@ -517,6 +601,7 @@ class EditorAssetsMixin:
                 or ""
             )
             self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
 
             for index, slot in enumerate(
                 self.visual_plan_slots
@@ -556,6 +641,25 @@ class EditorAssetsMixin:
 
             return
 
+        if normalized_kind == "EMOJI":
+            clip["kind"] = "EMOJI"
+            clip["manual_override"] = True
+            clip["locked"] = True
+            self.editor_asset_plan = upsert_clip(
+                self.editor_asset_plan,
+                clip,
+            )
+            self.save_editor_asset_plan_state()
+            self.selected_emoji_clip_id = str(
+                clip.get(
+                    "id",
+                    "",
+                )
+                or ""
+            )
+            self.update_emoji_inspector()
+            return
+
         if normalized_kind != "SFX":
             return
 
@@ -574,6 +678,7 @@ class EditorAssetsMixin:
             )
             or ""
         )
+        self.selected_emoji_clip_id = None
         self.update_sfx_inspector()
 
 
@@ -595,6 +700,17 @@ class EditorAssetsMixin:
             )
             return
 
+        if normalized_kind == "EMOJI":
+            self.selected_visual_slot_index = None
+            self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = str(
+                clip_id
+                or ""
+            )
+            self.update_emoji_inspector()
+            self.swap_selected_emoji_clip()
+            return
+
         if normalized_kind != "SFX":
             return
 
@@ -602,6 +718,7 @@ class EditorAssetsMixin:
             clip_id
             or ""
         )
+        self.selected_emoji_clip_id = None
         self.update_sfx_inspector()
         self.swap_selected_sfx_clip()
 
@@ -914,6 +1031,267 @@ class EditorAssetsMixin:
         )
         self.save_editor_asset_plan_state()
         self.update_sfx_inspector()
+
+
+    def update_emoji_inspector(self):
+
+        if not hasattr(
+            self,
+            "emoji_clip_label",
+        ):
+            return
+
+        clip = self.selected_emoji_clip()
+        if clip is None or bool(
+            clip.get(
+                "deleted",
+                False,
+            )
+        ):
+            if hasattr(
+                self,
+                "emoji_context_frame",
+            ):
+                self.emoji_context_frame.setVisible(
+                    False
+                )
+            self.emoji_clip_label.setText(
+                "No emoji selected"
+            )
+            self.swap_emoji_button.setEnabled(False)
+            self.disable_emoji_button.setEnabled(False)
+            self.delete_emoji_button.setEnabled(False)
+            self.disable_emoji_button.setText("Disable")
+            return
+
+        self.emoji_context_frame.setVisible(
+            True
+        )
+        label = str(
+            clip.get(
+                "label",
+                clip.get(
+                    "emoji",
+                    "Emoji",
+                ),
+            )
+            or "Emoji"
+        )
+        self.emoji_clip_label.setText(
+            f"Emoji: {label}"
+        )
+        self.swap_emoji_button.setEnabled(True)
+        self.disable_emoji_button.setEnabled(True)
+        self.delete_emoji_button.setEnabled(True)
+        self.disable_emoji_button.setText(
+            "Enable"
+            if clip.get(
+                "active",
+                True,
+            )
+            is False
+            else "Disable"
+        )
+
+
+    def open_editor_emoji_picker(
+        self,
+        clip_id: str,
+    ):
+
+        clip = self.find_editor_clip(
+            "EMOJI",
+            clip_id,
+        )
+        if clip is None:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Change Emoji Reaction")
+        dialog.setMinimumWidth(420)
+
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+
+        hint = QLabel(
+            f"Currently: {clip.get('emoji', '?')} "
+            f"(\"{clip.get('label', '')}\")"
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(320)
+
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(6)
+
+        assets = load_local_reaction_assets()
+        columns = 5
+
+        for index, asset in enumerate(assets):
+            path = asset["path"]
+            button = QPushButton()
+            button.setToolTip(
+                asset.get(
+                    "description",
+                    path.stem,
+                )
+            )
+            button.setFixedSize(64, 64)
+            button.setIconSize(QSize(52, 52))
+
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                button.setIcon(QIcon(pixmap))
+            else:
+                button.setText(path.stem[:6])
+
+            button.clicked.connect(
+                lambda checked=False, chosen_path=path, chosen_description=asset.get(
+                    "description", path.stem
+                ): self.apply_editor_emoji_picker_choice(
+                    clip_id,
+                    dialog,
+                    asset_path=chosen_path,
+                    description=chosen_description,
+                )
+            )
+            grid.addWidget(button, index // columns, index % columns)
+
+        scroll.setWidget(grid_widget)
+        layout.addWidget(scroll)
+
+        custom_row = QHBoxLayout()
+        custom_label = QLabel("Or type a custom emoji:")
+        custom_input = QLineEdit()
+        custom_input.setPlaceholderText("e.g. \U0001f525")
+        custom_input.setMaximumWidth(80)
+        custom_use_button = QPushButton("Use")
+        custom_use_button.clicked.connect(
+            lambda: self.apply_editor_emoji_picker_choice(
+                clip_id,
+                dialog,
+                custom_emoji=custom_input.text(),
+            )
+        )
+        custom_row.addWidget(custom_label)
+        custom_row.addWidget(custom_input)
+        custom_row.addWidget(custom_use_button)
+        custom_row.addStretch()
+        layout.addLayout(custom_row)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(dialog.reject)
+        layout.addWidget(cancel_button)
+
+        dialog.exec()
+
+
+    def apply_editor_emoji_picker_choice(
+        self,
+        clip_id: str,
+        dialog,
+        asset_path=None,
+        description: str = "",
+        custom_emoji: str = "",
+    ):
+
+        clip = self.find_editor_clip(
+            "EMOJI",
+            clip_id,
+        )
+        if clip is None:
+            dialog.reject()
+            return
+
+        if asset_path is not None:
+            clip["asset_path"] = str(
+                asset_path
+            )
+            clip["asset_description"] = description
+            clip["asset_type"] = "local"
+            clip["emoji"] = description
+            clip["label"] = description
+        else:
+            emoji = normalize_emoji(
+                custom_emoji
+            )
+            if not emoji:
+                dialog.reject()
+                return
+            clip["emoji"] = emoji
+            clip["label"] = emoji
+            clip.pop("asset_path", None)
+            clip.pop("asset_description", None)
+            clip.pop("asset_type", None)
+
+        clip["manual_override"] = True
+        clip["content_override"] = True
+        clip["locked"] = True
+
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+        dialog.accept()
+
+
+    def swap_selected_emoji_clip(self):
+
+        clip = self.selected_emoji_clip()
+        if clip is None:
+            return
+
+        self.open_editor_emoji_picker(
+            self.selected_emoji_clip_id
+        )
+
+
+    def toggle_selected_emoji_clip(self):
+
+        clip = self.selected_emoji_clip()
+        if clip is None:
+            return
+
+        clip["active"] = not bool(
+            clip.get(
+                "active",
+                True,
+            )
+        )
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
+
+
+    def delete_selected_emoji_clip(self):
+
+        clip = self.selected_emoji_clip()
+        if clip is None:
+            return
+
+        clip["active"] = False
+        clip["deleted"] = True
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(
+            self.editor_asset_plan,
+            clip,
+        )
+        self.selected_emoji_clip_id = None
+        self.save_editor_asset_plan_state()
+        self.refresh_editor_asset_timeline()
 
 
     def play_sfx_preview_clip(
