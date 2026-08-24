@@ -2317,6 +2317,72 @@ class ShortsFactoryWindow(
             None,
         )
 
+        # Resize-handle hover: keep the corner/edge handles visible while the
+        # pointer is over the overlay or a handle itself, even when the
+        # native video surface swallows Enter/Leave on the child overlay
+        # widget (see the comment below on the move-drag path for why that
+        # matters).
+        if (
+            event.type() == QEvent.Type.Enter
+            and (
+                watched is overlay
+                or watched in getattr(self, "ai_visual_resize_handles", {}).values()
+                or watched in getattr(self, "ai_visual_resize_edge_handles", {}).values()
+            )
+        ):
+            self.set_ai_visual_resize_hover(True)
+        elif (
+            event.type() == QEvent.Type.Leave
+            and (
+                watched is overlay
+                or watched in getattr(self, "ai_visual_resize_handles", {}).values()
+                or watched in getattr(self, "ai_visual_resize_edge_handles", {}).values()
+            )
+        ):
+            self.set_ai_visual_resize_hover(False)
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and watched is video_widget
+            and overlay is not None
+            and overlay.isVisible()
+            and not self.visual_preview_dragging
+            and not getattr(self, "visual_resize_dragging", False)
+        ):
+            try:
+                hovering = overlay.geometry().adjusted(
+                    -8, -8, 8, 8
+                ).contains(event.position().toPoint())
+            except Exception:
+                hovering = False
+            self.set_ai_visual_resize_hover(hovering)
+
+        # Resize-handle drag takes priority over the overlay's own move-drag
+        # when a corner/edge handle overlaps the overlay's own geometry.
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "ai_visual_resize_handles")
+        ):
+            if self.begin_visual_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "visual_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_visual_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "visual_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_visual_resize_drag()
+            event.accept()
+            return True
+
         # QVideoWidget can use a native video surface on Windows, so mouse
         # events do not always arrive on the child QLabel overlay. Accept the
         # drag from either the overlay itself or the video widget when the

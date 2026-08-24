@@ -477,6 +477,35 @@ def coerce_position(
     )
 
 
+def coerce_stretch(
+    value: Any,
+) -> float:
+    """
+    Independent-axis multiplier layered on top of coerce_scale()'s
+    uniform value, written only by an edge-handle drag in the placement
+    editor. Defaults to 1.0 (no stretch), so any clip without this field
+    renders identically to before this existed.
+    """
+
+    try:
+        number = float(
+            value
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        number = 1.0
+
+    return max(
+        0.5,
+        min(
+            2.0,
+            number,
+        ),
+    )
+
+
 def scale_opacity(
     mode: str,
 ) -> float:
@@ -532,6 +561,18 @@ def build_filter(
         scale = coerce_scale(
             asset.get(
                 "scale",
+                1.0,
+            )
+        )
+        stretch_x = coerce_stretch(
+            asset.get(
+                "stretch_x",
+                1.0,
+            )
+        )
+        stretch_y = coerce_stretch(
+            asset.get(
+                "stretch_y",
                 1.0,
             )
         )
@@ -632,6 +673,7 @@ def build_filter(
                         round(
                             CARD_MAX_WIDTH
                             * scale
+                            * stretch_x
                         )
                     ),
                 ),
@@ -644,6 +686,7 @@ def build_filter(
                         round(
                             CARD_MAX_HEIGHT
                             * scale
+                            * stretch_y
                         )
                     ),
                 ),
