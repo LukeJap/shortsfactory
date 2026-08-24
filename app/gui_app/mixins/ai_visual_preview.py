@@ -1,3 +1,15 @@
+"""
+AIVisualPreviewMixin: the live, draggable AI visual cutaway overlay shown
+on top of the video preview -- the original template this session's
+placement-editor work (emoji_preview.py, caption_preview.py) followed.
+Converts a slot's stored position_x/position_y fraction (-1..1) and
+display_mode (OVERLAY_CARD/FULL_FRAME_CONTAIN/FULL_FRAME_COVER) into
+screen-space geometry (ai_visual_preview_canvas_rect(),
+visual_axis_position()), handles drag-to-reposition via the app-wide
+eventFilter in main_window.py, and keeps the right-panel numeric fields
+(ai_visual_slots.py) in sync in both directions.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

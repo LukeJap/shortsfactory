@@ -1,3 +1,10 @@
+"""
+AIClipHunterMixin: the "Find Best Clips" flow. Kicks off transcription
+(if needed) then analyze.py as a subprocess to score candidate clip
+windows, renders the resulting candidate cards in the right panel, and
+handles selecting one into the timeline.
+"""
+
 from __future__ import annotations
 
 import json

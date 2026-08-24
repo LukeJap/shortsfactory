@@ -1,3 +1,13 @@
+"""
+DEAD CODE as of this pass: face-aware horizontal reframing (auto-crop a
+landscape source to 9:16 by tracking faces) from an earlier design where
+the base render didn't already fill the frame. Explicitly disabled when
+crop-to-fill was adopted for render_base_video() -- see the comment in
+gui_app/mixins/render_pipeline.py referencing this. Left in place
+(untouched by the canvas_config.py/pipeline_paths.py consolidation
+passes) rather than deleted, in case reframing is wanted again later.
+"""
+
 from __future__ import annotations
 
 import argparse

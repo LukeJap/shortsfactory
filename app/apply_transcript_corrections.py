@@ -1,3 +1,9 @@
+"""
+Merges the user's manual transcript corrections (edited/deleted lines
+from the GUI's transcript editor panel, output/transcript_corrections.json)
+into the working transcript/edit plan before later pipeline stages run.
+"""
+
 from __future__ import annotations
 
 import json

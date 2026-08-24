@@ -1,3 +1,13 @@
+"""
+PlaybackMixin: the preview video player -- load/play/pause/seek, the
+timeline scrubbing/trim-handle drag paths (both throttled to at most one
+real player seek per 80ms during an active drag, with a synchronous
+repaint nudge, to work around this Qt Multimedia backend never
+repainting a paused video after a bare setPosition() call), and volume
+control. Also fires the preview-overlay refresh calls (AI visual/emoji/
+caption placement previews) on every position change.
+"""
+
 from __future__ import annotations
 
 import time

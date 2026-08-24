@@ -1,3 +1,11 @@
+"""
+TranscriptMixin: transcript preloading (background subtitles.py run as
+soon as a source video loads, ahead of Find Best Clips) and the
+right-panel transcript editor (click a line to correct/cut it).
+Content-hash-based cache checking (cached_transcript_ready_for_current_source())
+avoids re-transcribing a source video the app has already processed.
+"""
+
 from __future__ import annotations
 
 import json

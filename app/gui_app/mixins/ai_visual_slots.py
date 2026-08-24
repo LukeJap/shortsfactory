@@ -1,3 +1,13 @@
+"""
+AIVisualSlotsMixin: owns the AI visual cutaway "slot" data model and the
+right-panel inspector UI (position/scale/display-mode sliders, variant
+keep/generate-more workflow, replan mode). Largest file in gui_app.
+Writes/reads output/ai_visual_plan.json (save_ai_visual_plan()) and
+mirrors slot state into output/editor_asset_plan.json
+(sync_visual_slot_to_editor_asset_plan()) so the timeline and the live
+preview overlay (ai_visual_preview.py) both see the same data.
+"""
+
 from __future__ import annotations
 
 import json

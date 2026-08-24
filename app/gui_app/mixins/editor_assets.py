@@ -1,3 +1,11 @@
+"""
+EditorAssetsMixin: SFX/AI-visual "editor asset" clip management on the
+timeline -- browsing the local SFX library (SFX_DIR), invoking
+sfx_engine.py to (re)plan automatic SFX placement, and the shared
+editor_asset_plan.json read/write context (ensure_current_editor_asset_
+context()) that also backs the AI visual slots system.
+"""
+
 from __future__ import annotations
 
 import json

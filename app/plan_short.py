@@ -1,3 +1,11 @@
+"""
+Early-stage LLM planning script: turns a transcript + analysis.json into
+a short_plan.json (candidate short-form video plan) via a local Ollama
+call. Predates/overlaps with analyze.py's more developed "Find Best
+Clips" flow; verify current usage before relying on this as the live
+path for clip selection.
+"""
+
 from __future__ import annotations
 
 import json

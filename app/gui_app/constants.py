@@ -1,3 +1,12 @@
+"""
+Small shared constants for the gui_app package: the repo-root path (see
+the comment on ROOT below), supported video file extensions for the
+import dialog/drop zone, and a couple of string constants used to tag/
+filter AI-generated content. See settings_keys.py, canvas_config.py
+(app/), and pipeline_paths.py (app/) for the other small config modules
+this package/repo follows the same pattern for.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

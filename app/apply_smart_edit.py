@@ -1,3 +1,15 @@
+"""
+STEP 5 of the render pipeline ("Combined Smart Edit"): merges pause cuts
+(from auto_cut.py's edit_plan.json), approved AI semantic cuts (from
+semantic_edit.py's semantic_edit_plan.json), and manual transcript cuts
+into one final cut list, applies a natural-pacing safety budget (caps how
+much automatic editing can remove and how tightly cuts can be spaced),
+and re-encodes short1_base.mp4 into short1_tight.mp4 -- unless the final
+cut list is identical to what auto_cut.py's own preview render already
+produced, in which case that file is reused instead of a redundant
+re-encode.
+"""
+
 from __future__ import annotations
 
 import json

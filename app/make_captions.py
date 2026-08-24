@@ -1,3 +1,17 @@
+"""
+STEP 7 of the render pipeline: builds the karaoke-style ASS caption file
+(word-by-word highlighting, semantic emphasis sizing/color/pop) and picks
+the sparse set of emoji reaction events for the clip (choose_emoji_events()),
+writing output/captions.ass and output/emoji_events.json. Also owns the
+caption block position override (\\pos() tag, clamped to the safe drag
+range shared with the GUI preview -- see caption_position_override_tag()
+and render.py's clamp_caption_drag_position()) and the merge logic that
+carries a manually-dragged emoji position/content forward across a
+re-render (apply_emoji_position_overrides()). Note: the actual default
+caption position at burn time comes from render.py's force_style, not
+this file's own MARGIN_V -- see the comment on that constant below.
+"""
+
 from __future__ import annotations
 
 import json

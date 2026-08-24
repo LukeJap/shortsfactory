@@ -1,3 +1,16 @@
+"""
+STEP 9 of the render pipeline: composites emoji reaction overlays
+(output/emoji_events.json, written by make_captions.py's
+choose_emoji_events() during the real render, or previewed early by
+emoji_planner.py) onto the captioned video via an ffmpeg overlay filter.
+Reads each event's stored position_x/position_y fraction if present
+(set via drag or the double-click picker in gui_app/mixins/
+emoji_preview.py), falling back to a fixed 4-slot round-robin table for
+events that predate that feature. Downloads/caches Twemoji PNGs for
+plain-unicode emoji; local "reaction" image assets (assets/emoji/) are
+used directly.
+"""
+
 from __future__ import annotations
 
 import json

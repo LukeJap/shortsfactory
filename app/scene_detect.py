@@ -1,3 +1,10 @@
+"""
+Detects hard scene/shot changes in a video range using ffmpeg's scene
+scoring filter. Shared helper used by smart_motion.py (to avoid panning
+motion across a cut) and temporal_edit.py (to place whip-transition/
+speed-ramp effects at real camera cuts rather than arbitrary points).
+"""
+
 from __future__ import annotations
 
 import argparse

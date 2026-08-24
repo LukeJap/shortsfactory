@@ -1,3 +1,11 @@
+"""
+Estimates which person is the visually active speaker in a multi-person
+shot, using local face detection plus mouth-region motion analysis (no
+audio-based diarization). Only consumer found is smart_reframe.py, which
+is itself dead code (see that file's docstring) -- verify this is still
+reachable from the active pipeline before assuming it runs.
+"""
+
 from __future__ import annotations
 
 import argparse

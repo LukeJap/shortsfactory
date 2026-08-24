@@ -1,3 +1,13 @@
+"""
+CaptionPreviewMixin: the draggable caption-block position override in the
+placement editor. Shows a single box (the currently-active transcript
+line, or a placeholder) at the caption's current anchor point, draggable
+within the same safe floor/ceiling render.py's real burn-in respects
+(clamp_caption_drag_position()) -- so a drag can never land somewhere the
+render would silently reject/reposition. Right-click resets to the
+computed default (see DEFAULT_CAPTION_POSITION_X/Y below).
+"""
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt

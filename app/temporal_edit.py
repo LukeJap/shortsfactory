@@ -1,3 +1,15 @@
+"""
+Applies time-based editing effects (freeze frames, speed ramps/up/down,
+micro-replays, reverse blips, whip transitions) at semantically-chosen
+moments and real scene cuts (scene_detect.py), runs before smart motion
+in the post-transcription pipeline (see subtitles.py's main()). Whip-
+transition and micro-replay/reverse-blip segments also get their own
+color-boost flash (eq contrast/saturation bump + white drawbox) layered
+independently on top of whatever visual_fx.py later applies to the whole
+clip -- confirmed intentional, not a double-application bug (see
+SHORTSFACTORY.md's render-log investigation notes).
+"""
+
 from __future__ import annotations
 
 import copy

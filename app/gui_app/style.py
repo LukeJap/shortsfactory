@@ -1,3 +1,13 @@
+"""
+The application's entire QSS stylesheet as a single string (STYLESHEET),
+applied once to the whole app in main_window.py's apply_style(). Dark/
+"gothic-industrial" theme: near-black panels (#09090A/#101012/#0A0A0B),
+off-white/cream text (#DED6C8), blood-red/rust accents (#741C28/#C9384F/
+#733B2D), muted grey secondary text (#B8AEA1/#918B84/#7E7670), sharp
+(not rounded) corners. See SHORTSFACTORY.md's Project Context section for
+the full visual-identity writeup.
+"""
+
 from __future__ import annotations
 
 STYLESHEET =            """

@@ -1,3 +1,12 @@
+"""
+STEP 3 ("Smart Edit"): detects dead-air/long pauses in the transcript and
+renders a preview tight cut (short1_base.mp4 -> short1_tight.mp4),
+writing output/edit_plan.json. This is a preview pass -- apply_smart_edit.py
+(STEP 5) re-derives the authoritative cut list (merging in semantic +
+manual cuts and a pacing safety budget) and re-encodes again, reusing
+this stage's output only when the two cut lists end up identical.
+"""
+
 from __future__ import annotations
 
 import json

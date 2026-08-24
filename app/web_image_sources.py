@@ -1,3 +1,9 @@
+"""
+Openly-licensed web image search/download helper (currently Openverse),
+used by the GUI's web image search dialog (gui_app/mixins/web_images.py)
+as an alternative to AI-generated visual cutaway images.
+"""
+
 from __future__ import annotations
 
 import hashlib

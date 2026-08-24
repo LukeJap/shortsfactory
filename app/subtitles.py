@@ -1,3 +1,17 @@
+"""
+Local Whisper transcription (STEP 2 and STEP 6 of the render pipeline --
+transcribes the base clip, then again after cuts are applied) with a
+content-hash-based cache (source_fingerprint()/cache_path_for_video(),
+keyed on actual file bytes rather than mtime, since STEP 2/6 both write
+to fixed, repeatedly-overwritten paths where mtime alone can never
+usefully cache-hit). Also runs the post-transcription pipeline stages in
+sequence: transcript corrections, temporal edit, smart motion, AI
+visuals, visual FX (see main()'s maybe_apply_* calls). Following the
+feature/LukeV2 merge, can alternatively reuse/remap the full-source
+transcript through the applied cuts (--remap-through-cuts) instead of
+re-running Whisper at all -- see remap_transcript_through_edit_plan().
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,18 @@
+"""
+ShortsFactoryWindow, the QMainWindow that composes the entire desktop
+app, and its main() launcher. Owns window/UI construction (build_ui() and
+friends: the three-column layout described in SHORTSFACTORY.md's Project
+Context), QSettings load/save, QProcess setup for every subprocess the
+GUI can launch (render, transcript preload, AI visual planning, emoji
+preview planning), keyboard shortcuts, and the single app-wide
+eventFilter() that all the placement-editor drag interactions (AI
+visual/emoji/caption preview) route through. Everything else lives in
+mixins/ -- see each mixin file's own docstring for what it owns; this
+class's own body is mostly __init__ and layout construction, with method
+bodies for each functional area coming from whichever mixin implements
+them.
+"""
+
 from __future__ import annotations
 
 import sys

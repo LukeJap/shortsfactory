@@ -1,3 +1,12 @@
+"""
+SettingsMixin: change handlers + persistence for the app's editable
+render preferences (transcription quality, edit-energy tier, color-grade
+fx_intensity, SFX mode) -- each setter updates in-memory state, saves to
+QSettings (see settings_keys.py for the key names), and save_render_settings()
+serializes the current set into render_settings.json for the pipeline to
+read.
+"""
+
 from __future__ import annotations
 
 from visual_emphasis import (

@@ -1,3 +1,9 @@
+"""
+Classifies video shots as close-up/medium/wide/multi-person using local
+OpenCV face detection. smart_motion.py uses shot type to size and cap the
+punch-in zoom effect (e.g. don't zoom too tight on an already-close shot).
+"""
+
 from __future__ import annotations
 
 import argparse

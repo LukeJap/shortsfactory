@@ -1,3 +1,15 @@
+"""
+The core render pipeline orchestrator (`python app/render.py --source ...
+--start ... --end ...`, invoked by the GUI's "Generate Final Video"
+button, gui_app/mixins/render_pipeline.py). Runs STEP 1 (crop-to-fill the
+selection to 1080x1920) through STEP 11 (organize output) in order,
+shelling out to the other app/*.py pipeline scripts as subprocesses --
+see main() for the exact STEP sequence. Also owns the caption safe-margin
+constants (CAPTION_SAFE_MARGIN_*, CAPTION_DRAG_MARGIN_*) and the shared
+clamp_caption_drag_position() used by both the real caption burn-in and
+the GUI's placement-editor preview.
+"""
+
 from __future__ import annotations
 
 import argparse

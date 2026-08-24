@@ -1,3 +1,11 @@
+"""
+Small, pure formatting/text utility functions shared across gui_app
+mixins: time-code formatting (format_time/format_precise_time family) and
+transcript-text helpers (e.g. detecting generic AI-editor phrasing via
+GENERIC_EDITOR_PHRASES). No Qt/widget dependencies -- safe to unit test
+directly.
+"""
+
 from __future__ import annotations
 
 import re

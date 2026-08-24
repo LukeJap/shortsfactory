@@ -1,3 +1,11 @@
+"""
+STEP 4 of the render pipeline: proposes and verifies safe semantic cuts
+(e.g. repeated ideas, filler) via two local Ollama calls -- an initial
+proposal pass and a stricter second-pass verifier -- writing
+output/semantic_edit_plan.json. apply_smart_edit.py (STEP 5) merges
+approved cuts here with pause cuts and manual cuts into the final edit.
+"""
+
 from __future__ import annotations
 
 import json

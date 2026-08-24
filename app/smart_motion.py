@@ -1,3 +1,13 @@
+"""
+Applies the automatic "punch-in" camera motion effect (ffmpeg zoompan --
+slow zoom/pan on emphasized words) before captions are burned in. Picks
+motion strength/timing from shot type (shot_type.py), scene cuts
+(scene_detect.py), and semantic emphasis (visual_emphasis.py), sized
+relative to the actual visible content rect rather than the full canvas
+(content_rect_from_settings()) so a punch-in zoom targets real content,
+not any letterboxing.
+"""
+
 from __future__ import annotations
 
 import json

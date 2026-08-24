@@ -1,3 +1,12 @@
+"""
+Checks whether a local Stable Diffusion image backend (Forge/
+Automatic1111 WebUI, default http://127.0.0.1:7860) is running, and can
+launch it if not -- with platform-specific launch paths/commands for
+Windows vs. macOS/Linux. Used by generate_ai_visual_assets.py and the
+GUI's Image AI status panel (gui_app/mixins/image_ai.py) before
+attempting local image generation.
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,12 @@
+"""
+Generates the actual AI visual cutaway images for each slot planned by
+ai_visual_planner.py (output/ai_visual_plan.json), via either a local
+Stable Diffusion backend (image_backend_status.py's Forge/WebUI
+provider) or the OpenAI image API, writing results into
+output/ai_visual_assets/ plus a manifest.json. apply_ai_visuals.py later
+composites the generated images into the render.
+"""
+
 from __future__ import annotations
 
 import argparse

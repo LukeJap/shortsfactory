@@ -1,3 +1,10 @@
+"""
+ImageAIMixin: local Stable Diffusion (Forge/WebUI) backend status display
+and launch control -- checks/refreshes connectivity via
+image_backend_status.py and lets the user launch the backend from the
+GUI if it isn't already running.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,15 @@
+"""
+Applies the baseline color grade (contrast/saturation/vignette, scaled by
+both edit-energy tier and the user-adjustable fx_intensity slider -- see
+baseline_filters()) plus semantic per-moment FX (RGB-split accent
+stripes, screen flashes, drawtext slam-text) driven by
+visual_emphasis.py's intensity curve. Runs after smart motion, before
+caption burn-in, in the post-transcription pipeline (subtitles.py's
+main()). Filters are computed relative to the actual visible content
+rect, not the full canvas, so effects like vignette falloff are
+calibrated to real content even if letterboxing is ever reintroduced.
+"""
+
 from __future__ import annotations
 
 import json

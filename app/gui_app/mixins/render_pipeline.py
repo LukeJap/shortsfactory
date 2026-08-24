@@ -1,3 +1,16 @@
+"""
+RenderPipelineMixin: the "Generate Final Video" button and everything
+downstream of clicking it -- builds render_settings.json via
+save_render_settings(), launches render.py as a QProcess, streams its
+output into both the render log widget and output/render_log.txt
+(overwritten fresh each render, for handing a complete log to an AI
+assistant or an issue report without truncation), and handles the
+success/failure/music-mix-follow-up flow. Every subprocess this app
+launches has PYTHONUNBUFFERED=1 set on its environment (see
+main_window.py) so this log actually reflects progress in real time
+rather than bunching up at the end.
+"""
+
 from __future__ import annotations
 
 import sys

@@ -1,3 +1,12 @@
+"""
+Last post-processing step: mixes background music underneath the
+finished, already-captioned video's dialogue track, ducking the music
+volume around SFX events (read from output/sfx_plan.json) so they stay
+audible. Invoked as a subprocess from the GUI's music mix flow
+(gui_app/mixins/music.py) after the main render/caption pipeline
+completes; replaces the video file in place via a temp file swap.
+"""
+
 from __future__ import annotations
 
 import argparse

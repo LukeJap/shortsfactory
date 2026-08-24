@@ -1,3 +1,14 @@
+"""
+The custom multi-lane timeline/editor canvas (SuggestionSlider) -- by far
+the most bespoke widget in the app, not a stock Qt component. Handles the
+source clip trim handles, AI clip-hunter suggestion ranges, and the
+stacked event lanes (transcript cuts, captions, smart motion, visual FX,
+AI visual/graphic events, SFX), plus zoom/pan (including trackpad
+horizontal scroll), drag-to-trim, and the app-wide custom Qt signals the
+rest of the GUI listens to for timeline interaction. Largest file in the
+gui_app package.
+"""
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QPoint

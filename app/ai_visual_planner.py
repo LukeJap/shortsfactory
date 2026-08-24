@@ -1,3 +1,14 @@
+"""
+Plans sparse AI-generated visual cutaway slots (position/scale/display
+mode placeholders, not the images themselves) for the currently selected
+clip, using a local Ollama LLM. Invoked as a subprocess by the GUI's
+"Plan Visuals" action (gui_app/mixins/ai_visual_pipeline.py), reading the
+full-source transcript + selection window + manual cuts, writing
+output/ai_visual_plan.json. generate_ai_visual_assets.py later turns
+these slots into actual images; apply_ai_visuals.py composites them into
+the render.
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,11 @@
+"""
+MusicMixin: background music track selection, volume, and the final
+post-render music mix step -- launches music_overlay.py as a subprocess
+after the main render/caption pipeline finishes, then calls
+finish_short_success() once mixing completes (or immediately, if no
+music track is selected).
+"""
+
 from __future__ import annotations
 
 import sys

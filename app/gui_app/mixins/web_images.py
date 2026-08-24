@@ -1,3 +1,11 @@
+"""
+WebImagesMixin: the web image search dialog for AI visual cutaways --
+queries openly-licensed image sources (web_image_sources.py, currently
+Openverse) as an alternative to generating images locally/via OpenAI, and
+wires a selected result into the same AI visual slot system
+ai_visual_slots.py owns.
+"""
+
 from __future__ import annotations
 
 import json

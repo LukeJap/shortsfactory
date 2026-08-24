@@ -1,3 +1,11 @@
+"""
+Two self-contained reusable widgets extracted from the original gui.py
+monolith: TimelineNavigator (the compact full-source overview strip above
+the main timeline) and DropZone (the drag-and-drop source video import
+area). Neither references ShortsFactoryWindow or any mixin -- pure,
+independently testable Qt widgets.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

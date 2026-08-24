@@ -1,3 +1,12 @@
+"""
+Read/write helpers for output/editor_asset_plan.json, the shared record
+of "editor asset" clips (AI_VISUAL and SFX kind) placed on the GUI's
+timeline -- their timing, source-video context (so stale clips from a
+previous selection aren't shown), and per-clip fields like an AI visual's
+position_x/position_y. Used by both the GUI (gui_app/mixins/
+ai_visual_slots.py, editor_assets.py) and sfx_engine.py.
+"""
+
 from __future__ import annotations
 
 import json

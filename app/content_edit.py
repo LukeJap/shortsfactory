@@ -1,3 +1,12 @@
+"""
+LLM-based content-trimming planner (targets a 25-40s final duration by
+proposing segment removals via a local Ollama call, then a second
+verification pass). NOT currently wired into the active render pipeline
+(render.py) or any GUI mixin -- semantic_edit.py is the live equivalent
+(STEP 4). Kept as a standalone, independently-runnable script; verify it
+is still unused before removing or before assuming it runs.
+"""
+
 from __future__ import annotations
 
 import json

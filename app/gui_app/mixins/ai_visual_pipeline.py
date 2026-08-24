@@ -1,3 +1,13 @@
+"""
+AIVisualPipelineMixin: orchestrates the "Plan Visuals" action --
+launches ai_visual_planner.py as a subprocess to plan AI visual cutaway
+slots for the current selection, and (as of this session) also triggers
+emoji_planner.py alongside it so default emoji placements are ready to
+preview/drag before any render happens. generate_ai_visual_assets.py
+(triggered separately once slots are planned) turns slots into actual
+images.
+"""
+
 from __future__ import annotations
 
 import json

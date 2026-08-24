@@ -1,3 +1,13 @@
+"""
+EmojiPreviewMixin: the draggable emoji reaction overlay in the placement
+editor. Triggers emoji_planner.py to compute default placements before
+any render, renders each active emoji as a draggable glyph/image (reusing
+the local reaction-asset cache from emoji_overlay.py, never downloading
+from the GUI thread), and provides the double-click picker (a grid of
+local reaction assets plus a custom-emoji text field) for changing which
+reaction is shown at a given moment.
+"""
+
 from __future__ import annotations
 
 import json

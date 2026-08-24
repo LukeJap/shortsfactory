@@ -1,3 +1,17 @@
+"""
+STEP 10 of the render pipeline: automatically selects and mixes sound
+effects (whoosh, impact, pop, ding, etc.) at semantically-chosen moments,
+scaling event density and per-category volume by edit-energy tier
+(ENERGY_LIMITS/VOLUME_BY_ENERGY below -- deliberately independent from
+visual_emphasis.py's ENERGY_PROFILES, see the comment on those). Largest
+file in the pipeline. Also provides asset_metadata_for_path(), used by
+the GUI's editor asset panel (gui_app/mixins/editor_assets.py) to
+describe SFX library files. Reuses apply_ai_visuals.py's interval-
+remapping helpers (keep_segments, map_source_interval_to_tight,
+map_tight_interval_to_final) to keep SFX event timing in sync with
+whatever cuts were applied.
+"""
+
 from __future__ import annotations
 
 import json

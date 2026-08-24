@@ -1,3 +1,16 @@
+"""
+Shared pure decision-logic library for the "how emphatic should this
+look" question across the pipeline: the canonical LOW/PUNCHY/MAXIMUM
+edit-energy tiers (ENERGY_PROFILES) that captions, smart motion, and
+visual FX all read from; render_settings.json read/write helpers
+(load_render_settings()/write_render_settings(), the shared settings
+file most pipeline stages consult); word-level caption emphasis
+classification (classify_word()); and content_rect_from_settings() for
+reading back the (currently always full-canvas) visible-content
+rectangle. No ffmpeg/subprocess work lives here, only functions pure
+enough to unit test directly -- see tests/test_visual_emphasis.py.
+"""
+
 from __future__ import annotations
 
 import json
