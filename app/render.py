@@ -706,6 +706,14 @@ def render_base_video(
         "-sn",
         "-dn",
 
+        # The source is often a long-form episode with its own chapter
+        # markers (e.g. "Opening Credits", "End Credits"); those are
+        # meaningless on an 11-second Short and would otherwise ride
+        # along, with shifted timestamps, through every later stage that
+        # derives its file from this one.
+        "-map_chapters",
+        "-1",
+
         "-vf",
         (
             # Fill the full 9:16 frame: scale up until the source covers
