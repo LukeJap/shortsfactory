@@ -151,6 +151,7 @@ class PlaybackMixin:
             "AI clips appear as purple ranges on V1. Drag IN / OUT handles to fine-tune the selected clip."
         )
         self.update_sfx_button_state()
+        self.update_emoji_generate_button_state()
         self.set_selection_loop_enabled(
             False
         )
@@ -1129,6 +1130,7 @@ class PlaybackMixin:
             self.update_transcript_panel()
 
         self.update_sfx_button_state()
+        self.update_emoji_generate_button_state()
 
     def preview_volume_changed(
         self,

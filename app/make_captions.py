@@ -59,16 +59,48 @@ except ImportError:
     from render import OUTPUT_HEIGHT, OUTPUT_WIDTH, clamp_caption_drag_position
 
 try:
+    from .apply_ai_visuals import (
+        keep_segments,
+        load_json,
+        map_source_interval_to_tight,
+        map_tight_interval_to_final,
+    )
+except ImportError:
+    from apply_ai_visuals import (
+        keep_segments,
+        load_json,
+        map_source_interval_to_tight,
+        map_tight_interval_to_final,
+    )
+
+try:
+    from .editor_asset_plan import (
+        clips_of_kind,
+        editor_plan_context_matches,
+        load_editor_asset_plan,
+    )
+except ImportError:
+    from editor_asset_plan import (
+        clips_of_kind,
+        editor_plan_context_matches,
+        load_editor_asset_plan,
+    )
+
+try:
     from .pipeline_paths import (
         CAPTIONS_PATH as OUTPUT_PATH,
+        COMBINED_EDIT_PLAN_PATH,
         EMOJI_EVENTS_PATH as EMOJI_OUTPUT_PATH,
         SUBTITLES_PATH as INPUT_PATH,
+        TEMPORAL_EDIT_PLAN_PATH,
     )
 except ImportError:
     from pipeline_paths import (
         CAPTIONS_PATH as OUTPUT_PATH,
+        COMBINED_EDIT_PLAN_PATH,
         EMOJI_EVENTS_PATH as EMOJI_OUTPUT_PATH,
         SUBTITLES_PATH as INPUT_PATH,
+        TEMPORAL_EDIT_PLAN_PATH,
     )
 
 
@@ -1342,6 +1374,153 @@ def build_caption(
     return " ".join(pieces)
 
 
+def as_float(
+    value,
+    default: float = 0.0,
+) -> float:
+
+    try:
+        return float(
+            value
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+def emoji_events_from_editor_plan(
+    render_settings: dict,
+) -> list[dict] | None:
+    """
+    If a pre-generated emoji plan exists ("Generate Emoji", stored as
+    EMOJI clips in output/editor_asset_plan.json) and its stored source
+    video/selection still matches this render, map each clip's absolute
+    source-video timing through any applied cuts and return the result as
+    the final, authoritative emoji events -- skipping
+    choose_emoji_events()'s automatic re-selection (and the position/
+    content override merge, since this plan already reflects whatever the
+    user last edited) entirely. Returns None when there is no matching
+    editor plan, so the caller falls back to today's automatic selection.
+    """
+
+    plan = load_editor_asset_plan()
+
+    clips = clips_of_kind(
+        plan,
+        "EMOJI",
+        active_only=True,
+    )
+    if not clips:
+        return None
+
+    source_video = str(
+        render_settings.get(
+            "source_video",
+            "",
+        )
+        or ""
+    )
+    selection_start = as_float(
+        render_settings.get(
+            "selection_start",
+            0.0,
+        )
+    )
+    selection_end = as_float(
+        render_settings.get(
+            "selection_end",
+            selection_start,
+        ),
+        selection_start,
+    )
+
+    if not editor_plan_context_matches(
+        plan,
+        source_video,
+        selection_start,
+        selection_end,
+    ):
+        return None
+
+    selection_duration = max(
+        0.0,
+        selection_end - selection_start,
+    )
+    combined_plan = load_json(
+        COMBINED_EDIT_PLAN_PATH
+    )
+    keeps = keep_segments(
+        combined_plan,
+        selection_duration,
+    )
+    temporal_plan = load_json(
+        TEMPORAL_EDIT_PLAN_PATH
+    )
+
+    mapped_events: list[dict] = []
+
+    for clip in clips:
+
+        start = as_float(
+            clip.get("start", 0.0)
+        )
+        end = as_float(
+            clip.get("end", start),
+            start,
+        )
+
+        mapped = map_source_interval_to_tight(
+            start,
+            end,
+            selection_start,
+            keeps,
+        )
+        if mapped is None:
+            continue
+
+        tight_start, tight_end = mapped
+        final_start, final_end = map_tight_interval_to_final(
+            tight_start,
+            tight_end,
+            temporal_plan,
+        )
+        if final_end <= final_start:
+            continue
+
+        event = {
+            "start": final_start,
+            "end": final_end,
+            "emoji": clip.get(
+                "emoji",
+                "",
+            ),
+            "matched_word": clip.get(
+                "label",
+                "",
+            ),
+            "position_x": clip.get("position_x"),
+            "position_y": clip.get("position_y"),
+            "manual_override": True,
+            "content_override": True,
+        }
+
+        for asset_key in (
+            "asset_path",
+            "asset_description",
+            "asset_type",
+        ):
+            if clip.get(asset_key):
+                event[asset_key] = clip[asset_key]
+
+        mapped_events.append(
+            event
+        )
+
+    return mapped_events
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -1499,53 +1678,63 @@ def main() -> int:
 
         index += len(group)
 
-    emoji_events = choose_emoji_events(
-        emoji_candidates,
-        words,
-        edit_energy,
+    emoji_events = emoji_events_from_editor_plan(
+        render_settings
     )
 
-    previous_emoji_events = []
-    if EMOJI_OUTPUT_PATH.exists():
-        try:
-            previous_emoji_data = json.loads(
-                EMOJI_OUTPUT_PATH.read_text(encoding="utf-8")
-            )
-            previous_emoji_events = previous_emoji_data.get("events", [])
-            if not isinstance(previous_emoji_events, list):
+    if emoji_events is None:
+
+        emoji_events = choose_emoji_events(
+            emoji_candidates,
+            words,
+            edit_energy,
+        )
+
+        previous_emoji_events = []
+        if EMOJI_OUTPUT_PATH.exists():
+            try:
+                previous_emoji_data = json.loads(
+                    EMOJI_OUTPUT_PATH.read_text(encoding="utf-8")
+                )
+                previous_emoji_events = previous_emoji_data.get("events", [])
+                if not isinstance(previous_emoji_events, list):
+                    previous_emoji_events = []
+
+                # The preview-only planner (emoji_planner.py) writes events in
+                # absolute source-video time, since it runs before the clip is
+                # ever cropped. This real pass always works in clip-relative
+                # time (this file's own `words` come from the already-cropped
+                # clip's transcript) -- rebase before comparing so a manual drag
+                # made in the pre-render preview still matches up correctly.
+                if previous_emoji_data.get("time_base") == "absolute":
+                    previous_selection_start = float(
+                        previous_emoji_data.get("selection_start", 0.0) or 0.0
+                    )
+                    rebased = []
+                    for previous_event in previous_emoji_events:
+                        if not isinstance(previous_event, dict):
+                            continue
+                        previous_event = dict(previous_event)
+                        try:
+                            previous_event["start"] = (
+                                float(previous_event.get("start", 0.0))
+                                - previous_selection_start
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        rebased.append(previous_event)
+                    previous_emoji_events = rebased
+            except (OSError, json.JSONDecodeError):
                 previous_emoji_events = []
 
-            # The preview-only planner (emoji_planner.py) writes events in
-            # absolute source-video time, since it runs before the clip is
-            # ever cropped. This real pass always works in clip-relative
-            # time (this file's own `words` come from the already-cropped
-            # clip's transcript) -- rebase before comparing so a manual drag
-            # made in the pre-render preview still matches up correctly.
-            if previous_emoji_data.get("time_base") == "absolute":
-                previous_selection_start = float(
-                    previous_emoji_data.get("selection_start", 0.0) or 0.0
-                )
-                rebased = []
-                for previous_event in previous_emoji_events:
-                    if not isinstance(previous_event, dict):
-                        continue
-                    previous_event = dict(previous_event)
-                    try:
-                        previous_event["start"] = (
-                            float(previous_event.get("start", 0.0))
-                            - previous_selection_start
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    rebased.append(previous_event)
-                previous_emoji_events = rebased
-        except (OSError, json.JSONDecodeError):
-            previous_emoji_events = []
-
-    emoji_events = apply_emoji_position_overrides(
-        emoji_events,
-        previous_emoji_events,
-    )
+        emoji_events = apply_emoji_position_overrides(
+            emoji_events,
+            previous_emoji_events,
+        )
+    else:
+        print(
+            f"Reusing pre-generated emoji plan: {len(emoji_events)} event(s)."
+        )
 
     visual_plan = build_visual_edit_plan(
         render_settings,

@@ -1319,3 +1319,168 @@ class EditorAssetsMixin:
             )
 
 
+    def update_emoji_generate_button_state(self):
+
+        if not hasattr(
+            self,
+            "generate_emoji_button",
+        ):
+            return
+
+        running = (
+            self.emoji_generate_process.state()
+            != QProcess.ProcessState.NotRunning
+        )
+        self.generate_emoji_button.setEnabled(
+            bool(
+                self.video_path
+                and self.end_ms > self.start_ms
+                and not running
+            )
+        )
+
+
+    def append_emoji_generate_log(
+        self,
+        data: str,
+    ):
+
+        if not data:
+            return
+
+        self.render_log.moveCursor(
+            self.render_log.textCursor().MoveOperation.End
+        )
+        self.render_log.insertPlainText(
+            data
+        )
+        scrollbar = self.render_log.verticalScrollBar()
+        scrollbar.setValue(
+            scrollbar.maximum()
+        )
+
+
+    def read_emoji_generate_output(self):
+
+        data = (
+            self.emoji_generate_process
+            .readAllStandardOutput()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        self.append_emoji_generate_log(
+            data
+        )
+
+
+    def read_emoji_generate_error(self):
+
+        data = (
+            self.emoji_generate_process
+            .readAllStandardError()
+            .data()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+        self.append_emoji_generate_log(
+            data
+        )
+
+
+    def generate_emoji(self):
+
+        if not self.video_path or self.end_ms <= self.start_ms:
+            return
+
+        if (
+            self.emoji_generate_process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            return
+
+        emoji_script = ROOT / "app" / "emoji_planner.py"
+        if not emoji_script.exists():
+            self.render_log.append(
+                "Emoji planner is not installed."
+            )
+            return
+
+        transcript_path = ROOT / "output" / "subtitles.json"
+        if not transcript_path.exists():
+            self.render_log.append(
+                "No transcript loaded yet -- run Find Best Clips first."
+            )
+            return
+
+        self.ensure_current_editor_asset_context(
+            clear_on_change=True
+        )
+        self.save_render_settings()
+        self.generate_emoji_button.setEnabled(False)
+        self.generate_emoji_button.setText("Generating...")
+
+        self.render_log.append("")
+        self.render_log.append("=== EDITOR EMOJI GENERATION ===")
+        self.render_log.append(
+            "Selection: "
+            f"{self.start_ms / 1000:.3f}s -> "
+            f"{self.end_ms / 1000:.3f}s"
+        )
+
+        self.emoji_generate_process.start(
+            sys.executable,
+            [
+                str(emoji_script),
+                "--transcript",
+                str(transcript_path),
+                "--start",
+                f"{self.start_ms / 1000:.3f}",
+                "--end",
+                f"{self.end_ms / 1000:.3f}",
+                "--energy",
+                self.current_edit_energy(),
+                "--editor-plan",
+            ],
+        )
+
+
+    def emoji_generate_finished(
+        self,
+        exit_code: int,
+        exit_status,
+    ):
+
+        del exit_status
+
+        self.generate_emoji_button.setText("Generate Emoji")
+        self.update_emoji_generate_button_state()
+
+        if exit_code != 0:
+            self.render_log.append(
+                f"Emoji generation failed with exit code {exit_code}."
+            )
+            return
+
+        self.load_editor_asset_plan_state()
+        event_count = len(
+            clips_of_kind(
+                self.editor_asset_plan,
+                "EMOJI",
+                active_only=True,
+            )
+        )
+        self.render_log.append(
+            f"Emoji plan ready: {event_count} event(s)."
+        )
+        if hasattr(self, "player"):
+            self._emoji_events_cache = None
+            self.update_emoji_preview_overlay(
+                self.player.position()
+            )
+
+

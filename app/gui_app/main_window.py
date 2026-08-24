@@ -523,6 +523,28 @@ class ShortsFactoryWindow(
             self.sfx_finished
         )
 
+        self.emoji_generate_process = QProcess(self)
+
+        self.emoji_generate_process.setWorkingDirectory(
+            str(ROOT)
+        )
+
+        self.emoji_generate_process.setProcessEnvironment(
+            process_env
+        )
+
+        self.emoji_generate_process.readyReadStandardOutput.connect(
+            self.read_emoji_generate_output
+        )
+
+        self.emoji_generate_process.readyReadStandardError.connect(
+            self.read_emoji_generate_error
+        )
+
+        self.emoji_generate_process.finished.connect(
+            self.emoji_generate_finished
+        )
+
         self.render_progress_timer = QTimer(
             self
         )
@@ -1432,6 +1454,28 @@ class ShortsFactoryWindow(
 
         visual_header.addWidget(
             self.generate_visual_assets_button
+        )
+
+        self.generate_emoji_button = QPushButton(
+            "😀 GENERATE EMOJI"
+        )
+        self.generate_emoji_button.setObjectName(
+            "QuietButton"
+        )
+        self.generate_emoji_button.setToolTip(
+            "Lock in the current emoji reactions -- including any drags or "
+            "swaps you've made -- and pre-resolve their asset files, so the "
+            "final render reuses this exact plan instead of recomputing one."
+        )
+        self.generate_emoji_button.setEnabled(
+            False
+        )
+        self.generate_emoji_button.clicked.connect(
+            self.generate_emoji
+        )
+
+        visual_header.addWidget(
+            self.generate_emoji_button
         )
 
         self.check_image_ai_button = QPushButton(
