@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 try:
     from .visual_emphasis import (
@@ -1251,9 +1252,17 @@ def sanitize_final_output() -> None:
 # MAIN PIPELINE
 # ============================================================
 
-def main() -> int:
-    args = parse_args()
-
+def resolve_render_config(
+    args: argparse.Namespace,
+) -> tuple[Path, dict[str, Any], str, str, str]:
+    """
+    Resolve and print the effective render configuration: which source
+    video, and the edit energy / sound-FX mode / transcription quality
+    settings saved from the GUI (each normalized to a known-valid value).
+    Raises FileNotFoundError if the resolved source video is missing.
+    Returns (source_video, render_settings, edit_energy, sfx_mode,
+    transcription_quality).
+    """
     source_video = resolve_source_video(
         args.source
     )
@@ -1323,15 +1332,23 @@ def main() -> int:
             f"{source_video}"
         )
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    return (
+        source_video,
+        render_settings,
+        edit_energy,
+        sfx_mode,
+        transcription_quality,
     )
 
-    # --------------------------------------------------------
-    # Select source section
-    # --------------------------------------------------------
 
+def resolve_source_timestamps(
+    args: argparse.Namespace,
+) -> tuple[str, str]:
+    """
+    Resolve the source-video clip selection: timestamps supplied on the
+    command line/by the GUI take priority, otherwise prompt interactively
+    for how to select the clip.
+    """
     if (
         args.start is not None
         and args.end is not None
@@ -1361,24 +1378,21 @@ def main() -> int:
         f"{start} -> {end}"
     )
 
-    # --------------------------------------------------------
-    # STEP 1
-    # Render source section
-    # --------------------------------------------------------
+    return start, end
 
-    render_base_video(
-        source_video,
-        start,
-        end,
-    )
 
-    # --------------------------------------------------------
-    # STEP 2
-    # Reuse the transcript created when the source was imported.
-    # Only the selected range is copied to subtitles.json and shifted
-    # to selection-relative timestamps.
-    # --------------------------------------------------------
-
+def run_transcript_step(
+    render_settings: dict[str, Any],
+    source_video: Path,
+    transcription_quality: str,
+) -> None:
+    """
+    STEP 2: reuse the transcript created when the source was imported --
+    only the selected range is copied to subtitles.json and shifted to
+    selection-relative timestamps -- falling back to transcribing
+    short1_base.mp4 from scratch if the original source's transcript
+    metadata isn't available.
+    """
     transcript_selection = source_transcript_selection(
         render_settings,
         source_video,
@@ -1418,6 +1432,113 @@ def main() -> int:
             ),
             quality=transcription_quality,
         )
+
+
+def print_render_summary(
+    start: str,
+    end: str,
+) -> None:
+    """
+    Print the final "RENDERING COMPLETE" banner with the paths to every
+    artifact this run produced.
+    """
+    print()
+    print(
+        "========================================"
+    )
+
+    print(
+        "       RENDERING COMPLETE"
+    )
+
+    print(
+        "========================================"
+    )
+
+    print()
+
+    print(
+        f"Source clip:       "
+        f"{start} -> {end}"
+    )
+
+    print(
+        f"Original render:   "
+        f"{BASE_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Smart edit:        "
+        f"{TIGHT_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Final transcript:  "
+        f"{SUBTITLES_PATH}"
+    )
+
+    print(
+        f"Caption file:      "
+        f"{CAPTIONS_PATH}"
+    )
+
+    print(
+        f"FINAL SHORT:       "
+        f"{CAPTION_OUTPUT_PATH}"
+    )
+
+    print()
+
+
+def main() -> int:
+    args = parse_args()
+
+    (
+        source_video,
+        render_settings,
+        edit_energy,
+        sfx_mode,
+        transcription_quality,
+    ) = resolve_render_config(
+        args
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # --------------------------------------------------------
+    # Select source section
+    # --------------------------------------------------------
+
+    start, end = resolve_source_timestamps(
+        args
+    )
+
+    # --------------------------------------------------------
+    # STEP 1
+    # Render source section
+    # --------------------------------------------------------
+
+    render_base_video(
+        source_video,
+        start,
+        end,
+    )
+
+    # --------------------------------------------------------
+    # STEP 2
+    # Reuse the transcript created when the source was imported.
+    # Only the selected range is copied to subtitles.json and shifted
+    # to selection-relative timestamps.
+    # --------------------------------------------------------
+
+    run_transcript_step(
+        render_settings,
+        source_video,
+        transcription_quality,
+    )
 
     # --------------------------------------------------------
     # STEP 3
@@ -1498,52 +1619,10 @@ def main() -> int:
     # DONE
     # --------------------------------------------------------
 
-    print()
-    print(
-        "========================================"
+    print_render_summary(
+        start,
+        end,
     )
-
-    print(
-        "       RENDERING COMPLETE"
-    )
-
-    print(
-        "========================================"
-    )
-
-    print()
-
-    print(
-        f"Source clip:       "
-        f"{start} -> {end}"
-    )
-
-    print(
-        f"Original render:   "
-        f"{BASE_OUTPUT_PATH}"
-    )
-
-    print(
-        f"Smart edit:        "
-        f"{TIGHT_OUTPUT_PATH}"
-    )
-
-    print(
-        f"Final transcript:  "
-        f"{SUBTITLES_PATH}"
-    )
-
-    print(
-        f"Caption file:      "
-        f"{CAPTIONS_PATH}"
-    )
-
-    print(
-        f"FINAL SHORT:       "
-        f"{CAPTION_OUTPUT_PATH}"
-    )
-
-    print()
 
     return 0
 
