@@ -101,7 +101,7 @@ A few optional environment variables, all with sensible defaults if unset:
 | `SHORTSFACTORY_FORGE_LAUNCH` | Path to a local Forge/A1111 launch script, for AI visual generation |
 | `SHORTSFACTORY_IMAGE_API` | Base URL of a running Forge/A1111 image API, if not launching one |
 | `SHORTSFACTORY_OPENAI_IMAGE_API` / `SHORTSFACTORY_OPENAI_IMAGE_MODEL` | Use an OpenAI-compatible image API instead of a local backend |
-mikes gay
+
 ## Project layout
 
 - `app/gui.py` — desktop app entry point (thin launcher; the real app is
