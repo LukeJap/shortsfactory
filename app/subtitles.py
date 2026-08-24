@@ -1164,13 +1164,16 @@ def maybe_apply_transcript_corrections(
 
 
 
-def maybe_apply_smart_motion(
+def maybe_apply_motion_and_fx(
     video_path: Path,
 ) -> None:
     """
     render.py already re-transcribes short1_tight.mp4 immediately before
-    captions are generated. Hook the visual motion pass into that exact
-    moment so timing stays unchanged and render.py does not need rewriting.
+    captions are generated. Hook the combined punch-in motion + visual FX
+    pass (motion_and_fx.py -- merges what used to be two separate full
+    re-encodes, smart_motion.py then visual_fx.py, into one) into that
+    exact moment so timing stays unchanged and render.py does not need
+    rewriting.
     """
 
     if video_path.name.lower() != "short1_tight.mp4":
@@ -1179,13 +1182,13 @@ def maybe_apply_smart_motion(
     script_path = (
         ROOT
         / "app"
-        / "smart_motion.py"
+        / "motion_and_fx.py"
     )
 
     if not script_path.exists():
 
         print(
-            "Smart motion script not installed; continuing without punch-ins.",
+            "Motion/FX script not installed; continuing without punch-ins or grade.",
             flush=True,
         )
 
@@ -1197,7 +1200,7 @@ def maybe_apply_smart_motion(
     )
 
     print(
-        "Applying automatic punch-in editing before captions...",
+        "Applying automatic punch-in motion and visual grade/FX...",
         flush=True,
     )
 
@@ -1218,7 +1221,7 @@ def maybe_apply_smart_motion(
 
         print(
             (
-                "WARNING: Smart motion returned "
+                "WARNING: Motion/FX pass returned "
                 f"exit code {exc.returncode}; "
                 "continuing without blocking captions."
             ),
@@ -1340,59 +1343,6 @@ def maybe_apply_ai_visuals(
         )
 
 
-def maybe_apply_visual_fx(
-    video_path: Path,
-) -> None:
-    """
-    Apply the always-on base look plus dynamic visual FX before captions.
-    Captions are burned later, so readability stays protected.
-    """
-
-    if video_path.name.lower() != "short1_tight.mp4":
-        return
-
-    script_path = (
-        ROOT
-        / "app"
-        / "visual_fx.py"
-    )
-
-    if not script_path.exists():
-        return
-
-    print(
-        "",
-        flush=True,
-    )
-
-    print(
-        "Applying visual grade and brainrot FX pass...",
-        flush=True,
-    )
-
-    try:
-
-        subprocess.run(
-            [
-                sys.executable,
-                str(
-                    script_path
-                ),
-            ],
-            cwd=ROOT,
-            check=True,
-        )
-
-    except subprocess.CalledProcessError as exc:
-
-        print(
-            (
-                "WARNING: Visual FX pass returned "
-                f"exit code {exc.returncode}; "
-                "continuing with current footage."
-            ),
-            flush=True,
-        )
 
 
 
@@ -1412,13 +1362,15 @@ def finish_pipeline_stages(
     maybe_apply_temporal_edit(
         video_path
     )
-    maybe_apply_smart_motion(
-        video_path
-    )
+    # AI visual cutaways now run before the combined motion+FX pass
+    # (rather than between smart motion and visual FX, as when the two
+    # were separate stages) so a composited cutaway still gets the same
+    # zoompan/color-grade treatment as the rest of the frame instead of
+    # being pasted on ungraded afterward.
     maybe_apply_ai_visuals(
         video_path
     )
-    maybe_apply_visual_fx(
+    maybe_apply_motion_and_fx(
         video_path
     )
 

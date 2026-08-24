@@ -1440,6 +1440,67 @@ def apply_motion(
     )
 
 
+def write_motion_plan(
+    duration: float,
+    fps: float,
+    edit_energy: str,
+    scene_cuts: list[float],
+    shot_types: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> None:
+    """
+    Write output/smart_motion_plan.json. Split out from main() so
+    motion_and_fx.py (which runs this analysis plus visual_fx.py's in one
+    combined ffmpeg pass) can produce the same plan file main() always
+    has, without duplicating the dict shape.
+    """
+
+    plan = {
+        "source_video": str(
+            VIDEO_PATH
+        ),
+        "duration_seconds": round(
+            duration,
+            3,
+        ),
+        "fps": round(
+            fps,
+            6,
+        ),
+        "edit_energy": edit_energy,
+        "scene_cut_count": len(
+            scene_cuts
+        ),
+        "scene_cuts": [
+            round(
+                cut,
+                3,
+            )
+            for cut in scene_cuts
+        ],
+        "shot_types": shot_types,
+        "event_count": len(
+            events
+        ),
+        "events": events,
+    }
+
+    PLAN_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    PLAN_PATH.write_text(
+        json.dumps(
+            plan,
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
 
     print(
@@ -1552,49 +1613,13 @@ def main() -> int:
         edit_energy,
     )
 
-    plan = {
-        "source_video": str(
-            VIDEO_PATH
-        ),
-        "duration_seconds": round(
-            duration,
-            3,
-        ),
-        "fps": round(
-            fps,
-            6,
-        ),
-        "edit_energy": edit_energy,
-        "scene_cut_count": len(
-            scene_cuts
-        ),
-        "scene_cuts": [
-            round(
-                cut,
-                3,
-            )
-            for cut in scene_cuts
-        ],
-        "shot_types": shot_types,
-        "event_count": len(
-            events
-        ),
-        "events": events,
-    }
-
-    PLAN_PATH.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    PLAN_PATH.write_text(
-        json.dumps(
-            plan,
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
+    write_motion_plan(
+        duration,
+        fps,
+        edit_energy,
+        scene_cuts,
+        shot_types,
+        events,
     )
 
     print(

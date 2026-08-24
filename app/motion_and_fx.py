@@ -1,0 +1,454 @@
+"""
+Combines smart_motion.py's punch-in zoompan and visual_fx.py's baseline
+color grade + dynamic FX into a single ffmpeg pass instead of two
+sequential full re-encodes of short1_tight.mp4. Both stages already
+operate on the exact same input/output file, wrap their filter chain in
+an identical crop-then-pad shell keyed off the same
+content_rect_from_settings(), and neither changes clip duration -- so
+their inner filter strings can simply be concatenated and run once.
+Reuses each file's existing analysis/filter-building functions
+unchanged; smart_motion.py and visual_fx.py themselves are still
+independently runnable (standalone CLI/testing), they just aren't both
+invoked back-to-back in the render path anymore -- see
+maybe_apply_motion_and_fx() in subtitles.py.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    from .visual_emphasis import (
+        DEFAULT_ENERGY,
+        content_rect_from_settings,
+        load_render_settings,
+        normalize_energy,
+    )
+except ImportError:
+    from visual_emphasis import (
+        DEFAULT_ENERGY,
+        content_rect_from_settings,
+        load_render_settings,
+        normalize_energy,
+    )
+
+try:
+    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+except ImportError:
+    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+
+try:
+    from .pipeline_paths import SUBTITLES_PATH as TRANSCRIPT_PATH
+except ImportError:
+    from pipeline_paths import SUBTITLES_PATH as TRANSCRIPT_PATH
+
+try:
+    from .smart_motion import (
+        apply_shot_aware_zoom_strength,
+        build_motion_events,
+        classify_motion_shots,
+        detect_motion_scene_cuts,
+        enrich_motion_events,
+        load_json,
+        probe_video,
+        write_motion_plan,
+        x_expression,
+        y_expression,
+        zoom_expression,
+    )
+except ImportError:
+    from smart_motion import (
+        apply_shot_aware_zoom_strength,
+        build_motion_events,
+        classify_motion_shots,
+        detect_motion_scene_cuts,
+        enrich_motion_events,
+        load_json,
+        probe_video,
+        write_motion_plan,
+        x_expression,
+        y_expression,
+        zoom_expression,
+    )
+
+try:
+    from .visual_fx import (
+        build_filter_chain,
+        build_semantic_moments,
+        coerce_fx_intensity,
+        expand_moments_to_events,
+        write_plan as write_fx_plan,
+    )
+except ImportError:
+    from visual_fx import (
+        build_filter_chain,
+        build_semantic_moments,
+        coerce_fx_intensity,
+        expand_moments_to_events,
+        write_plan as write_fx_plan,
+    )
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+VIDEO_PATH = (
+    ROOT
+    / "output"
+    / "rendered"
+    / "short1_tight.mp4"
+)
+
+TEMP_PATH = (
+    ROOT
+    / "output"
+    / "rendered"
+    / "short1_motion_fx_tmp.mp4"
+)
+
+
+def main() -> int:
+
+    print(
+        "ShortsFactory motion + visual FX pass starting...",
+        flush=True,
+    )
+
+    if not VIDEO_PATH.exists():
+        print(
+            f"WARNING: Tight video does not exist: {VIDEO_PATH}",
+            flush=True,
+        )
+        return 0
+
+    settings = load_render_settings()
+    edit_energy = normalize_energy(
+        settings.get(
+            "edit_energy",
+            DEFAULT_ENERGY,
+        )
+    )
+    intensity = coerce_fx_intensity(
+        settings.get(
+            "fx_intensity",
+            1.0,
+        )
+    )
+    content_rect = content_rect_from_settings(
+        settings
+    )
+
+    print(
+        f"Edit energy: {edit_energy}",
+        flush=True,
+    )
+    print(
+        f"FX intensity: {intensity:.2f}",
+        flush=True,
+    )
+
+    transcript = load_json(
+        TRANSCRIPT_PATH
+    )
+    words = transcript.get(
+        "words",
+        [],
+    )
+    if not isinstance(
+        words,
+        list,
+    ):
+        words = []
+
+    # --------------------------------------------------------
+    # FX analysis (mirrors visual_fx.py::main() -- always runs,
+    # the baseline grade is on regardless of dynamic event count).
+    # --------------------------------------------------------
+
+    moments, intensity_curve = build_semantic_moments(
+        words,
+        edit_energy,
+    )
+    fx_events = expand_moments_to_events(
+        moments,
+        edit_energy,
+    )
+
+    write_fx_plan(
+        edit_energy,
+        fx_events,
+        moments,
+        intensity_curve,
+    )
+
+    print(
+        f"Semantic moments selected: {len(moments)}",
+        flush=True,
+    )
+    print(
+        f"Dynamic FX events selected: {len(fx_events)}",
+        flush=True,
+    )
+
+    for index, event in enumerate(
+        fx_events,
+        start=1,
+    ):
+        print(
+            (
+                f"FX {index}: "
+                f"{event['start']:.2f}s -> "
+                f"{event['end']:.2f}s, "
+                f"{event['effect']}, "
+                f"trigger={event.get('trigger_word', '')}, "
+                f"recipe={event.get('recipe', '')}, "
+                f"stack={event.get('stack_id', '')}"
+            ),
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # Motion analysis (mirrors smart_motion.py::main() -- skips
+    # cleanly, same as it always has, when there's no transcript or
+    # the video can't be probed; the FX pass above still applies
+    # either way).
+    # --------------------------------------------------------
+
+    fps = 30.0
+    motion_events: list = []
+    zoompan_fragment = ""
+
+    if not words:
+        print(
+            "No word timestamps available; skipping smart motion.",
+            flush=True,
+        )
+    else:
+        try:
+            duration, fps = probe_video()
+        except (
+            subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            print(
+                f"WARNING: Could not inspect video for smart motion: {exc}",
+                flush=True,
+            )
+            duration = 0.0
+
+        if duration > 0:
+
+            scene_cuts = detect_motion_scene_cuts(
+                duration
+            )
+
+            print(
+                f"Scene cuts available to motion editor: {len(scene_cuts)}",
+                flush=True,
+            )
+
+            shot_types = classify_motion_shots(
+                duration
+            )
+
+            if shot_types:
+                summary = ", ".join(
+                    f"{shot.get('shot', '?')}:{shot.get('type', 'unknown')}"
+                    for shot in shot_types
+                )
+                print(
+                    f"Shot types available to motion editor: {summary}",
+                    flush=True,
+                )
+
+            motion_events = build_motion_events(
+                words,
+                duration,
+                scene_cuts,
+                edit_energy,
+            )
+            motion_events = apply_shot_aware_zoom_strength(
+                motion_events,
+                shot_types,
+                edit_energy,
+            )
+            motion_events = enrich_motion_events(
+                motion_events,
+                duration,
+                edit_energy,
+            )
+
+            write_motion_plan(
+                duration,
+                fps,
+                edit_energy,
+                scene_cuts,
+                shot_types,
+                motion_events,
+            )
+
+            print(
+                f"Smart motion events selected: {len(motion_events)}",
+                flush=True,
+            )
+
+            for index, event in enumerate(
+                motion_events,
+                start=1,
+            ):
+                print(
+                    (
+                        f"Motion {index}: "
+                        f"{event['start']:.2f}s -> "
+                        f"{event['end']:.2f}s, "
+                        f"{event['zoom']:.2f}x, "
+                        f"{event.get('movement', 'punch_in')}, "
+                        f"trigger={event['trigger_word']}"
+                    ),
+                    flush=True,
+                )
+
+            if not motion_events:
+                print(
+                    "No useful motion moments found; leaving video unchanged.",
+                    flush=True,
+                )
+            else:
+                zoom = zoom_expression(
+                    motion_events,
+                    fps,
+                )
+                x = x_expression(
+                    motion_events,
+                    fps,
+                )
+                y = y_expression(
+                    motion_events,
+                    fps,
+                )
+                zoompan_fragment = (
+                    f"zoompan=z='{zoom}':"
+                    f"x='{x}':"
+                    f"y='{y}':"
+                    "d=1:"
+                    f"s={content_rect[2]}x{content_rect[3]}:"
+                    f"fps={fps:.6f}"
+                )
+
+    # --------------------------------------------------------
+    # One combined ffmpeg pass: crop -> [zoompan ->] fx chain -> pad.
+    # --------------------------------------------------------
+
+    (
+        content_x,
+        content_y,
+        content_width,
+        content_height,
+    ) = content_rect
+
+    fx_chain = build_filter_chain(
+        edit_energy,
+        fx_events,
+        intensity,
+    )
+
+    inner_chain = (
+        f"{zoompan_fragment},{fx_chain}"
+        if zoompan_fragment
+        else fx_chain
+    )
+
+    filter_string = (
+        f"crop={content_width}:{content_height}:"
+        f"{content_x}:{content_y},"
+        f"{inner_chain},"
+        f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
+        f"{content_x}:{content_y}:black"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(
+            VIDEO_PATH
+        ),
+        "-vf",
+        filter_string,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        # Intermediate stage -- this output gets re-encoded again by
+        # later pipeline stages before delivery.
+        "-preset",
+        "faster",
+        "-crf",
+        "20",
+        "-c:a",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        str(
+            TEMP_PATH
+        ),
+    ]
+
+    print(
+        "",
+        flush=True,
+    )
+    print(
+        "Applying combined motion + visual FX pass...",
+        flush=True,
+    )
+
+    try:
+        subprocess.run(
+            command,
+            cwd=ROOT,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+
+        if TEMP_PATH.exists():
+            try:
+                TEMP_PATH.unlink()
+            except OSError:
+                pass
+
+        print(
+            (
+                "WARNING: Motion + visual FX FFmpeg pass failed "
+                f"with exit code {exc.returncode}. "
+                "Continuing with current footage."
+            ),
+            flush=True,
+        )
+
+        return 0
+
+    os.replace(
+        TEMP_PATH,
+        VIDEO_PATH,
+    )
+
+    print(
+        "Motion + visual FX applied.",
+        flush=True,
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(
+        main()
+    )
