@@ -1154,63 +1154,17 @@ def variant_output_path(
     )
 
 
-def main() -> int:
-    args = parse_args()
-
-    plan_path = Path(
-        args.plan
-    ).resolve()
-    asset_dir = Path(
-        args.asset_dir
-    ).resolve()
-    quality = str(
-        args.quality
-    ).upper()
-    preset = QUALITY_PRESETS[
-        quality
-    ]
-
-    print(
-        "ShortsFactory AI visual asset generator starting...",
-        flush=True,
-    )
-
-    if not plan_path.exists():
-        print(
-            f"ERROR: Visual plan not found: {plan_path}",
-            flush=True,
-        )
-        return 1
-
-    plan = load_json(
-        plan_path
-    )
-    slots = plan.get(
-        "slots",
-        [],
-    )
-    if not isinstance(
-        slots,
-        list,
-    ):
-        slots = []
-
-    asset_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    manifest_path = (
-        asset_dir
-        / "manifest.json"
-    )
-    existing_manifest = load_json(
-        manifest_path
-    )
-    assets_by_key = existing_asset_map(
-        existing_manifest
-    )
-
+def resolve_provider(args: argparse.Namespace, quality: str) -> str:
+    """
+    Resolve which image generation provider this run should actually use,
+    auto-detecting the local Forge/A1111 backend's readiness when
+    provider is "auto"/"a1111"/"preview" (args.provider == "openai" skips
+    backend detection entirely, since it doesn't need one). Prints the
+    same user-facing status messages the original inline main() body did
+    -- kept together with the resolution logic (rather than split into a
+    separate "reporting" step) since each message is tightly coupled to
+    exactly which branch was taken.
+    """
     provider = args.provider
     backend_status: dict[str, Any] = {}
 
@@ -1301,6 +1255,430 @@ def main() -> int:
             flush=True,
         )
 
+    return provider
+
+
+def generate_preview_asset(
+    slot: dict[str, Any],
+    slot_index: int,
+    slot_id: str,
+    label: str,
+    visual_type: str,
+    prompt: str,
+    existing_asset: dict[str, Any] | None,
+    force_new_variant: bool,
+    asset_dir: Path,
+    quality: str,
+    preset: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """
+    Preview-provider path: reuse an existing generated asset as-is if one
+    exists and a new variant wasn't requested, otherwise write a new
+    placeholder .ppm preview image. Returns (asset, category), where
+    category is "ready" (reused a real generated asset) or "preview" (a
+    placeholder was created) for the caller to bump the matching counter.
+    """
+    if generated_asset_exists(
+        existing_asset
+    ) and not force_new_variant:
+        assert existing_asset is not None
+        asset = build_asset(
+            slot=slot,
+            slot_index=slot_index,
+            slot_id=slot_id,
+            label=label,
+            visual_type=visual_type,
+            prompt=prompt,
+            path=Path(
+                str(
+                    existing_asset.get(
+                        "path",
+                        "",
+                    )
+                )
+            ),
+            provider=str(
+                existing_asset.get(
+                    "provider",
+                    "a1111",
+                )
+            ),
+            generated=True,
+            state="READY",
+            quality=str(
+                existing_asset.get(
+                    "quality",
+                    quality,
+                )
+            ),
+            variant_id=str(
+                existing_asset.get(
+                    "variant_id",
+                    slot.get(
+                        "active_variant_id",
+                        "variant_001",
+                    ),
+                )
+                or "variant_001"
+            ),
+            saved=bool(
+                existing_asset.get(
+                    "saved",
+                    False,
+                )
+            ),
+        )
+        print(
+            f"Preserved existing visual {slot_index}: {label}",
+            flush=True,
+        )
+        return asset, "ready"
+
+    output_path, variant_id = variant_output_path(
+        asset_dir,
+        slot_index,
+        slot,
+        ".ppm",
+        force_new=True,
+    )
+    write_ppm_preview(
+        output_path,
+        label,
+        visual_type,
+        preset,
+    )
+    asset = build_asset(
+        slot=slot,
+        slot_index=slot_index,
+        slot_id=slot_id,
+        label=label,
+        visual_type=visual_type,
+        prompt=prompt,
+        path=output_path,
+        provider="preview",
+        generated=False,
+        state="PREVIEW_ONLY",
+        quality=quality,
+        variant_id=variant_id,
+    )
+    print(
+        f"Preview-only visual {slot_index}: {label}",
+        flush=True,
+    )
+    return asset, "preview"
+
+
+def generate_openai_asset(
+    slot: dict[str, Any],
+    slot_index: int,
+    slot_id: str,
+    label: str,
+    visual_type: str,
+    prompt: str,
+    asset_dir: Path,
+    quality: str,
+    force_new_variant: bool,
+) -> tuple[dict[str, Any], str]:
+    """
+    OpenAI-provider path: generate one image via the OpenAI image API.
+    Returns (asset, category), category "ready" or "failed".
+    """
+    output_path, variant_id = variant_output_path(
+        asset_dir,
+        slot_index,
+        slot,
+        ".png",
+        force_new=force_new_variant,
+    )
+    print(
+        f"Generating ChatGPT/OpenAI visual {slot_index}: {label}",
+        flush=True,
+    )
+    try:
+        generate_openai_image(
+            os.getenv(
+                "OPENAI_API_KEY",
+                "",
+            ),
+            prompt,
+            visual_type,
+            output_path,
+            quality,
+        )
+        asset = build_asset(
+            slot=slot,
+            slot_index=slot_index,
+            slot_id=slot_id,
+            label=label,
+            visual_type=visual_type,
+            prompt=prompt,
+            path=output_path,
+            provider="openai",
+            generated=True,
+            state="READY",
+            quality=quality,
+            variant_id=variant_id,
+        )
+        return asset, "ready"
+    except Exception as exc:
+        message = str(
+            exc
+        )
+        asset = build_asset(
+            slot=slot,
+            slot_index=slot_index,
+            slot_id=slot_id,
+            label=label,
+            visual_type=visual_type,
+            prompt=prompt,
+            path=None,
+            provider="openai",
+            generated=False,
+            state="FAILED",
+            quality=quality,
+            error=message,
+            variant_id=variant_id,
+        )
+        print(
+            (
+                f"WARNING: ChatGPT/OpenAI visual {slot_index} failed: "
+                f"{message}"
+            ),
+            flush=True,
+        )
+        return asset, "failed"
+
+
+def generate_a1111_asset(
+    slot: dict[str, Any],
+    slot_index: int,
+    slot_id: str,
+    label: str,
+    visual_type: str,
+    prompt: str,
+    asset_dir: Path,
+    quality: str,
+    force_new_variant: bool,
+    api: str,
+    preset: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """
+    Local Forge/A1111-provider path: generate one image via the local
+    Stable Diffusion backend. On a CUDA/out-of-memory failure, appends a
+    quality-downgrade suggestion to the error message. Returns
+    (asset, category), category "ready" or "failed".
+    """
+    output_path, variant_id = variant_output_path(
+        asset_dir,
+        slot_index,
+        slot,
+        ".png",
+        force_new=force_new_variant,
+    )
+    print(
+        f"Generating visual {slot_index}: {label}",
+        flush=True,
+    )
+    try:
+        generate_a1111(
+            api,
+            prompt,
+            visual_type,
+            output_path,
+            preset,
+        )
+        asset = build_asset(
+            slot=slot,
+            slot_index=slot_index,
+            slot_id=slot_id,
+            label=label,
+            visual_type=visual_type,
+            prompt=prompt,
+            path=output_path,
+            provider="a1111",
+            generated=True,
+            state="READY",
+            quality=quality,
+            variant_id=variant_id,
+        )
+        return asset, "ready"
+    except Exception as exc:
+        message = str(
+            exc
+        )
+        if (
+            "CUDA"
+            in message.upper()
+            or "MEMORY"
+            in message.upper()
+            or "OUTOFMEMORY"
+            in message.replace(
+                " ",
+                "",
+            ).upper()
+        ):
+            message = (
+                message
+                + " Try BALANCED or FAST quality."
+            )
+        asset = build_asset(
+            slot=slot,
+            slot_index=slot_index,
+            slot_id=slot_id,
+            label=label,
+            visual_type=visual_type,
+            prompt=prompt,
+            path=None,
+            provider="a1111",
+            generated=False,
+            state="FAILED",
+            quality=quality,
+            error=message,
+            variant_id=variant_id,
+        )
+        print(
+            (
+                f"WARNING: Visual {slot_index} failed: "
+                f"{message}"
+            ),
+            flush=True,
+        )
+        return asset, "failed"
+
+
+def build_failed_asset_provider_not_ready(
+    slot: dict[str, Any],
+    slot_index: int,
+    slot_id: str,
+    label: str,
+    visual_type: str,
+    prompt: str,
+    quality: str,
+) -> dict[str, Any]:
+    """
+    Fallback asset for a slot when no provider is available at all (the
+    backend never became ready and generation was never attempted).
+    """
+    return build_asset(
+        slot=slot,
+        slot_index=slot_index,
+        slot_id=slot_id,
+        label=label,
+        visual_type=visual_type,
+        prompt=prompt,
+        path=None,
+        provider="a1111",
+        generated=False,
+        state="FAILED",
+        quality=quality,
+        error="Image AI is not ready.",
+        variant_id=str(
+            slot.get(
+                "active_variant_id",
+                "variant_001",
+            )
+            or "variant_001"
+        ),
+    )
+
+
+def build_manifest_assets(
+    slots: list[Any],
+    assets_by_key: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Rebuild the manifest's asset list in slot order (not
+    assets_by_key's insertion order), skipping slots with no asset entry
+    -- e.g. web-sourced entities, which this script never touches
+    (web_image_sources.py handles those separately).
+    """
+    manifest_assets: list[dict[str, Any]] = []
+    for slot_index, slot in enumerate(
+        slots,
+        start=1,
+    ):
+        if not isinstance(
+            slot,
+            dict,
+        ):
+            continue
+        slot_id = slot_id_for(
+            slot,
+            slot_index,
+        )
+        key = "id:" + slot_id
+        asset = assets_by_key.get(
+            key
+        )
+        if asset is not None:
+            manifest_assets.append(
+                asset
+            )
+    return manifest_assets
+
+
+def main() -> int:
+    args = parse_args()
+
+    plan_path = Path(
+        args.plan
+    ).resolve()
+    asset_dir = Path(
+        args.asset_dir
+    ).resolve()
+    quality = str(
+        args.quality
+    ).upper()
+    preset = QUALITY_PRESETS[
+        quality
+    ]
+
+    print(
+        "ShortsFactory AI visual asset generator starting...",
+        flush=True,
+    )
+
+    if not plan_path.exists():
+        print(
+            f"ERROR: Visual plan not found: {plan_path}",
+            flush=True,
+        )
+        return 1
+
+    plan = load_json(
+        plan_path
+    )
+    slots = plan.get(
+        "slots",
+        [],
+    )
+    if not isinstance(
+        slots,
+        list,
+    ):
+        slots = []
+
+    asset_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    manifest_path = (
+        asset_dir
+        / "manifest.json"
+    )
+    existing_manifest = load_json(
+        manifest_path
+    )
+    assets_by_key = existing_asset_map(
+        existing_manifest
+    )
+
+    provider = resolve_provider(
+        args,
+        quality,
+    )
+
     enabled_count = 0
     ready_count = 0
     preview_count = 0
@@ -1390,260 +1768,62 @@ def main() -> int:
         )
 
         if provider == "preview":
-            if generated_asset_exists(
-                existing_asset
-            ) and not force_new_variant:
-                asset = build_asset(
-                    slot=slot,
-                    slot_index=slot_index,
-                    slot_id=slot_id,
-                    label=label,
-                    visual_type=visual_type,
-                    prompt=prompt,
-                    path=Path(
-                        str(
-                            existing_asset.get(
-                                "path",
-                                "",
-                            )
-                        )
-                    ),
-                    provider=str(
-                        existing_asset.get(
-                            "provider",
-                            "a1111",
-                        )
-                    ),
-                    generated=True,
-                    state="READY",
-                    quality=str(
-                        existing_asset.get(
-                            "quality",
-                            quality,
-                        )
-                    ),
-                    variant_id=str(
-                        existing_asset.get(
-                            "variant_id",
-                            slot.get(
-                                "active_variant_id",
-                                "variant_001",
-                            ),
-                        )
-                        or "variant_001"
-                    ),
-                    saved=bool(
-                        existing_asset.get(
-                            "saved",
-                            False,
-                        )
-                    ),
-                )
-                ready_count += 1
-                print(
-                    f"Preserved existing visual {slot_index}: {label}",
-                    flush=True,
-                )
-            else:
-                output_path, variant_id = variant_output_path(
-                    asset_dir,
-                    slot_index,
-                    slot,
-                    ".ppm",
-                    force_new=True,
-                )
-                write_ppm_preview(
-                    output_path,
-                    label,
-                    visual_type,
-                    preset,
-                )
-                asset = build_asset(
-                    slot=slot,
-                    slot_index=slot_index,
-                    slot_id=slot_id,
-                    label=label,
-                    visual_type=visual_type,
-                    prompt=prompt,
-                    path=output_path,
-                    provider="preview",
-                    generated=False,
-                    state="PREVIEW_ONLY",
-                    quality=quality,
-                    variant_id=variant_id,
-                )
-                preview_count += 1
-                print(
-                    f"Preview-only visual {slot_index}: {label}",
-                    flush=True,
-                )
-
+            asset, category = generate_preview_asset(
+                slot,
+                slot_index,
+                slot_id,
+                label,
+                visual_type,
+                prompt,
+                existing_asset,
+                force_new_variant,
+                asset_dir,
+                quality,
+                preset,
+            )
         elif provider == "openai":
-            output_path, variant_id = variant_output_path(
-                asset_dir,
-                slot_index,
+            asset, category = generate_openai_asset(
                 slot,
-                ".png",
-                force_new=force_new_variant,
+                slot_index,
+                slot_id,
+                label,
+                visual_type,
+                prompt,
+                asset_dir,
+                quality,
+                force_new_variant,
             )
-            print(
-                f"Generating ChatGPT/OpenAI visual {slot_index}: {label}",
-                flush=True,
-            )
-            try:
-                generate_openai_image(
-                    os.getenv(
-                        "OPENAI_API_KEY",
-                        "",
-                    ),
-                    prompt,
-                    visual_type,
-                    output_path,
-                    quality,
-                )
-                asset = build_asset(
-                    slot=slot,
-                    slot_index=slot_index,
-                    slot_id=slot_id,
-                    label=label,
-                    visual_type=visual_type,
-                    prompt=prompt,
-                    path=output_path,
-                    provider="openai",
-                    generated=True,
-                    state="READY",
-                    quality=quality,
-                    variant_id=variant_id,
-                )
-                ready_count += 1
-            except Exception as exc:
-                message = str(
-                    exc
-                )
-                asset = build_asset(
-                    slot=slot,
-                    slot_index=slot_index,
-                    slot_id=slot_id,
-                    label=label,
-                    visual_type=visual_type,
-                    prompt=prompt,
-                    path=None,
-                    provider="openai",
-                    generated=False,
-                    state="FAILED",
-                    quality=quality,
-                    error=message,
-                    variant_id=variant_id,
-                )
-                failed_count += 1
-                print(
-                    (
-                        f"WARNING: ChatGPT/OpenAI visual {slot_index} failed: "
-                        f"{message}"
-                    ),
-                    flush=True,
-                )
-
         elif provider == "a1111":
-            output_path, variant_id = variant_output_path(
-                asset_dir,
-                slot_index,
+            asset, category = generate_a1111_asset(
                 slot,
-                ".png",
-                force_new=force_new_variant,
+                slot_index,
+                slot_id,
+                label,
+                visual_type,
+                prompt,
+                asset_dir,
+                quality,
+                force_new_variant,
+                args.api,
+                preset,
             )
-            print(
-                f"Generating visual {slot_index}: {label}",
-                flush=True,
-            )
-            try:
-                generate_a1111(
-                    args.api,
-                    prompt,
-                    visual_type,
-                    output_path,
-                    preset,
-                )
-                asset = build_asset(
-                    slot=slot,
-                    slot_index=slot_index,
-                    slot_id=slot_id,
-                    label=label,
-                    visual_type=visual_type,
-                    prompt=prompt,
-                    path=output_path,
-                    provider="a1111",
-                    generated=True,
-                    state="READY",
-                    quality=quality,
-                    variant_id=variant_id,
-                )
-                ready_count += 1
-            except Exception as exc:
-                message = str(
-                    exc
-                )
-                if (
-                    "CUDA"
-                    in message.upper()
-                    or "MEMORY"
-                    in message.upper()
-                    or "OUTOFMEMORY"
-                    in message.replace(
-                        " ",
-                        "",
-                    ).upper()
-                ):
-                    message = (
-                        message
-                        + " Try BALANCED or FAST quality."
-                    )
-                asset = build_asset(
-                    slot=slot,
-                    slot_index=slot_index,
-                    slot_id=slot_id,
-                    label=label,
-                    visual_type=visual_type,
-                    prompt=prompt,
-                    path=None,
-                    provider="a1111",
-                    generated=False,
-                    state="FAILED",
-                    quality=quality,
-                    error=message,
-                    variant_id=variant_id,
-                )
-                failed_count += 1
-                print(
-                    (
-                        f"WARNING: Visual {slot_index} failed: "
-                        f"{message}"
-                    ),
-                    flush=True,
-                )
-
         else:
-            asset = build_asset(
-                slot=slot,
-                slot_index=slot_index,
-                slot_id=slot_id,
-                label=label,
-                visual_type=visual_type,
-                prompt=prompt,
-                path=None,
-                provider="a1111",
-                generated=False,
-                state="FAILED",
-                quality=quality,
-                error="Image AI is not ready.",
-                variant_id=str(
-                    slot.get(
-                        "active_variant_id",
-                        "variant_001",
-                    )
-                    or "variant_001"
-                ),
+            asset = build_failed_asset_provider_not_ready(
+                slot,
+                slot_index,
+                slot_id,
+                label,
+                visual_type,
+                prompt,
+                quality,
             )
+            category = "failed"
+
+        if category == "ready":
+            ready_count += 1
+        elif category == "preview":
+            preview_count += 1
+        else:
             failed_count += 1
 
         assets_by_key[
@@ -1684,28 +1864,10 @@ def main() -> int:
             ),
         )
 
-    manifest_assets: list[dict[str, Any]] = []
-    for slot_index, slot in enumerate(
+    manifest_assets = build_manifest_assets(
         slots,
-        start=1,
-    ):
-        if not isinstance(
-            slot,
-            dict,
-        ):
-            continue
-        slot_id = slot_id_for(
-            slot,
-            slot_index,
-        )
-        key = "id:" + slot_id
-        asset = assets_by_key.get(
-            key
-        )
-        if asset is not None:
-            manifest_assets.append(
-                asset
-            )
+        assets_by_key,
+    )
 
     manifest = {
         "source_plan": str(
