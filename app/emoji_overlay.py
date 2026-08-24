@@ -17,6 +17,7 @@ import json
 import subprocess
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 try:
     from .canvas_config import OUTPUT_HEIGHT as CANVAS_HEIGHT, OUTPUT_WIDTH as CANVAS_WIDTH
@@ -318,51 +319,15 @@ def run(
         )
 
 
-def main() -> int:
-
-    print()
-    print(
-        "=== STEP 9: Adding colorful emojis ==="
-    )
-    print()
-
-    if not INPUT_PATH.exists():
-
-        print(
-            f"ERROR: Video not found: "
-            f"{INPUT_PATH}"
-        )
-
-        return 1
-
-    if not EVENTS_PATH.exists():
-
-        print(
-            "No emoji events found."
-        )
-
-        return 0
-
-    with EVENTS_PATH.open(
-        "r",
-        encoding="utf-8",
-    ) as f:
-
-        data = json.load(f)
-
-    events = data.get(
-        "events",
-        [],
-    )
-
-    if not events:
-
-        print(
-            "No emoji events to render."
-        )
-
-        return 0
-
+def prepare_emoji_events(
+    events: list[Any],
+) -> list[dict[str, Any]]:
+    """
+    Resolve each emoji event to a usable local asset (a saved reaction
+    image/GIF, or a freshly downloaded emoji glyph), skipping events with
+    neither an emoji nor an asset and events whose asset can't be
+    resolved/downloaded.
+    """
     prepared = []
 
     for event in events:
@@ -429,23 +394,17 @@ def main() -> int:
             }
         )
 
-    if not prepared:
+    return prepared
 
-        print(
-            "No emoji assets available."
-        )
 
-        return 0
-
-    print(
-        f"Emoji events ready: "
-        f"{len(prepared)}"
-    )
-
-    # --------------------------------------------------------
-    # INPUTS
-    # --------------------------------------------------------
-
+def build_emoji_inputs(
+    prepared: list[dict[str, Any]],
+) -> list[str]:
+    """
+    Build the ffmpeg -i input arguments: one per emoji asset, looped
+    (static images) or ignore-looped (animated GIFs) so each covers its
+    whole overlay window.
+    """
     inputs = [
         "-i",
         str(INPUT_PATH),
@@ -488,10 +447,19 @@ def main() -> int:
                 ]
             )
 
-    # --------------------------------------------------------
-    # FILTERS
-    # --------------------------------------------------------
+    return inputs
 
+
+def build_emoji_filter_complex(
+    prepared: list[dict[str, Any]],
+) -> tuple[str, str]:
+    """
+    Build the filter_complex chain overlaying every prepared emoji onto
+    the base video with a gentle upward-float + horizontal-sway
+    animation, chaining each overlay stage onto the previous stage's
+    output. Returns (filter_complex, final_output_label) -- the label
+    the caller should -map.
+    """
     filters = []
 
     current = "[0:v]"
@@ -588,13 +556,78 @@ def main() -> int:
 
         current = output_label
 
-    filter_complex = ";".join(
-        filters
+    return ";".join(filters), current
+
+
+def main() -> int:
+
+    print()
+    print(
+        "=== STEP 9: Adding colorful emojis ==="
+    )
+    print()
+
+    if not INPUT_PATH.exists():
+
+        print(
+            f"ERROR: Video not found: "
+            f"{INPUT_PATH}"
+        )
+
+        return 1
+
+    if not EVENTS_PATH.exists():
+
+        print(
+            "No emoji events found."
+        )
+
+        return 0
+
+    with EVENTS_PATH.open(
+        "r",
+        encoding="utf-8",
+    ) as f:
+
+        data = json.load(f)
+
+    events = data.get(
+        "events",
+        [],
     )
 
-    # --------------------------------------------------------
-    # RENDER
-    # --------------------------------------------------------
+    if not events:
+
+        print(
+            "No emoji events to render."
+        )
+
+        return 0
+
+    prepared = prepare_emoji_events(
+        events
+    )
+
+    if not prepared:
+
+        print(
+            "No emoji assets available."
+        )
+
+        return 0
+
+    print(
+        f"Emoji events ready: "
+        f"{len(prepared)}"
+    )
+
+    inputs = build_emoji_inputs(
+        prepared
+    )
+
+    filter_complex, current = build_emoji_filter_complex(
+        prepared
+    )
 
     command = [
         "ffmpeg",
