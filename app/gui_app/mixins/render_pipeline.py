@@ -13,6 +13,7 @@ rather than bunching up at the end.
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,26 @@ from PySide6.QtGui import QDesktopServices
 from ..constants import ROOT
 
 RENDER_LOG_FILE_PATH = ROOT / "output" / "render_log.txt"
+
+# Every ffmpeg invocation prints this same fixed, zero-information banner
+# (version, build config, library versions) before doing anything useful.
+# The render pipeline runs several ffmpeg passes per render, so this adds
+# up to real noise in the persisted log with nothing unique to say twice.
+# Only applied when writing the final render_log.txt snapshot (never to
+# the live widget text as it streams in), since that's a single complete
+# string with real line boundaries -- filtering un-line-aligned stdout
+# chunks as they arrive would risk mangling genuinely useful output.
+FFMPEG_BANNER_PATTERN = re.compile(
+    r"^ffmpeg version .*\n(?:  .*\n)*",
+    re.MULTILINE,
+)
+
+
+def strip_ffmpeg_banner(text: str) -> str:
+    return FFMPEG_BANNER_PATTERN.sub(
+        "",
+        text,
+    )
 
 
 class RenderPipelineMixin:
@@ -87,7 +108,9 @@ class RenderPipelineMixin:
                 exist_ok=True,
             )
             RENDER_LOG_FILE_PATH.write_text(
-                self.render_log.toPlainText(),
+                strip_ffmpeg_banner(
+                    self.render_log.toPlainText()
+                ),
                 encoding="utf-8",
             )
         except OSError:

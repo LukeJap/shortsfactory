@@ -1447,9 +1447,29 @@ def run_transcript_step(
         )
 
 
+def format_duration_minutes_seconds(
+    seconds: float,
+) -> str:
+
+    total_seconds = max(
+        0,
+        int(
+            round(
+                seconds
+            )
+        ),
+    )
+    minutes, remaining_seconds = divmod(
+        total_seconds,
+        60,
+    )
+    return f"{minutes}m {remaining_seconds}s"
+
+
 def print_render_summary(
     start: str,
     end: str,
+    elapsed_seconds: float,
 ) -> None:
     """
     Print the final "RENDERING COMPLETE" banner with the paths to every
@@ -1500,10 +1520,17 @@ def print_render_summary(
         f"{CAPTION_OUTPUT_PATH}"
     )
 
+    print(
+        f"Total render time: "
+        f"{format_duration_minutes_seconds(elapsed_seconds)}"
+    )
+
     print()
 
 
 def main() -> int:
+    render_start_time = time.monotonic()
+
     args = parse_args()
 
     (
@@ -1635,6 +1662,7 @@ def main() -> int:
     print_render_summary(
         start,
         end,
+        time.monotonic() - render_start_time,
     )
 
     return 0
