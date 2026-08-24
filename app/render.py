@@ -727,8 +727,13 @@ def render_base_video(
         "-c:v",
         "libx264",
 
+        # This encode's output gets re-cut/re-encoded again by at least
+        # one later stage before delivery, so the better rate-distortion
+        # optimization "medium" buys is wasted here -- "faster" cuts
+        # render time with no visible cost, unlike the final-delivery
+        # encodes (burn_captions(), emoji_overlay.py) which keep "medium".
         "-preset",
-        "medium",
+        "faster",
 
         "-crf",
         "20",

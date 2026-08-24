@@ -1303,8 +1303,12 @@ def build_ffmpeg_command(
             "0:a?",
             "-c:v",
             "libx264",
+            # Intermediate stage -- this output gets re-encoded again by
+            # later pipeline stages before delivery, so "faster" trades
+            # away rate-distortion optimization that would just be
+            # discarded.
             "-preset",
-            "medium",
+            "faster",
             "-crf",
             "20",
             "-c:a",
