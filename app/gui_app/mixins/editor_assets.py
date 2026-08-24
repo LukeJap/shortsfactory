@@ -658,6 +658,10 @@ class EditorAssetsMixin:
                 or ""
             )
             self.update_emoji_inspector()
+            if hasattr(self, "ai_visual_preview_overlay"):
+                self.update_emoji_preview_overlay(
+                    self.player.position()
+                )
             return
 
         if normalized_kind != "SFX":

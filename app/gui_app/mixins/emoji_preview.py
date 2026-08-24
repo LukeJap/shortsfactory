@@ -6,6 +6,15 @@ the local reaction-asset cache from emoji_overlay.py, never downloading
 from the GUI thread), and provides the double-click picker (a grid of
 local reaction assets plus a custom-emoji text field) for changing which
 reaction is shown at a given moment.
+
+Once a "Generate Emoji" plan exists (output/editor_asset_plan.json's
+EMOJI clips, see gui_app/mixins/editor_assets.py) and still matches the
+current source video/selection, that plan becomes the live source of
+truth here too -- both for what the overlay renders and for where a drag/
+swap made *on the video preview* gets saved -- so it stays in sync with
+the editor timeline's EMOJI lane in both directions. Falls back to the
+legacy output/emoji_events.json flow when no such plan exists yet (i.e.
+before "Generate Emoji" has ever been run for this selection).
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from ..constants import ROOT
 from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+from editor_asset_plan import clips_of_kind, upsert_clip
 from pipeline_paths import EMOJI_EVENTS_PATH
 from emoji_overlay import (
     EMOJI_DIR,
@@ -147,10 +157,56 @@ class EmojiPreviewMixin:
                 )
 
 
+    def emoji_editor_plan_clips_for_preview(self) -> list[dict] | None:
+        """
+        The current selection's active EMOJI editor-plan clips (absolute
+        source-video time, same convention as emoji_events.json's own
+        "absolute" time_base) if a "Generate Emoji" plan exists and its
+        stored context still matches the current selection, else None so
+        the caller falls back to the legacy emoji_events.json preview.
+        """
+
+        if not self.editor_asset_context_matches_current_selection():
+            return None
+
+        clips = clips_of_kind(
+            self.editor_asset_plan,
+            "EMOJI",
+            active_only=True,
+        )
+        return clips or None
+
+
     def active_emoji_preview_events(
         self,
         position_ms: int,
-    ) -> list[tuple[int, dict]]:
+    ) -> list[tuple[str, str | int, dict]]:
+        """
+        Returns (source, key, event) tuples for whichever emoji reactions
+        are active at position_ms -- source is "editor_plan" (key is the
+        clip id in output/editor_asset_plan.json) or "legacy" (key is the
+        event's index in output/emoji_events.json), so callers that save a
+        drag/swap know which store to write back into.
+        """
+
+        editor_clips = self.emoji_editor_plan_clips_for_preview()
+        if editor_clips is not None:
+
+            reference_ms = int(position_ms)
+
+            active = []
+            for clip in editor_clips:
+                try:
+                    start_ms = int(round(float(clip.get("start", 0.0)) * 1000))
+                    end_ms = int(round(float(clip.get("end", 0.0)) * 1000))
+                except (TypeError, ValueError):
+                    continue
+                if start_ms <= reference_ms <= max(start_ms, end_ms):
+                    clip_id = str(clip.get("id", "") or "")
+                    if clip_id:
+                        active.append(("editor_plan", clip_id, clip))
+
+            return active
 
         data = self.load_emoji_events_file()
         events = data.get("events", [])
@@ -174,7 +230,7 @@ class EmojiPreviewMixin:
             except (TypeError, ValueError):
                 continue
             if start_ms <= reference_ms <= max(start_ms, end_ms):
-                active.append((index, event))
+                active.append(("legacy", index, event))
 
         return active
 
@@ -249,7 +305,7 @@ class EmojiPreviewMixin:
                 label.hide()
                 continue
 
-            _event_index, event = active[slot_index]
+            _source, _key, event = active[slot_index]
 
             position_x = coerce_emoji_fraction(event.get("position_x", 0.0))
             position_y = coerce_emoji_fraction(event.get("position_y", 0.0))
@@ -310,7 +366,7 @@ class EmojiPreviewMixin:
             if slot_index >= len(active):
                 return False
 
-            _event_index, active_event = active[slot_index]
+            _source, _key, active_event = active[slot_index]
 
             self.emoji_preview_dragging = True
             self.emoji_preview_drag_slot = slot_index
@@ -357,7 +413,7 @@ class EmojiPreviewMixin:
             self.emoji_preview_drag_start_y + delta.y() / y_span
         )
 
-        _event_index, active_event = active[slot_index]
+        _source, _key, active_event = active[slot_index]
         active_event["position_x"] = round(position_x, 3)
         active_event["position_y"] = round(position_y, 3)
 
@@ -373,11 +429,28 @@ class EmojiPreviewMixin:
         if not (0 <= slot_index < len(active)):
             return False
 
-        event_index, _active_event = active[slot_index]
+        source, key, _active_event = active[slot_index]
 
-        default_x, default_y = event_default_position_px(event_index)
+        default_x, default_y = event_default_position_px(slot_index)
         position_x, position_y = emoji_pixel_to_fraction(default_x, default_y)
 
+        if source == "editor_plan":
+            clip = self.find_editor_clip("EMOJI", key)
+            if clip is None:
+                return False
+            clip["position_x"] = round(position_x, 3)
+            clip["position_y"] = round(position_y, 3)
+            clip["manual_override"] = False
+            self.editor_asset_plan = upsert_clip(
+                self.editor_asset_plan,
+                clip,
+            )
+            self.save_editor_asset_plan_state()
+            self.refresh_editor_asset_timeline()
+            self.update_emoji_preview_overlay(self.player.position())
+            return True
+
+        event_index = key
         data = self.load_emoji_events_file()
         events = data.get("events", [])
         if not (isinstance(events, list) and 0 <= event_index < len(events)):
@@ -411,9 +484,26 @@ class EmojiPreviewMixin:
         if slot_index >= len(active):
             return
 
-        event_index, active_event = active[slot_index]
+        source, key, active_event = active[slot_index]
         active_event["manual_override"] = True
 
+        if source == "editor_plan":
+            clip = self.find_editor_clip("EMOJI", key)
+            if clip is None:
+                return
+            clip["position_x"] = active_event["position_x"]
+            clip["position_y"] = active_event["position_y"]
+            clip["manual_override"] = True
+            clip["locked"] = True
+            self.editor_asset_plan = upsert_clip(
+                self.editor_asset_plan,
+                clip,
+            )
+            self.save_editor_asset_plan_state()
+            self.refresh_editor_asset_timeline()
+            return
+
+        event_index = key
         data = self.load_emoji_events_file()
         events = data.get("events", [])
         if isinstance(events, list) and 0 <= event_index < len(events):
@@ -430,7 +520,17 @@ class EmojiPreviewMixin:
         if not (0 <= slot_index < len(active)):
             return
 
-        event_index, active_event = active[slot_index]
+        source, key, active_event = active[slot_index]
+
+        if source == "editor_plan":
+            # Reuse the editor timeline's own picker/save logic (editor_
+            # assets.py) so a swap made from the video preview writes into
+            # the same editor_asset_plan.json clip the timeline lane shows,
+            # instead of duplicating a second copy of this dialog.
+            self.open_editor_emoji_picker(key)
+            return
+
+        event_index = key
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Change Emoji Reaction")
