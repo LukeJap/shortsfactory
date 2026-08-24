@@ -495,6 +495,15 @@ class AIVisualSlotsMixin:
 
 
     def apply_editor_visual_overrides_to_slots(self):
+        """
+        Pull any manually-overridden or locked AI_VISUAL clip fields
+        (position, scale, display mode, timing, asset) from
+        editor_asset_plan.json back into the in-memory visual_plan_slots,
+        before a fresh AI replan runs -- so a user's manual edits survive
+        being asked to "plan more visuals" instead of getting silently
+        discarded by the new plan. The inverse direction (slots -> plan)
+        is sync_visual_slots_to_editor_asset_plan() below.
+        """
         self.editor_asset_plan = load_editor_asset_plan()
         if not self.editor_asset_context_matches_current_selection():
             return
@@ -2919,6 +2928,14 @@ class AIVisualSlotsMixin:
 
 
     def visual_inspector_fields_changed(self):
+        """
+        Right-panel numeric field -> slot state write-back (the inverse
+        of the live preview overlay's drag path in ai_visual_preview.py,
+        which writes the same fields directly and calls this same
+        persistence chain). Guarded by self.updating_visual_inspector so
+        that programmatically setting the fields' *displayed* values
+        (e.g. from a drag) doesn't loop back and re-trigger this handler.
+        """
 
         if self.updating_visual_inspector:
             return

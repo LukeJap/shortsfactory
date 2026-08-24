@@ -547,6 +547,18 @@ def load_newest_transcript(root: Path) -> tuple[Path, Path, TranscriptData] | No
 
 
 def generate_valid_windows(segments: list[TranscriptSegment]) -> list[CandidateWindow]:
+    """
+    Generate every [start, end) window (start_segment..end_segment, for
+    every segment pair) whose duration falls within
+    [MIN_CLIP_SECONDS, MAX_CLIP_SECONDS] -- the full O(n^2) candidate
+    space before any LLM ranking happens. If that's more windows than
+    MAX_VALID_WINDOWS_FOR_PROMPT (the local LLM's practical context
+    budget), subsamples down while deliberately preserving a mix across
+    three duration bands (short/standard/extended) rather than just
+    keeping whichever windows happen to be closest to one target length
+    -- otherwise a full 45-60s setup/payoff clip could get discarded
+    before the model ever sees it as an option.
+    """
     windows: list[CandidateWindow] = []
     for start_index, start_segment in enumerate(segments):
         text_parts: list[str] = []

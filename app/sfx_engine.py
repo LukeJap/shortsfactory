@@ -1373,6 +1373,12 @@ def category_cap(
     category: str,
     energy: str,
 ) -> int | None:
+    """
+    Max number of SFX events allowed in one category for the given
+    energy tier (from CATEGORY_EVENT_CAPS), or None if that category has
+    no cap. Falls back to DEFAULT_ENERGY's limits if the given energy
+    tier isn't in the table.
+    """
 
     limits = CATEGORY_EVENT_CAPS.get(
         energy,
@@ -1399,6 +1405,22 @@ def choose_event_category(
     category_counts: dict[str, int] | None = None,
     energy: str = DEFAULT_ENERGY,
 ) -> str:
+    """
+    Pick which SFX category (whoosh/impact/pop/ding/etc.) an event should
+    use, from its candidate options (category_options_for_event()):
+
+    1. Drop any category already at its per-tier cap (category_cap()).
+    2. Drop "whoosh" unless the event has strong motion, and drop
+       "impact" unless it has a strong impact -- but only when another
+       option still remains, so a category that's the *only* option is
+       never eliminated outright.
+    3. If every candidate got filtered out, fall back to whichever
+       original options aren't whoosh/impact (or, failing that, all of
+       them) rather than returning nothing.
+    4. Prefer whichever remaining option is NOT the same as the most
+       recently used category, to avoid two same-sounding SFX events
+       back to back; falls back to the first option if they all match.
+    """
 
     options = category_options_for_event(
         event
@@ -2495,6 +2517,14 @@ def candidates_from_plan(
 def collapse_stacks(
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """
+    When multiple SFX candidates share the same stack_id (i.e. they're
+    competing proposals for the same coordinated moment, not independent
+    events), keep only the highest-scoring one per stack and drop the
+    rest -- prevents several SFX events firing on top of each other for
+    what's really a single moment. Candidates with no stack_id are
+    unaffected (kept as-is; they're never in competition with anything).
+    """
 
     best_by_stack: dict[str, dict[str, Any]] = {}
     loose: list[dict[str, Any]] = []

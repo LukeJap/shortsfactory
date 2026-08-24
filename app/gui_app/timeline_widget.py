@@ -1603,6 +1603,18 @@ class SuggestionSlider(QSlider):
         return None
 
     def mousePressEvent(self, event):
+        """
+        Hit-tests in priority order and starts whichever drag interaction
+        matches, falling through to plain playhead scrubbing if nothing
+        else is hit: (1) an editor asset clip (AI_VISUAL/SFX lane) body
+        or trim handle, (2) the source clip's own trim handles/body,
+        (3) a legacy handle_at_position() hit, (4) an AI clip-hunter
+        suggestion range (clicking one loads it as the selection),
+        (5) otherwise, start scrubbing the playhead at the clicked
+        position. Each branch sets whichever self.dragging_*/scrubbing_*
+        flag the corresponding mouseMoveEvent/mouseReleaseEvent handlers
+        check.
+        """
 
         position = event.position()
 
@@ -2096,6 +2108,14 @@ class SuggestionSlider(QSlider):
         )
 
     def wheelEvent(self, event):
+        """
+        Ctrl+wheel zooms the timeline; Shift+wheel pans it; a plain
+        trackpad horizontal swipe (no modifier, horizontal delta
+        dominant) also pans, via the same horizontal_pan() as Shift+wheel;
+        a plain vertical scroll (no modifier) is left unhandled
+        (event.ignore()) so it doesn't interfere with whatever a parent
+        widget does with vertical scroll input.
+        """
 
         modifiers = event.modifiers()
         delta = event.angleDelta().y()

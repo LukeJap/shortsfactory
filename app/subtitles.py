@@ -570,7 +570,20 @@ def map_interval_through_keeps(
     end: float,
     keeps: list[tuple[float, float]],
 ) -> tuple[float, float] | None:
-    """Map a base-timeline interval into the concatenated tight timeline."""
+    """
+    Map a [start, end) interval from the original (pre-cut) timeline into
+    where it lands on the concatenated (post-cut) timeline, given the list
+    of retained [keep_start, keep_end) ranges in original-timeline order.
+
+    Walks the keeps in order, accumulating how much retained duration has
+    already been "consumed" before each one -- that running total is
+    exactly the retained segment's start position on the concatenated
+    timeline, since cutting and concatenating removes the gaps between
+    kept ranges. If the interval overlaps more than one kept range (e.g.
+    it straddles a cut), keeps only the single largest-overlap match
+    rather than splitting it, since a caller here (a caption/emoji/word
+    timing) needs one contiguous mapped interval, not several.
+    """
 
     if end <= start:
         return None
@@ -601,6 +614,12 @@ def remap_timed_item_through_keeps(
     raw_item: dict[str, Any],
     keeps: list[tuple[float, float]],
 ) -> dict[str, Any] | None:
+    """
+    Apply map_interval_through_keeps() to one word/segment dict's
+    start/end fields, returning a shallow copy with the mapped values (or
+    None if the item falls entirely within a cut region and has nothing
+    left to map).
+    """
     if not isinstance(raw_item, dict):
         return None
 
@@ -629,6 +648,16 @@ def remap_transcript_through_edit_plan(
     plan: dict[str, Any],
     tight_video: Path,
 ) -> dict[str, Any]:
+    """
+    Rebuild an entire transcript (all words + segments) against the
+    post-cut timeline by remapping every timed item through
+    combined_edit_plan.json's keep_segments -- the --remap-through-cuts
+    alternative to re-running Whisper on the tightened clip. Items that
+    fall inside a cut are dropped entirely (remap_timed_item_through_keeps
+    returns None for them); words are re-sorted by their new start time
+    since a straddled interval's mapped position can reorder items that
+    were adjacent pre-cut.
+    """
     keeps = normalized_keep_segments(plan)
 
     if not keeps:

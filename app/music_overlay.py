@@ -89,6 +89,12 @@ def read_json(
 
 
 def sfx_events_for_ducking() -> list[dict]:
+    """
+    Load up to 16 applied SFX events (earliest-first) from
+    output/sfx_plan.json as simple {start, end} windows, padded to a
+    minimum 0.08s duration -- the time ranges music_volume_expression()
+    will duck the music under.
+    """
 
     plan = read_json(
         SFX_PLAN_PATH
@@ -162,6 +168,21 @@ def music_volume_expression(
     volume: float,
     events: list[dict],
 ) -> str:
+    """
+    Build an ffmpeg `volume` filter time-varying expression: full volume
+    by default, ducked to 58% (plus a 0.06s pre-roll/0.18s post-roll
+    around each window, so the dip doesn't feel abrupt) during any SFX
+    event's padded time range.
+
+    Built by wrapping `expression` in a nested if(between(...), ducked,
+    expression) for each event, iterating events in reverse (latest
+    first) so that after all wraps, the chronologically *earliest*
+    event ends up as the outermost/first-checked condition -- purely an
+    artifact of how the nested string has to be assembled outside-in from
+    an earliest-first list; the resulting expression's actual behavior at
+    playback time doesn't depend on this ordering, since at most one
+    event's window can be active at a given timestamp.
+    """
 
     base = f"{volume:.4f}"
     ducked = f"{max(0.0, volume * 0.58):.4f}"

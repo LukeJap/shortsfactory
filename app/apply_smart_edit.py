@@ -509,8 +509,18 @@ def apply_automatic_cut_safety(
     Keep automatic editing natural and bounded.
 
     Manual transcript cuts remain authoritative. Automatic cuts must
-    leave enough retained footage between jump cuts and must stay
-    inside the selected Edit Style's removal budget.
+    leave enough retained footage between jump cuts (minimum_spacing,
+    from the energy profile) and must stay inside the selected Edit
+    Style's total removal budget (max_removal_ratio of the clip
+    duration) -- this is the mechanism confirmed via a real render log
+    that silently drops some detected cuts, so "N pause cuts detected"
+    upstream doesn't always mean N cuts actually happen.
+
+    When two automatic cuts are too close together, a pause cut is
+    preferred over a semantic cut for the same crowded moment (a pause
+    is less likely to create an awkward spoken join than cutting mid-
+    idea) -- but only if doing so doesn't itself violate spacing against
+    whatever cut came before that.
     """
 
     if profile is None:
