@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import sys
 
-from PySide6.QtCore import QProcess, QSize, Qt
+from PySide6.QtCore import QPoint, QProcess, QSize, Qt
 from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -497,21 +497,29 @@ class EmojiPreviewMixin:
         if slot_index >= len(self.emoji_resize_handles):
             return
 
-        handles = self.emoji_resize_handles[slot_index]
-        rects = corner_handle_rects(x, y, width, height)
-        for corner, rect in rects.items():
-            handles[corner].setGeometry(rect)
+        # Reentrancy guard -- see the matching comment in
+        # caption_preview.py's layout_caption_resize_handles().
+        if getattr(self, "_laying_out_emoji_resize_handles", False):
+            return
+        self._laying_out_emoji_resize_handles = True
+        try:
+            handles = self.emoji_resize_handles[slot_index]
+            rects = corner_handle_rects(x, y, width, height)
+            for corner, rect in rects.items():
+                handles[corner].setGeometry(rect)
 
-        active = self.emoji_resize_hover_slot == slot_index or (
-            getattr(self, "emoji_resize_dragging", False)
-            and getattr(self, "emoji_resize_drag_slot", None) == slot_index
-        )
-        for handle in handles.values():
-            if active:
-                handle.raise_()
-                handle.show()
-            else:
-                handle.hide()
+            active = self.emoji_resize_hover_slot == slot_index or (
+                getattr(self, "emoji_resize_dragging", False)
+                and getattr(self, "emoji_resize_drag_slot", None) == slot_index
+            )
+            for handle in handles.values():
+                if active:
+                    handle.raise_()
+                    handle.show()
+                else:
+                    handle.hide()
+        finally:
+            self._laying_out_emoji_resize_handles = False
 
 
     def set_emoji_resize_hover(self, slot_index):
@@ -584,12 +592,28 @@ class EmojiPreviewMixin:
 
         _source, _key, active_event = active[slot_index]
 
+        # See the matching comment in ai_visual_preview.py's
+        # begin_visual_resize_drag(): anchor_point/start_point are in
+        # video_widget-local coordinates (needed below to solve for the
+        # new position fraction), but the live drag ratio is compared
+        # against the mouse's *global* position on every move -- so that
+        # comparison needs its own global-mapped copies of these two
+        # points, or the computed ratio is meaningless.
+        global_anchor = self.video_widget.mapToGlobal(
+            QPoint(anchor_point[0], anchor_point[1])
+        )
+        global_start = self.video_widget.mapToGlobal(
+            QPoint(start_point[0], start_point[1])
+        )
+
         self.emoji_resize_dragging = True
         self.emoji_resize_drag_slot = slot_index
         self.emoji_resize_handle = corner
         self.emoji_resize_anchor_name = anchor_name
         self.emoji_resize_anchor = anchor_point
         self.emoji_resize_start_point = start_point
+        self.emoji_resize_global_anchor = (global_anchor.x(), global_anchor.y())
+        self.emoji_resize_global_start = (global_start.x(), global_start.y())
         self.emoji_resize_start_scale = coerce_emoji_scale(
             active_event.get("scale", 1.0)
         )
@@ -611,10 +635,12 @@ class EmojiPreviewMixin:
 
         mouse = event.globalPosition().toPoint()
         anchor_x, anchor_y = self.emoji_resize_anchor
-        start_x, start_y = self.emoji_resize_start_point
+        global_anchor_x, global_anchor_y = self.emoji_resize_global_anchor
+        global_start_x, global_start_y = self.emoji_resize_global_start
 
         ratio = uniform_scale_ratio(
-            anchor_x, anchor_y, start_x, start_y, mouse.x(), mouse.y()
+            global_anchor_x, global_anchor_y, global_start_x, global_start_y,
+            mouse.x(), mouse.y(),
         )
         new_scale = coerce_emoji_scale(self.emoji_resize_start_scale * ratio)
 

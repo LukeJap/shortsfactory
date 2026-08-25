@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QPoint, QSize
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QLabel
 
@@ -1223,49 +1223,57 @@ class AIVisualPreviewMixin:
     def layout_ai_visual_resize_handles(self, mode: str):
         self.ensure_ai_visual_resize_handles()
 
-        overlay = self.ai_visual_preview_overlay
-        if not overlay.isVisible() or mode == "FULL_FRAME_COVER":
-            self.hide_ai_visual_resize_handles()
+        # Reentrancy guard -- see the matching comment in
+        # caption_preview.py's layout_caption_resize_handles().
+        if getattr(self, "_laying_out_ai_visual_resize_handles", False):
             return
+        self._laying_out_ai_visual_resize_handles = True
+        try:
+            overlay = self.ai_visual_preview_overlay
+            if not overlay.isVisible() or mode == "FULL_FRAME_COVER":
+                self.hide_ai_visual_resize_handles()
+                return
 
-        geometry = overlay.geometry()
-        corner_rects = corner_handle_rects(
-            geometry.x(),
-            geometry.y(),
-            geometry.width(),
-            geometry.height(),
-        )
-        for corner, rect in corner_rects.items():
-            self.ai_visual_resize_handles[corner].setGeometry(rect)
-
-        show_edges = mode == "OVERLAY_CARD"
-        if show_edges:
-            edge_rects = edge_handle_rects(
+            geometry = overlay.geometry()
+            corner_rects = corner_handle_rects(
                 geometry.x(),
                 geometry.y(),
                 geometry.width(),
                 geometry.height(),
             )
-            for edge, rect in edge_rects.items():
-                self.ai_visual_resize_edge_handles[edge].setGeometry(rect)
+            for corner, rect in corner_rects.items():
+                self.ai_visual_resize_handles[corner].setGeometry(rect)
 
-        active = (
-            getattr(self, "ai_visual_resize_hovering", False)
-            or getattr(self, "visual_resize_dragging", False)
-        )
-        if not active:
-            self.hide_ai_visual_resize_handles()
-            return
-
-        for label in self.ai_visual_resize_handles.values():
-            label.raise_()
-            label.show()
-        for edge, label in self.ai_visual_resize_edge_handles.items():
+            show_edges = mode == "OVERLAY_CARD"
             if show_edges:
+                edge_rects = edge_handle_rects(
+                    geometry.x(),
+                    geometry.y(),
+                    geometry.width(),
+                    geometry.height(),
+                )
+                for edge, rect in edge_rects.items():
+                    self.ai_visual_resize_edge_handles[edge].setGeometry(rect)
+
+            active = (
+                getattr(self, "ai_visual_resize_hovering", False)
+                or getattr(self, "visual_resize_dragging", False)
+            )
+            if not active:
+                self.hide_ai_visual_resize_handles()
+                return
+
+            for label in self.ai_visual_resize_handles.values():
                 label.raise_()
                 label.show()
-            else:
-                label.hide()
+            for edge, label in self.ai_visual_resize_edge_handles.items():
+                if show_edges:
+                    label.raise_()
+                    label.show()
+                else:
+                    label.hide()
+        finally:
+            self._laying_out_ai_visual_resize_handles = False
 
 
     def set_ai_visual_resize_hover(self, hovering: bool):
@@ -1381,12 +1389,31 @@ class AIVisualPreviewMixin:
                 geometry.height(),
             )
 
+        # anchor_point/start_point are in video_widget-local coordinates
+        # (matching canvas_rect()/visual_axis_position()'s coordinate
+        # space, needed below to solve for the new position fraction).
+        # The live drag ratio, though, is compared against the mouse's
+        # *global* screen position each move -- mixing a local point with
+        # a global one silently produces a meaningless distance (usually
+        # huge or near-zero), which is what made a resize jump straight
+        # to the max/min clamp on the first pixel of movement. Map both
+        # reference points to global coordinates once, up front, for that
+        # comparison specifically.
+        global_anchor = self.video_widget.mapToGlobal(
+            QPoint(anchor_point[0], anchor_point[1])
+        )
+        global_start = self.video_widget.mapToGlobal(
+            QPoint(start_point[0], start_point[1])
+        )
+
         self.visual_resize_dragging = True
         self.visual_resize_kind = kind
         self.visual_resize_handle = name
         self.visual_resize_anchor_name = anchor_name
         self.visual_resize_anchor = anchor_point
         self.visual_resize_start_point = start_point
+        self.visual_resize_global_anchor = (global_anchor.x(), global_anchor.y())
+        self.visual_resize_global_start = (global_start.x(), global_start.y())
         self.visual_resize_start_geometry = geometry
         self.visual_resize_start_scale = self.ai_visual_preview_scale(
             active_clip
@@ -1418,16 +1445,18 @@ class AIVisualPreviewMixin:
         mouse = event.globalPosition().toPoint()
         anchor_x, anchor_y = self.visual_resize_anchor
         start_x, start_y = self.visual_resize_start_point
+        global_anchor_x, global_anchor_y = self.visual_resize_global_anchor
+        global_start_x, global_start_y = self.visual_resize_global_start
 
         new_scale = self.visual_resize_start_scale
         stretch_x, stretch_y = self.visual_resize_start_stretch
 
         if self.visual_resize_kind == "corner":
             ratio = uniform_scale_ratio(
-                anchor_x,
-                anchor_y,
-                start_x,
-                start_y,
+                global_anchor_x,
+                global_anchor_y,
+                global_start_x,
+                global_start_y,
                 mouse.x(),
                 mouse.y(),
             )
@@ -1435,12 +1464,12 @@ class AIVisualPreviewMixin:
                 self.visual_resize_start_scale * ratio
             )
         elif self.visual_resize_handle in ("e", "w"):
-            ratio = axis_scale_ratio(anchor_x, start_x, mouse.x())
+            ratio = axis_scale_ratio(global_anchor_x, global_start_x, mouse.x())
             stretch_x = self.coerce_visual_stretch(
                 self.visual_resize_start_stretch[0] * ratio
             )
         else:
-            ratio = axis_scale_ratio(anchor_y, start_y, mouse.y())
+            ratio = axis_scale_ratio(global_anchor_y, global_start_y, mouse.y())
             stretch_y = self.coerce_visual_stretch(
                 self.visual_resize_start_stretch[1] * ratio
             )

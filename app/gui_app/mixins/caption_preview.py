@@ -10,7 +10,7 @@ computed default (see DEFAULT_CAPTION_POSITION_X/Y below).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QLabel
 
 from render import (
@@ -253,28 +253,40 @@ class CaptionPreviewMixin:
         if not hasattr(self, "caption_resize_handles"):
             return
 
-        label = self.caption_preview_label
-        if not label.isVisible():
-            self.hide_caption_resize_handles()
+        # Reentrancy guard: show()/raise_() below can synchronously
+        # deliver an Enter event for the widget that just appeared under
+        # the cursor, which re-enters this method via
+        # set_caption_resize_hover() before this call has returned. That
+        # nested call used to run the same show()/raise_() calls again,
+        # which could re-trigger the same Enter delivery indefinitely.
+        if getattr(self, "_laying_out_caption_resize_handles", False):
             return
+        self._laying_out_caption_resize_handles = True
+        try:
+            label = self.caption_preview_label
+            if not label.isVisible():
+                self.hide_caption_resize_handles()
+                return
 
-        geometry = label.geometry()
-        rects = corner_handle_rects(
-            geometry.x(), geometry.y(), geometry.width(), geometry.height()
-        )
-        for corner, rect in rects.items():
-            self.caption_resize_handles[corner].setGeometry(rect)
+            geometry = label.geometry()
+            rects = corner_handle_rects(
+                geometry.x(), geometry.y(), geometry.width(), geometry.height()
+            )
+            for corner, rect in rects.items():
+                self.caption_resize_handles[corner].setGeometry(rect)
 
-        active = (
-            getattr(self, "caption_resize_hovering", False)
-            or getattr(self, "caption_resize_dragging", False)
-        )
-        for handle in self.caption_resize_handles.values():
-            if active:
-                handle.raise_()
-                handle.show()
-            else:
-                handle.hide()
+            active = (
+                getattr(self, "caption_resize_hovering", False)
+                or getattr(self, "caption_resize_dragging", False)
+            )
+            for handle in self.caption_resize_handles.values():
+                if active:
+                    handle.raise_()
+                    handle.show()
+                else:
+                    handle.hide()
+        finally:
+            self._laying_out_caption_resize_handles = False
 
 
     def set_caption_resize_hover(self, hovering: bool):
@@ -329,10 +341,26 @@ class CaptionPreviewMixin:
             corner, geometry.x(), geometry.y(), geometry.width(), geometry.height()
         )
 
+        # anchor_point/start_point above are in video_widget-local
+        # coordinates; the live drag ratio is compared against the
+        # mouse's *global* screen position on every move, so it needs
+        # its own global-mapped copies of these two points -- comparing
+        # a local point against a global one produces a meaningless
+        # (usually huge) distance, which is what made a resize jump
+        # straight to the max clamp on the first pixel of movement and
+        # then get stuck there (every subsequent move recomputed the
+        # same bogus ratio from the same mismatched pair).
+        global_anchor = self.video_widget.mapToGlobal(
+            QPoint(anchor_point[0], anchor_point[1])
+        )
+        global_start = self.video_widget.mapToGlobal(
+            QPoint(start_point[0], start_point[1])
+        )
+
         self.caption_resize_dragging = True
         self.caption_resize_handle = corner
-        self.caption_resize_anchor = anchor_point
-        self.caption_resize_start_point = start_point
+        self.caption_resize_anchor = (global_anchor.x(), global_anchor.y())
+        self.caption_resize_start_point = (global_start.x(), global_start.y())
         self.caption_resize_start_scale = self.current_caption_scale()
         return True
 
