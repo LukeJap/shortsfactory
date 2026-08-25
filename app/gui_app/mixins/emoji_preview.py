@@ -278,6 +278,15 @@ class EmojiPreviewMixin:
 
         if not hasattr(self, "emoji_preview_labels"):
             self.emoji_preview_labels = []
+
+        if not hasattr(self, "emoji_resize_handles"):
+            # NOTE: main_window.py's __init__ pre-seeds
+            # self.emoji_preview_labels = [] before this mixin ever runs,
+            # so a hasattr() check on that attribute is always True here --
+            # this block must be guarded on its own attribute instead, or
+            # it silently never runs and every emoji_resize_* method below
+            # blows up with an AttributeError the first time anything
+            # touches self.emoji_resize_handles.
             self.emoji_resize_handles = []
             self.emoji_resize_hover_slot = None
             self.emoji_resize_dragging = False
