@@ -43,6 +43,17 @@ except ImportError:
     from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 
 try:
+    from .base_video_polish import (
+        PRODUCTION_POLISH_PRESET,
+        polish_filters,
+    )
+except ImportError:
+    from base_video_polish import (
+        PRODUCTION_POLISH_PRESET,
+        polish_filters,
+    )
+
+try:
     from .pipeline_paths import (
         CAPTIONS_PATH,
         SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN_PATH,
@@ -652,6 +663,32 @@ def content_rect_for_source(
 # STEP 1
 # ============================================================
 
+def base_video_filter_chain() -> str:
+    filters = [
+        (
+            f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
+            "force_original_aspect_ratio=increase:flags=lanczos"
+        ),
+        f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}",
+    ]
+
+    filters.extend(
+        polish_filters(
+            PRODUCTION_POLISH_PRESET
+        )
+    )
+    filters.append(
+        "setsar=1"
+    )
+    filters.append(
+        "format=yuv420p"
+    )
+
+    return ",".join(
+        filters
+    )
+
+
 def render_base_video(
     source_video: Path,
     start: str,
@@ -670,7 +707,7 @@ def render_base_video(
     # cost of losing the source's left/right (or top/bottom) edges. No
     # letterboxing, so there's no separate "content rect" to track: the
     # video content always fills the whole canvas, and every downstream
-    # effect (smart motion zoom, AI visual overlays, color grade/vignette)
+    # effect (smart motion zoom, semantic FX, AI visual overlays)
     # already treats a full-canvas content rect as its default, so this
     # needs no further changes there.
     settings = load_render_settings()
@@ -715,14 +752,7 @@ def render_base_video(
         "-1",
 
         "-vf",
-        (
-            # Fill the full 9:16 frame: scale up until the source covers
-            # the canvas, then center-crop whatever overhangs the edges.
-            f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
-            "force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},"
-            "setsar=1"
-        ),
+        base_video_filter_chain(),
 
         "-c:v",
         "libx264",

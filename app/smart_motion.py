@@ -1158,10 +1158,38 @@ def zoom_expression(
             )
 
         elif movement == "slow_push":
+            release_frames = max(
+                ramp_frames,
+                int(
+                    round(
+                        (
+                            end_frame
+                            - start_frame
+                        )
+                        * 0.22
+                    )
+                ),
+            )
+            peak_frame = max(
+                start_frame + 1,
+                end_frame - release_frames,
+            )
+            push_denominator = max(
+                1,
+                peak_frame
+                - start_frame,
+            )
+            release_denominator = max(
+                1,
+                end_frame
+                - peak_frame,
+            )
             event_expression = (
-                f"if(between(on,{start_frame},{end_frame}),"
-                f"1+({peak}-1)*(on-{start_frame})/max(1,{end_frame - start_frame}),"
-                f"{expression})"
+                f"if(between(on,{start_frame},{peak_frame}),"
+                f"1+({peak}-1)*(on-{start_frame})/{push_denominator},"
+                f"if(between(on,{peak_frame},{end_frame}),"
+                f"1+({peak}-1)*({end_frame}-on)/{release_denominator},"
+                f"{expression}))"
             )
 
         elif movement in {
@@ -1173,9 +1201,12 @@ def zoom_expression(
                 start_frame
                 + int(
                     round(
-                        0.22
-                        if movement == "impact_punch"
-                        else 0.10
+                        (
+                            0.22
+                            if movement == "impact_punch"
+                            else 0.10
+                        )
+                        * fps
                     )
                 ),
             )
@@ -1256,6 +1287,7 @@ def x_expression(
         ) not in {
             "directional_push",
             "hard_reframe_cut",
+            "impact_punch",
             "impact_jolt",
         }:
             continue
@@ -1304,7 +1336,10 @@ def y_expression(
     ):
         if event.get(
             "movement"
-        ) != "impact_jolt":
+        ) not in {
+            "impact_punch",
+            "impact_jolt",
+        }:
             continue
 
         start_frame = int(

@@ -1,16 +1,8 @@
 """
-Combines smart_motion.py's punch-in zoompan and visual_fx.py's baseline
-color grade + dynamic FX into a single ffmpeg pass instead of two
-sequential full re-encodes of short1_tight.mp4. Both stages already
-operate on the exact same input/output file, wrap their filter chain in
-an identical crop-then-pad shell keyed off the same
-content_rect_from_settings(), and neither changes clip duration -- so
-their inner filter strings can simply be concatenated and run once.
-Reuses each file's existing analysis/filter-building functions
-unchanged; smart_motion.py and visual_fx.py themselves are still
-independently runnable (standalone CLI/testing), they just aren't both
-invoked back-to-back in the render path anymore -- see
-maybe_apply_motion_and_fx() in subtitles.py.
+Combines smart_motion.py's punch-in zoompan and visual_fx.py's semantic
+momentary FX into a single ffmpeg pass. The always-on base picture polish
+is applied earlier in render.py's STEP 1 so this pass does not add another
+whole-clip baseline color grade before captions and overlays.
 """
 
 from __future__ import annotations
@@ -77,18 +69,22 @@ except ImportError:
 
 try:
     from .visual_fx import (
-        build_filter_chain,
+        build_semantic_filter_chain,
         build_semantic_moments,
         coerce_fx_intensity,
         expand_moments_to_events,
+        merge_motion_events,
+        motion_events_for_moments,
         write_plan as write_fx_plan,
     )
 except ImportError:
     from visual_fx import (
-        build_filter_chain,
+        build_semantic_filter_chain,
         build_semantic_moments,
         coerce_fx_intensity,
         expand_moments_to_events,
+        merge_motion_events,
+        motion_events_for_moments,
         write_plan as write_fx_plan,
     )
 
@@ -164,8 +160,8 @@ def main() -> int:
         words = []
 
     # --------------------------------------------------------
-    # FX analysis (mirrors visual_fx.py::main() -- always runs,
-    # the baseline grade is on regardless of dynamic event count).
+    # FX analysis (mirrors visual_fx.py::main(), but production rendering
+    # now applies only momentary semantic FX in this pass).
     # --------------------------------------------------------
 
     moments, intensity_curve = build_semantic_moments(
@@ -265,20 +261,35 @@ def main() -> int:
                     flush=True,
                 )
 
-            motion_events = build_motion_events(
+            fallback_motion_events = build_motion_events(
                 words,
                 duration,
                 scene_cuts,
                 edit_energy,
             )
-            motion_events = apply_shot_aware_zoom_strength(
-                motion_events,
+            fallback_motion_events = apply_shot_aware_zoom_strength(
+                fallback_motion_events,
                 shot_types,
                 edit_energy,
             )
-            motion_events = enrich_motion_events(
-                motion_events,
+            fallback_motion_events = enrich_motion_events(
+                fallback_motion_events,
                 duration,
+                edit_energy,
+            )
+            recipe_motion_events = motion_events_for_moments(
+                moments,
+                duration,
+                edit_energy,
+            )
+            recipe_motion_events = apply_shot_aware_zoom_strength(
+                recipe_motion_events,
+                shot_types,
+                edit_energy,
+            )
+            motion_events = merge_motion_events(
+                recipe_motion_events,
+                fallback_motion_events,
                 edit_energy,
             )
 
@@ -292,7 +303,12 @@ def main() -> int:
             )
 
             print(
-                f"Smart motion events selected: {len(motion_events)}",
+                (
+                    "Motion events selected: "
+                    f"{len(motion_events)} "
+                    f"({len(recipe_motion_events)} recipe, "
+                    f"{len(motion_events) - len(recipe_motion_events)} fallback)"
+                ),
                 flush=True,
             )
 
@@ -307,7 +323,8 @@ def main() -> int:
                         f"{event['end']:.2f}s, "
                         f"{event['zoom']:.2f}x, "
                         f"{event.get('movement', 'punch_in')}, "
-                        f"trigger={event['trigger_word']}"
+                        f"trigger={event['trigger_word']}, "
+                        f"source={event.get('source', 'smart_motion_fallback')}"
                     ),
                     flush=True,
                 )
@@ -350,10 +367,10 @@ def main() -> int:
         content_height,
     ) = content_rect
 
-    fx_chain = build_filter_chain(
-        edit_energy,
+    fx_chain = build_semantic_filter_chain(
         fx_events,
         intensity,
+        edit_energy,
     )
 
     inner_chain = (

@@ -109,7 +109,7 @@ A few optional environment variables, all with sensible defaults if unset:
 - `app/gui_app/` — the PySide6 UI: main window, the custom timeline
   widget, the visual style sheet, and one `mixins/` file per feature area
 - `app/*.py` — the render pipeline itself (clip selection, cuts,
-  transcription, captions, motion, color grade/FX, AI visuals, emoji,
+  transcription, captions, motion, base color polish, semantic FX, AI visuals, emoji,
   sound effects, final render) — each stage is a standalone,
   independently runnable script
 - `tests/` — the automated test suite (`pytest`)

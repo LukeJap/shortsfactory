@@ -6,7 +6,7 @@ keyed on actual file bytes rather than mtime, since STEP 2/6 both write
 to fixed, repeatedly-overwritten paths where mtime alone can never
 usefully cache-hit). Also runs the post-transcription pipeline stages in
 sequence: transcript corrections, temporal edit, smart motion, AI
-visuals, visual FX (see main()'s maybe_apply_* calls). Following the
+visuals, semantic visual FX (see main()'s maybe_apply_* calls). Following the
 feature/LukeV2 merge, can alternatively reuse/remap the full-source
 transcript through the applied cuts (--remap-through-cuts) instead of
 re-running Whisper at all -- see remap_transcript_through_edit_plan().
@@ -1169,7 +1169,7 @@ def maybe_apply_motion_and_fx(
 ) -> None:
     """
     render.py already re-transcribes short1_tight.mp4 immediately before
-    captions are generated. Hook the combined punch-in motion + visual FX
+    captions are generated. Hook the combined smart motion + semantic FX
     pass (motion_and_fx.py -- merges what used to be two separate full
     re-encodes, smart_motion.py then visual_fx.py, into one) into that
     exact moment so timing stays unchanged and render.py does not need
@@ -1188,7 +1188,7 @@ def maybe_apply_motion_and_fx(
     if not script_path.exists():
 
         print(
-            "Motion/FX script not installed; continuing without punch-ins or grade.",
+            "Motion/FX script not installed; continuing without motion or semantic FX.",
             flush=True,
         )
 
@@ -1200,7 +1200,7 @@ def maybe_apply_motion_and_fx(
     )
 
     print(
-        "Applying automatic punch-in motion and visual grade/FX...",
+        "Applying coordinated motion and semantic visual FX...",
         flush=True,
     )
 

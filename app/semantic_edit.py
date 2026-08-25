@@ -9,6 +9,7 @@ approved cuts here with pause cuts and manual cuts into the final edit.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,28 @@ except ImportError:
 
 
 ROOT = Path(__file__).resolve().parent.parent
+SEMANTIC_AI_TIMEOUT_ENV = "SHORTSFACTORY_SEMANTIC_AI_TIMEOUT_SECONDS"
+DEFAULT_SEMANTIC_AI_TIMEOUT_SECONDS = 30.0
+
+
+def semantic_ai_timeout_seconds() -> float:
+    try:
+        timeout = float(
+            os.getenv(
+                SEMANTIC_AI_TIMEOUT_ENV,
+                str(DEFAULT_SEMANTIC_AI_TIMEOUT_SECONDS),
+            )
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return DEFAULT_SEMANTIC_AI_TIMEOUT_SECONDS
+
+    return max(
+        1.0,
+        timeout,
+    )
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -76,7 +99,7 @@ def call_ollama(
                 "temperature": 0.1,
             },
         },
-        timeout=180,
+        timeout=semantic_ai_timeout_seconds(),
     )
 
     response.raise_for_status()

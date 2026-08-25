@@ -1,13 +1,9 @@
 """
-Applies the baseline color grade (contrast/saturation/vignette, scaled by
-both edit-energy tier and the user-adjustable fx_intensity slider -- see
-baseline_filters()) plus semantic per-moment FX (RGB-split accent
-stripes, screen flashes, drawtext slam-text) driven by
-visual_emphasis.py's intensity curve. Runs after smart motion, before
-caption burn-in, in the post-transcription pipeline (subtitles.py's
-main()). Filters are computed relative to the actual visible content
-rect, not the full canvas, so effects like vignette falloff are
-calibrated to real content even if letterboxing is ever reintroduced.
+Builds semantic per-moment polish accents driven by visual_emphasis.py's
+intensity curve. The old energy-tier baseline color grade remains
+available through baseline_filters() / build_filter_chain() for standalone
+compatibility, but the production render path applies the always-on base
+look in render.py's STEP 1 and uses semantic-only filters here.
 """
 
 from __future__ import annotations
@@ -17,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +96,173 @@ def _default_font_candidates() -> list[Path]:
 FONT_CANDIDATES = _default_font_candidates()
 
 
+@dataclass(frozen=True)
+class ProfessionalFxRecipe:
+    durations: dict[str, float]
+    motion: str
+    zoom: dict[str, float]
+    contrast_peak: float = 0.0
+    saturation_peak: float = 0.0
+    brightness_peak: float = 0.0
+    sharpness: float = 0.0
+    blur_radius: dict[str, float] | None = None
+    blur_angle: float = 0.0
+    glow_warmth: float = 0.0
+
+
+PROFESSIONAL_FX_RECIPES: dict[str, ProfessionalFxRecipe] = {
+    "impact_punch": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.38,
+            "PUNCHY": 0.48,
+            "MAXIMUM": 0.56,
+        },
+        motion="impact_punch",
+        zoom={
+            "LOW": 1.045,
+            "PUNCHY": 1.080,
+            "MAXIMUM": 1.105,
+        },
+        contrast_peak=0.060,
+        saturation_peak=0.045,
+        brightness_peak=0.010,
+        sharpness=0.18,
+    ),
+    "reaction_push_in": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.62,
+            "PUNCHY": 0.76,
+            "MAXIMUM": 0.88,
+        },
+        motion="punch_in",
+        zoom={
+            "LOW": 1.035,
+            "PUNCHY": 1.065,
+            "MAXIMUM": 1.090,
+        },
+        contrast_peak=0.045,
+        saturation_peak=0.040,
+        brightness_peak=0.004,
+        sharpness=0.12,
+    ),
+    "micro_camera_hit": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.14,
+            "PUNCHY": 0.20,
+            "MAXIMUM": 0.24,
+        },
+        motion="impact_jolt",
+        zoom={
+            "LOW": 1.020,
+            "PUNCHY": 1.045,
+            "MAXIMUM": 1.065,
+        },
+        contrast_peak=0.040,
+        saturation_peak=0.030,
+        brightness_peak=0.006,
+        sharpness=0.08,
+        blur_radius={
+            "LOW": 0.0,
+            "PUNCHY": 1.2,
+            "MAXIMUM": 1.8,
+        },
+        blur_angle=12.0,
+    ),
+    "whip_blur": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.16,
+            "PUNCHY": 0.22,
+            "MAXIMUM": 0.28,
+        },
+        motion="directional_push",
+        zoom={
+            "LOW": 1.020,
+            "PUNCHY": 1.045,
+            "MAXIMUM": 1.065,
+        },
+        contrast_peak=0.030,
+        saturation_peak=0.025,
+        brightness_peak=0.003,
+        blur_radius={
+            "LOW": 1.0,
+            "PUNCHY": 2.0,
+            "MAXIMUM": 3.0,
+        },
+        blur_angle=0.0,
+    ),
+    "cinematic_push": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.90,
+            "PUNCHY": 1.15,
+            "MAXIMUM": 1.35,
+        },
+        motion="slow_push",
+        zoom={
+            "LOW": 1.030,
+            "PUNCHY": 1.050,
+            "MAXIMUM": 1.070,
+        },
+        contrast_peak=0.050,
+        saturation_peak=-0.020,
+        brightness_peak=-0.004,
+    ),
+    "comedy_pull_out": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.48,
+            "PUNCHY": 0.68,
+            "MAXIMUM": 0.82,
+        },
+        motion="punch_out",
+        zoom={
+            "LOW": 1.025,
+            "PUNCHY": 1.050,
+            "MAXIMUM": 1.070,
+        },
+        contrast_peak=0.035,
+        saturation_peak=0.025,
+        brightness_peak=0.002,
+    ),
+    "bloom_glow": ProfessionalFxRecipe(
+        durations={
+            "LOW": 0.42,
+            "PUNCHY": 0.58,
+            "MAXIMUM": 0.72,
+        },
+        motion="punch_in",
+        zoom={
+            "LOW": 1.025,
+            "PUNCHY": 1.045,
+            "MAXIMUM": 1.065,
+        },
+        contrast_peak=0.040,
+        saturation_peak=0.070,
+        brightness_peak=0.016,
+        sharpness=0.08,
+        glow_warmth=0.010,
+    ),
+}
+
+
+LEGACY_EFFECT_ALIASES = {
+    "contrast_hit": "reaction_push_in",
+    "detail_hit": "reaction_push_in",
+    "contrast_flash": "impact_punch",
+    "overdrive_flash": "impact_punch",
+    "red_danger": "impact_punch",
+    "rgb_split": "impact_punch",
+    "glitch_hit": "impact_punch",
+    "magenta_hype": "reaction_push_in",
+    "posterize_hit": "comedy_pull_out",
+    "bloom_flash": "bloom_glow",
+    "green_money": "bloom_glow",
+    "warm_gold": "bloom_glow",
+    "desat_hit": "cinematic_push",
+    "cold_blue": "cinematic_push",
+    "spotlight": "cinematic_push",
+    "slam_text": "impact_punch",
+}
+
+
 def load_json(
     path: Path,
 ) -> dict[str, Any]:
@@ -174,10 +338,99 @@ def effect_for_word(
     raw_word: str,
     classification: dict[str, Any],
 ) -> str:
-
-    alpha = clean_alpha(
-        raw_word
+    _, recipe = professional_moment_recipe(
+        raw_word,
+        classification,
     )
+
+    return recipe
+
+
+def normalize_fx_recipe(
+    value: str | None,
+) -> str:
+    normalized = (
+        str(
+            value
+            or ""
+        )
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+    if normalized in PROFESSIONAL_FX_RECIPES:
+        return normalized
+
+    return LEGACY_EFFECT_ALIASES.get(
+        normalized,
+        "reaction_push_in",
+    )
+
+
+def recipe_value(
+    values: dict[str, float],
+    energy: str,
+) -> float:
+    return float(
+        values.get(
+            normalize_energy(
+                energy
+            ),
+            values.get(
+                DEFAULT_ENERGY,
+                next(
+                    iter(
+                        values.values()
+                    )
+                ),
+            ),
+        )
+    )
+
+
+def event_duration(
+    effect: str,
+    level: str,
+    energy: str,
+) -> float:
+    recipe = PROFESSIONAL_FX_RECIPES[
+        normalize_fx_recipe(
+            effect
+        )
+    ]
+
+    duration = recipe_value(
+        recipe.durations,
+        energy,
+    )
+
+    if str(
+        level
+    ).upper() == "EXTREME":
+        duration *= 1.12
+
+    return round(
+        duration,
+        3,
+    )
+
+
+def professional_moment_recipe(
+    raw_word: str,
+    classification: dict[str, Any],
+) -> tuple[str, str]:
+    legacy_recipe = semantic_recipe(
+        raw_word,
+        classification,
+    )
+    level = str(
+        classification.get(
+            "level",
+            "NORMAL",
+        )
+    ).upper()
     category = str(
         classification.get(
             "category",
@@ -190,109 +443,93 @@ def effect_for_word(
             "bone",
         )
     )
-    level = str(
-        classification.get(
-            "level",
-            "NORMAL",
-        )
+    alpha = clean_alpha(
+        raw_word
     )
+
+    if legacy_recipe == "fail_awkward":
+        return (
+            "AWKWARD",
+            "comedy_pull_out",
+        )
 
     if category in {
         "money",
         "number",
-    }:
-        return "green_money"
-
-    if alpha in {
-        "never",
-        "nothing",
-        "dead",
-        "died",
-        "dying",
-        "sad",
-        "failure",
-    }:
-        return "desat_hit"
-
-    if alpha in {
-        "weird",
-        "strange",
-        "confused",
-        "what",
-        "why",
-        "crazy",
-        "insane",
+    } or legacy_recipe in {
+        "money",
+        "hype_win",
     }:
         return (
-            "glitch_hit"
-            if level in {
-                "IMPACT",
-                "EXTREME",
-            }
-            else "magenta_hype"
+            "TRIUMPH",
+            "bloom_glow",
         )
 
-    if accent == "warm":
-        return "warm_gold"
+    if legacy_recipe in {
+        "doom_negative",
+        "creepy_cold",
+        "nostalgia_memory",
+    }:
+        return (
+            "EMOTIONAL",
+            "cinematic_push",
+        )
 
-    if accent == "danger":
-        return "red_danger"
+    if alpha in {
+        "what",
+        "who",
+        "why",
+        "wait",
+        "wow",
+        "oh",
+        "really",
+    } or legacy_recipe == "reaction":
+        return (
+            "REACTION",
+            (
+                "impact_punch"
+                if level == "EXTREME"
+                else "reaction_push_in"
+            ),
+        )
 
-    if accent == "cold":
-        return "cold_blue"
+    if accent == "danger" or alpha in {
+        "angry",
+        "danger",
+        "dangerous",
+        "ow",
+    }:
+        return (
+            "ANGER",
+            "impact_punch",
+        )
+
+    if legacy_recipe == "wtf_chaos":
+        return (
+            "SHOCK",
+            (
+                "impact_punch"
+                if level in {
+                    "IMPACT",
+                    "EXTREME",
+                }
+                else "reaction_push_in"
+            ),
+        )
 
     if level in {
         "IMPACT",
         "EXTREME",
     }:
-        return "contrast_flash"
+        return (
+            "PUNCHLINE",
+            "impact_punch",
+        )
 
-    return "contrast_hit"
-
-
-def event_duration(
-    effect: str,
-    level: str,
-    energy: str,
-) -> float:
-
-    if effect == "contrast_flash":
-        return 0.34 if energy != "LOW" else 0.24
-
-    if effect == "overdrive_flash":
-        return 0.18
-
-    if effect == "rgb_split":
-        return 0.22 if energy == "MAXIMUM" else 0.16
-
-    if effect == "glitch_hit":
-        return 0.30 if energy == "MAXIMUM" else 0.22
-
-    if effect in {
-        "posterize_hit",
-        "bloom_flash",
-        "spotlight",
-        "detail_hit",
-    }:
-        return 0.62 if energy == "MAXIMUM" else 0.42
-
-    if effect in {
-        "desat_hit",
-        "cold_blue",
-        "green_money",
-        "red_danger",
-        "magenta_hype",
-        "warm_gold",
-    }:
-        return 1.15 if energy == "MAXIMUM" else 0.86
-
-    if level == "EXTREME":
-        return 1.20
-
-    if level == "IMPACT":
-        return 0.75
-
-    return 0.48
+    return (
+        "REACTION",
+        "reaction_push_in",
+    )
 
 
 def clip_duration_from_words(
@@ -339,29 +576,46 @@ def build_semantic_moments(
     duration = clip_duration_from_words(
         words
     )
+    profile = energy_profile(
+        energy
+    )
     max_moments = int(
-        energy_profile(
-            energy
-        ).get(
+        profile.get(
             "max_filter_events",
             4,
         )
     )
+    if duration < 9:
+        max_moments = min(
+            1,
+            max_moments,
+        )
+    elif duration < 18:
+        max_moments = min(
+            2,
+            max_moments,
+        )
+    elif duration < 30:
+        max_moments = min(
+            3
+            if energy != "MAXIMUM"
+            else 4,
+            max_moments,
+        )
+
     max_hero_moments = int(
-        energy_profile(
-            energy
-        ).get(
+        profile.get(
             "max_hero_moments",
             1,
         )
     )
     spacing = {
-        "LOW": 5.5,
-        "PUNCHY": 1.85,
-        "MAXIMUM": 0.78,
+        "LOW": 8.0,
+        "PUNCHY": 4.0,
+        "MAXIMUM": 2.25,
     }.get(
         energy,
-        1.85,
+        4.0,
     )
 
     candidates: list[dict[str, Any]] = []
@@ -400,15 +654,19 @@ def build_semantic_moments(
             continue
 
         start, end = timing
-        recipe = semantic_recipe(
+        legacy_recipe = semantic_recipe(
             word,
+            classification,
+        )
+        moment_type, recipe = professional_moment_recipe(
+            raw_word,
             classification,
         )
         intensity = intensity_for_moment(
             start,
             duration,
             classification,
-            recipe,
+            legacy_recipe,
             energy,
         )
         intensity_value = float(
@@ -433,9 +691,9 @@ def build_semantic_moments(
                 2.0
                 if recipe
                 in {
-                    "wtf_chaos",
-                    "reaction",
-                    "money",
+                    "impact_punch",
+                    "reaction_push_in",
+                    "bloom_glow",
                 }
                 else 0.0
             )
@@ -458,6 +716,8 @@ def build_semantic_moments(
                     3,
                 ),
                 "recipe": recipe,
+                "legacy_recipe": legacy_recipe,
+                "moment_type": moment_type,
                 "region": intensity.get(
                     "region",
                     "unknown",
@@ -593,41 +853,38 @@ def base_filter_for_recipe(
     energy: str,
 ) -> str:
 
-    if energy != "MAXIMUM":
-        return effect_for_word(
-            raw_word,
-            classification,
-        )
+    normalized = normalize_fx_recipe(
+        recipe
+    )
 
-    return {
-        "wtf_chaos": "rgb_split",
-        "money": "green_money",
-        "doom_negative": "desat_hit",
-        "hype_win": "magenta_hype",
-        "fail_awkward": "posterize_hit",
-        "creepy_cold": "cold_blue",
-        "nostalgia_memory": "warm_gold",
-        "reaction": "contrast_flash",
-        "speech_emphasis": "detail_hit",
-    }.get(
-        recipe,
-        effect_for_word(
-            raw_word,
-            classification,
-        ),
+    if normalized in PROFESSIONAL_FX_RECIPES:
+        return normalized
+
+    return effect_for_word(
+        raw_word,
+        classification,
     )
 
 
-def max_stack_effects_for_moment(
+def supporting_effects_for_moment(
     moment: dict[str, Any],
+    energy: str,
 ) -> list[str]:
 
-    recipe = str(
-        moment.get(
-            "recipe",
-            "speech_emphasis",
+    recipe = normalize_fx_recipe(
+        str(
+            moment.get(
+                "recipe",
+                "reaction_push_in",
+            )
         )
     )
+    level = str(
+        moment.get(
+            "level",
+            "",
+        )
+    ).upper()
     hero = bool(
         moment.get(
             "hero",
@@ -639,63 +896,49 @@ def max_stack_effects_for_moment(
             "intensity",
             0.0,
         )
+        or 0.0
     )
 
-    effects = {
-        "wtf_chaos": [
-            "rgb_split",
-            "contrast_flash",
-        ],
-        "money": [
-            "green_money",
-            "bloom_flash",
-        ],
-        "doom_negative": [
-            "desat_hit",
-            "spotlight",
-        ],
-        "hype_win": [
-            "magenta_hype",
-            "bloom_flash",
-        ],
-        "fail_awkward": [
-            "desat_hit",
-            "posterize_hit",
-        ],
-        "creepy_cold": [
-            "cold_blue",
-            "spotlight",
-        ],
-        "nostalgia_memory": [
-            "warm_gold",
-            "bloom_flash",
-        ],
-        "reaction": [
-            "contrast_flash",
-            "posterize_hit",
-        ],
-        "speech_emphasis": [
-            "detail_hit",
-        ],
-    }.get(
-        recipe,
-        [
-            "contrast_hit",
-        ],
-    )
+    effects = [
+        recipe
+    ]
 
-    if hero and recipe in {
-        "wtf_chaos",
-        "reaction",
-        "fail_awkward",
-    }:
+    if normalize_energy(
+        energy
+    ) == "LOW":
+        return effects
+
+    if (
+        recipe == "impact_punch"
+        and (
+            hero
+            or level in {
+                "IMPACT",
+                "EXTREME",
+            }
+            or intensity >= 0.68
+        )
+    ):
         effects.append(
-            "rgb_split"
+            "micro_camera_hit"
         )
 
-    if hero and intensity >= 0.82:
+    if (
+        normalize_energy(
+            energy
+        )
+        == "MAXIMUM"
+        and recipe in {
+            "impact_punch",
+            "comedy_pull_out",
+        }
+        and (
+            hero
+            or intensity >= 0.78
+        )
+    ):
         effects.append(
-            "overdrive_flash"
+            "whip_blur"
         )
 
     return list(
@@ -705,41 +948,251 @@ def max_stack_effects_for_moment(
     )
 
 
+def max_stack_effects_for_moment(
+    moment: dict[str, Any],
+) -> list[str]:
+
+    return supporting_effects_for_moment(
+        moment,
+        "MAXIMUM",
+    )
+
+
+def motion_events_for_moments(
+    moments: list[dict[str, Any]],
+    duration: float,
+    energy: str,
+) -> list[dict[str, Any]]:
+
+    if (
+        not moments
+        or duration <= 0
+    ):
+        return []
+
+    energy = normalize_energy(
+        energy
+    )
+    events: list[dict[str, Any]] = []
+
+    for index, moment in enumerate(
+        moments
+    ):
+        recipe_key = normalize_fx_recipe(
+            str(
+                moment.get(
+                    "recipe",
+                    "reaction_push_in",
+                )
+            )
+        )
+        recipe = PROFESSIONAL_FX_RECIPES[
+            recipe_key
+        ]
+        start = max(
+            0.0,
+            coerce_float(
+                moment.get(
+                    "start",
+                    0.0,
+                )
+                or 0.0,
+                0.0,
+            )
+            - (
+                0.04
+                if recipe_key
+                in {
+                    "impact_punch",
+                    "micro_camera_hit",
+                    "whip_blur",
+                }
+                else 0.08
+            ),
+        )
+        event_end = min(
+            duration,
+            start
+            + recipe_value(
+                recipe.durations,
+                energy,
+            ),
+        )
+
+        if event_end <= start:
+            continue
+
+        movement = recipe.motion
+        event: dict[str, Any] = {
+            "start": round(
+                start,
+                3,
+            ),
+            "end": round(
+                event_end,
+                3,
+            ),
+            "zoom": round(
+                recipe_value(
+                    recipe.zoom,
+                    energy,
+                ),
+                3,
+            ),
+            "trigger_word": str(
+                moment.get(
+                    "trigger_word",
+                    "speech_beat",
+                )
+                or "speech_beat"
+            ),
+            "energy": energy,
+            "movement": movement,
+            "reason": "semantic visual-fx recipe",
+            "source": "visual_fx_recipe",
+            "fx_recipe": recipe_key,
+            "moment_type": moment.get(
+                "moment_type",
+                "",
+            ),
+            "stack_id": moment.get(
+                "stack_id",
+                "",
+            ),
+        }
+
+        if movement in {
+            "impact_punch",
+            "impact_jolt",
+        }:
+            direction = (
+                -1.0
+                if index % 2
+                else 1.0
+            )
+            event["x_bias"] = round(
+                0.018
+                * direction,
+                3,
+            )
+            event["y_bias"] = round(
+                (
+                    -0.012
+                    if index % 3 == 0
+                    else 0.012
+                ),
+                3,
+            )
+        elif movement == "directional_push":
+            event["x_bias"] = (
+                -0.026
+                if index % 2
+                else 0.026
+            )
+
+        events.append(
+            event
+        )
+
+    events.sort(
+        key=lambda event: float(
+            event.get(
+                "start",
+                0.0,
+            )
+            or 0.0
+        )
+    )
+
+    return events
+
+
+def motion_event_spacing(
+    energy: str,
+) -> float:
+
+    return {
+        "LOW": 1.20,
+        "PUNCHY": 0.82,
+        "MAXIMUM": 0.58,
+    }.get(
+        normalize_energy(
+            energy
+        ),
+        0.82,
+    )
+
+
+def merge_motion_events(
+    recipe_events: list[dict[str, Any]],
+    fallback_events: list[dict[str, Any]],
+    energy: str,
+) -> list[dict[str, Any]]:
+
+    spacing = motion_event_spacing(
+        energy
+    )
+    merged = [
+        dict(
+            event
+        )
+        for event in recipe_events
+    ]
+
+    for fallback in fallback_events:
+        fallback_start = float(
+            fallback.get(
+                "start",
+                0.0,
+            )
+            or 0.0
+        )
+        if any(
+            abs(
+                fallback_start
+                - float(
+                    event.get(
+                        "start",
+                        0.0,
+                    )
+                    or 0.0
+                )
+            )
+            < spacing
+            for event in merged
+        ):
+            continue
+
+        enriched = dict(
+            fallback
+        )
+        enriched.setdefault(
+            "source",
+            "smart_motion_fallback",
+        )
+        merged.append(
+            enriched
+        )
+
+    merged.sort(
+        key=lambda event: float(
+            event.get(
+                "start",
+                0.0,
+            )
+            or 0.0
+        )
+    )
+
+    return merged
+
+
 def moment_should_have_graphic(
     moment: dict[str, Any],
     energy: str,
 ) -> bool:
 
-    recipe = str(
-        moment.get(
-            "recipe",
-            "",
-        )
-    )
-    level = str(
-        moment.get(
-            "level",
-            "",
-        )
-    )
-
-    if recipe in {
-        "money",
-        "wtf_chaos",
-        "reaction",
-    }:
-        return energy == "MAXIMUM" or level in {
-            "IMPACT",
-            "EXTREME",
-        }
-
-    return bool(
-        moment.get(
-            "hero",
-            False,
-        )
-        or level == "EXTREME"
-    )
+    return False
 
 
 def event_from_moment(
@@ -750,6 +1203,10 @@ def event_from_moment(
     start_offset: float = 0.0,
     duration: float | None = None,
 ) -> dict[str, Any]:
+
+    effect = normalize_fx_recipe(
+        effect
+    )
 
     start = float(
         moment.get(
@@ -767,7 +1224,12 @@ def event_from_moment(
                     "NORMAL",
                 )
             ),
-            "MAXIMUM",
+            str(
+                moment.get(
+                    "energy",
+                    DEFAULT_ENERGY,
+                )
+            ),
         )
 
     end = max(
@@ -811,9 +1273,14 @@ def event_from_moment(
             "reason",
             "",
         ),
-        "recipe": moment.get(
-            "recipe",
-            "speech_emphasis",
+        "recipe": effect,
+        "legacy_recipe": moment.get(
+            "legacy_recipe",
+            "",
+        ),
+        "moment_type": moment.get(
+            "moment_type",
+            "",
         ),
         "region": moment.get(
             "region",
@@ -1161,9 +1628,249 @@ def drawtext_font_option() -> str:
     return ""
 
 
+def coerce_float(
+    value: Any,
+    default: float,
+) -> float:
+    try:
+        return float(
+            value
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+def event_strength(
+    event: dict[str, Any],
+    global_intensity: float,
+) -> float:
+    raw = event.get(
+        "intensity",
+        None,
+    )
+    local = (
+        0.68
+        if raw is None
+        or raw == ""
+        else coerce_float(
+            raw,
+            0.68,
+        )
+    )
+
+    return max(
+        0.0,
+        min(
+            1.35,
+            local
+            * coerce_fx_intensity(
+                global_intensity
+            ),
+        ),
+    )
+
+
+def event_times(
+    event: dict[str, Any],
+    recipe: ProfessionalFxRecipe,
+    energy: str,
+) -> tuple[float, float]:
+    start = max(
+        0.0,
+        coerce_float(
+            event.get(
+                "start",
+                0.0,
+            ),
+            0.0,
+        ),
+    )
+    end = coerce_float(
+        event.get(
+            "end",
+            0.0,
+        ),
+        0.0,
+    )
+
+    if end <= start:
+        end = start + recipe_value(
+            recipe.durations,
+            energy,
+        )
+
+    return (
+        start,
+        max(
+            start + 0.08,
+            end,
+        ),
+    )
+
+
+def smoothstep(
+    phase: str,
+) -> str:
+    return (
+        f"({phase})*({phase})*(3-2*({phase}))"
+    )
+
+
+def envelope_expression(
+    start: float,
+    end: float,
+    peak_fraction: float = 0.34,
+) -> str:
+    span = max(
+        0.08,
+        end
+        - start,
+    )
+    peak = min(
+        end
+        - 0.03,
+        max(
+            start
+            + 0.03,
+            start
+            + span
+            * peak_fraction,
+        ),
+    )
+    attack_denominator = max(
+        0.001,
+        peak
+        - start,
+    )
+    release_denominator = max(
+        0.001,
+        end
+        - peak,
+    )
+    attack_phase = (
+        f"((t-{start:.3f})/{attack_denominator:.3f})"
+    )
+    release_phase = (
+        f"(({end:.3f}-t)/{release_denominator:.3f})"
+    )
+
+    return (
+        f"if(between(t,{start:.3f},{peak:.3f}),"
+        f"{smoothstep(attack_phase)},"
+        f"if(between(t,{peak:.3f},{end:.3f}),"
+        f"{smoothstep(release_phase)},0))"
+    )
+
+
+def plus_delta_expression(
+    base: float,
+    delta: float,
+    envelope: str,
+) -> str:
+    if delta < 0:
+        return (
+            f"{base:.4f}{delta:.4f}*{envelope}"
+        )
+
+    return (
+        f"{base:.4f}+{delta:.4f}*{envelope}"
+    )
+
+
+def recipe_filters(
+    event: dict[str, Any],
+    recipe_key: str,
+    energy: str,
+    global_intensity: float,
+) -> list[str]:
+    recipe = PROFESSIONAL_FX_RECIPES[
+        normalize_fx_recipe(
+            recipe_key
+        )
+    ]
+    start, end = event_times(
+        event,
+        recipe,
+        energy,
+    )
+    enable = enable_between(
+        start,
+        end,
+    )
+    strength = event_strength(
+        event,
+        global_intensity,
+    )
+    envelope = envelope_expression(
+        start,
+        end,
+    )
+
+    filters: list[str] = []
+
+    if recipe.blur_radius:
+        radius = (
+            recipe_value(
+                recipe.blur_radius,
+                energy,
+            )
+            * strength
+        )
+        if radius > 0.01:
+            filters.append(
+                (
+                    f"dblur=angle={recipe.blur_angle:.1f}:"
+                    f"radius={radius:.3f}:"
+                    "planes=1:"
+                    f"enable='{enable}'"
+                )
+            )
+
+    filters.append(
+        (
+            "eq="
+            f"contrast='{plus_delta_expression(1.0, recipe.contrast_peak * strength, envelope)}':"
+            f"saturation='{plus_delta_expression(1.0, recipe.saturation_peak * strength, envelope)}':"
+            f"brightness='{recipe.brightness_peak * strength:.4f}*{envelope}':"
+            "eval=frame"
+        )
+    )
+
+    if recipe.glow_warmth:
+        warmth = recipe.glow_warmth * strength
+        filters.append(
+            (
+                f"colorbalance=rs={warmth:.4f}:"
+                f"rm={warmth:.4f}:"
+                f"rh={warmth * 0.5:.4f}:"
+                f"bs={-warmth:.4f}:"
+                f"bm={-warmth:.4f}:"
+                f"bh={-warmth * 0.5:.4f}:"
+                f"enable='{enable}'"
+            )
+        )
+
+    sharpness = recipe.sharpness * strength
+    if sharpness > 0.01:
+        filters.append(
+            (
+                f"unsharp=5:5:{sharpness:.4f}:"
+                "3:3:0.0000:"
+                f"enable='{enable}'"
+            )
+        )
+
+    return filters
+
+
 def filters_for_event(
     event: dict[str, Any],
     index: int,
+    intensity: float = 1.0,
+    energy: str = DEFAULT_ENERGY,
 ) -> list[str]:
 
     start = float(
@@ -1182,10 +1889,15 @@ def filters_for_event(
         start,
         end,
     )
-    effect = str(
-        event.get(
-            "effect",
-            "",
+    effect = normalize_fx_recipe(
+        str(
+            event.get(
+                "effect",
+                event.get(
+                    "recipe",
+                    "",
+                ),
+            )
         )
     )
 
@@ -1221,126 +1933,71 @@ def filters_for_event(
             )
         ]
 
-    if effect == "desat_hit":
-        return [
-            f"hue=s=0.16:enable='{enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.10:t=fill:enable='{enable}'",
-        ]
+    return recipe_filters(
+        event,
+        effect,
+        energy,
+        intensity,
+    )
 
-    if effect == "cold_blue":
-        return [
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=cyan@0.11:t=fill:enable='{enable}'",
-            f"eq=contrast=1.08:saturation=0.92:enable='{enable}'",
-        ]
 
-    if effect == "warm_gold":
-        return [
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=orange@0.11:t=fill:enable='{enable}'",
-            f"eq=contrast=1.10:saturation=1.12:enable='{enable}'",
-        ]
+def semantic_event_filters(
+    events: list[dict[str, Any]],
+    intensity: float = 1.0,
+    energy: str = DEFAULT_ENERGY,
+) -> list[str]:
+    """Return only the momentary semantic visual-FX filters."""
 
-    if effect == "green_money":
-        return [
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=green@0.14:t=fill:enable='{enable}'",
-            f"eq=contrast=1.16:saturation=1.18:enable='{enable}'",
-        ]
+    if coerce_fx_intensity(
+        intensity
+    ) <= 0.0:
+        return []
 
-    if effect == "red_danger":
-        return [
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=red@0.15:t=fill:enable='{enable}'",
-            f"eq=contrast=1.18:saturation=1.12:enable='{enable}'",
-        ]
+    filters: list[str] = []
 
-    if effect == "magenta_hype":
-        return [
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=magenta@0.16:t=fill:enable='{enable}'",
-            f"eq=contrast=1.22:saturation=1.34:brightness=0.010:enable='{enable}'",
-        ]
-
-    if effect == "rgb_split":
-        stripe_enable = enable_between(
-            start,
-            min(
-                end,
-                start + 0.20,
-            ),
+    for index, event in enumerate(
+        events,
+        start=1,
+    ):
+        filters.extend(
+            filters_for_event(
+                event,
+                index,
+                intensity,
+                energy,
+            )
         )
-        return [
-            f"drawbox=x=0:y=h*0.16:w=iw:h=11:color=red@0.28:t=fill:enable='{stripe_enable}'",
-            f"drawbox=x=0:y=h*0.22:w=iw:h=8:color=cyan@0.24:t=fill:enable='{stripe_enable}'",
-            f"drawbox=x=0:y=h*0.67:w=iw:h=12:color=magenta@0.26:t=fill:enable='{stripe_enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=cyan@0.055:t=fill:enable='{enable}'",
-            f"eq=contrast=1.34:saturation=1.42:enable='{enable}'",
-        ]
 
-    if effect == "glitch_hit":
-        stripe_enable = enable_between(
-            start,
-            min(
-                end,
-                start + 0.22,
-            ),
+    return filters
+
+
+def build_semantic_filter_chain(
+    events: list[dict[str, Any]],
+    intensity: float = 1.0,
+    energy: str = DEFAULT_ENERGY,
+) -> str:
+    """Return the production semantic-FX chain without a baseline grade."""
+
+    filters: list[str] = []
+
+    if coerce_fx_intensity(
+        intensity
+    ) > 0.0:
+        filters.extend(
+            semantic_event_filters(
+                events,
+                intensity,
+                energy,
+            )
         )
-        return [
-            f"drawbox=x=0:y=h*0.18:w=iw:h=18:color=cyan@0.28:t=fill:enable='{stripe_enable}'",
-            f"drawbox=x=0:y=h*0.62:w=iw:h=14:color=magenta@0.26:t=fill:enable='{stripe_enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=magenta@0.10:t=fill:enable='{enable}'",
-            f"eq=contrast=1.22:saturation=1.28:enable='{enable}'",
-        ]
 
-    if effect == "posterize_hit":
-        return [
-            f"eq=contrast=1.48:saturation=1.34:gamma=0.86:enable='{enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.08:t=fill:enable='{enable}'",
-            f"unsharp=5:5:0.72:3:3:0.18:enable='{enable}'",
-        ]
+    filters.append(
+        "format=yuv420p"
+    )
 
-    if effect == "bloom_flash":
-        bloom_end = min(
-            end,
-            start + 0.22,
-        )
-        return [
-            f"eq=contrast=1.10:saturation=1.36:brightness=0.028:enable='{enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.12:t=fill:enable='{enable_between(start, bloom_end)}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=yellow@0.045:t=fill:enable='{enable}'",
-        ]
-
-    if effect == "spotlight":
-        return [
-            f"vignette=PI/3.2:enable='{enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.065:t=fill:enable='{enable}'",
-        ]
-
-    if effect == "detail_hit":
-        return [
-            f"eq=contrast=1.18:saturation=1.16:brightness=0.008:enable='{enable}'",
-            f"unsharp=5:5:0.82:3:3:0.20:enable='{enable}'",
-        ]
-
-    if effect == "overdrive_flash":
-        flash_end = min(
-            end,
-            start + 0.14,
-        )
-        return [
-            f"eq=contrast=1.42:saturation=1.36:brightness=0.045:enable='{enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.18:t=fill:enable='{enable_between(start, flash_end)}'",
-        ]
-
-    if effect == "contrast_flash":
-        flash_end = min(
-            end,
-            start + 0.11,
-        )
-        return [
-            f"eq=contrast=1.24:saturation=1.22:brightness=0.025:enable='{enable}'",
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.20:t=fill:enable='{enable_between(start, flash_end)}'",
-        ]
-
-    return [
-        f"eq=contrast=1.16:saturation=1.15:brightness=0.012:enable='{enable}'",
-    ]
+    return ",".join(
+        filters
+    )
 
 
 def build_filter_chain(
@@ -1354,16 +2011,13 @@ def build_filter_chain(
         intensity,
     )
 
-    for index, event in enumerate(
-        events,
-        start=1,
-    ):
-        filters.extend(
-            filters_for_event(
-                event,
-                index,
-            )
+    filters.extend(
+        semantic_event_filters(
+            events,
+            intensity,
+            energy,
         )
+    )
 
     filters.append(
         "format=yuv420p"
@@ -1474,16 +2128,11 @@ def apply_visual_fx(
     # render_base_video() (app/render.py) crops to fill the 1080x1920
     # canvas by default (content_rect is the full canvas, making the
     # crop/pad below a no-op), but this still supports a letterboxed
-    # content_rect if one is ever passed in again. Every filter above
-    # (vignette, color grade washes, RGB-split stripes, drawtext slam-text
-    # positioning) is computed using iw/ih/w/h -- frame-relative ffmpeg
-    # symbols with no hardcoded absolute pixels -- so cropping to the real
-    # content rect before this chain runs and padding back out afterward
-    # would make every one of those effects operate on the actual visible
-    # video instead of the full canvas even in that letterboxed case (e.g.
-    # a vignette's falloff calibrated to the full 1920px-tall canvas would
-    # otherwise be barely visible within a much smaller letterboxed
-    # content area). No changes needed to any individual filter string.
+    # content_rect if one is ever passed in again. The filters above use
+    # iw/ih/w/h -- frame-relative ffmpeg symbols with no hardcoded absolute
+    # pixels -- so cropping to the real content rect before this chain runs
+    # and padding back out afterward keeps them aligned to actual visible
+    # video instead of any surrounding canvas.
     filter_chain = (
         f"crop={content_width}:{content_height}:"
         f"{content_x}:{content_y},"
@@ -1526,7 +2175,7 @@ def apply_visual_fx(
         flush=True,
     )
     print(
-        "Applying baseline visual grade and dynamic FX...",
+        "Applying standalone visual polish and dynamic FX...",
         flush=True,
     )
 

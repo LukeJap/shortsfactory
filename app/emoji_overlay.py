@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,35 @@ EMOJI_DEFAULT_POSITIONS_PX = [
     (750, 1430),
     (190, 1460),
 ]
+
+
+def console_safe_text(
+    value: Any,
+    encoding: str | None = None,
+) -> str:
+    text = str(
+        value
+    )
+    target_encoding = (
+        encoding
+        or getattr(
+            sys.stdout,
+            "encoding",
+            None,
+        )
+        or "utf-8"
+    )
+
+    return (
+        text.encode(
+            target_encoding,
+            errors="backslashreplace",
+        )
+        .decode(
+            target_encoding,
+            errors="replace",
+        )
+    )
 
 
 def coerce_emoji_fraction(value) -> float:
@@ -176,7 +206,9 @@ def download_emoji(
     ):
 
         print(
-            f"Using cached emoji: {emoji}"
+            console_safe_text(
+                f"Using cached emoji: {emoji}"
+            )
         )
 
         return output
@@ -184,7 +216,9 @@ def download_emoji(
     url = TWEMOJI_BASE + filename
 
     print(
-        f"Downloading emoji: {emoji}"
+        console_safe_text(
+            f"Downloading emoji: {emoji}"
+        )
     )
 
     try:
@@ -215,8 +249,10 @@ def download_emoji(
     except Exception as exc:
 
         print(
-            f"WARNING: Could not download "
-            f"{emoji}: {exc}"
+            console_safe_text(
+                f"WARNING: Could not download "
+                f"{emoji}: {exc}"
+            )
         )
 
         output.unlink(
@@ -361,8 +397,10 @@ def prepare_emoji_events(
             )
 
             print(
-                f"Using local emoji asset: "
-                f"{emoji_label}"
+                console_safe_text(
+                    f"Using local emoji asset: "
+                    f"{emoji_label}"
+                )
             )
 
         else:
