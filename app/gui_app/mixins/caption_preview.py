@@ -118,22 +118,78 @@ class CaptionPreviewMixin:
             self.update_caption_preview_overlay(self.player.position())
 
 
-    def representative_caption_text(self, position_ms: int) -> str:
+    def representative_caption_segment(self, position_ms: int) -> dict | None:
+        """
+        The source_transcript_segments entry active at position_ms, or
+        None -- the same segment representative_caption_text() derives its
+        displayed string from, exposed as the raw dict so a caller (the
+        double-click-to-correct handler) can key a correction off its
+        start_ms/end_ms without a second, possibly-inconsistent search.
+        """
 
         segments = getattr(self, "source_transcript_segments", [])
+        corrections = getattr(self, "transcript_corrections", {})
         for segment in segments:
             if not isinstance(segment, dict):
                 continue
-            if (
+            if not (
                 segment.get("start_ms", 0)
                 <= position_ms
                 <= segment.get("end_ms", 0)
             ):
-                text = str(segment.get("text", "")).strip()
-                if text:
-                    return text
+                continue
+            segment_key = (
+                segment.get("start_ms", 0),
+                segment.get("end_ms", 0),
+            )
+            text = str(
+                corrections.get(
+                    segment_key,
+                    segment.get("text", ""),
+                )
+            ).strip()
+            if text:
+                return segment
 
-        return PLACEHOLDER_CAPTION_TEXT
+        return None
+
+
+    def representative_caption_text(self, position_ms: int) -> str:
+
+        segment = self.representative_caption_segment(position_ms)
+        if segment is None:
+            return PLACEHOLDER_CAPTION_TEXT
+
+        corrections = getattr(self, "transcript_corrections", {})
+        segment_key = (
+            segment.get("start_ms", 0),
+            segment.get("end_ms", 0),
+        )
+        text = str(
+            corrections.get(
+                segment_key,
+                segment.get("text", ""),
+            )
+        ).strip()
+
+        return text or PLACEHOLDER_CAPTION_TEXT
+
+
+    def open_caption_corrector(self, position_ms: int):
+
+        segment = self.representative_caption_segment(position_ms)
+        if segment is None:
+            return
+
+        try:
+            segment_key = (
+                int(segment.get("start_ms", 0)),
+                int(segment.get("end_ms", 0)),
+            )
+        except (TypeError, ValueError):
+            return
+
+        self.correct_transcript_segment(segment_key)
 
 
     def caption_preview_stylesheet(self, scale: float) -> str:
@@ -165,7 +221,8 @@ class CaptionPreviewMixin:
         label.setMouseTracking(True)
         label.setCursor(Qt.CursorShape.OpenHandCursor)
         label.setToolTip(
-            "Drag to reposition captions in the final render."
+            "Drag to reposition captions in the final render.\n"
+            "Double-click to correct this line's transcript text."
         )
         label.setStyleSheet(self.caption_preview_stylesheet(1.0))
         label.hide()

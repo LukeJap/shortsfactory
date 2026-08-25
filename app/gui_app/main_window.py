@@ -2560,6 +2560,26 @@ class ShortsFactoryWindow(
                     event.accept()
                     return True
 
+        if (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            dbl_click_caption_label = getattr(self, "caption_preview_label", None)
+            if (
+                dbl_click_caption_label is not None
+                and dbl_click_caption_label.isVisible()
+                and (
+                    watched is dbl_click_caption_label
+                    or (
+                        watched is video_widget
+                        and self._point_in_widget(dbl_click_caption_label, event)
+                    )
+                )
+            ):
+                self.open_caption_corrector(self.player.position())
+                event.accept()
+                return True
+
         caption_handle_widgets = list(
             getattr(self, "caption_resize_handles", {}).values()
         )
