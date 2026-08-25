@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -53,6 +54,7 @@ from .settings_keys import (
     AUTO_CUTS_ENABLED,
     EDIT_ENERGY,
     FX_INTENSITY,
+    MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
     SFX_MODE,
     TRANSCRIPTION_QUALITY,
@@ -467,6 +469,22 @@ class ShortsFactoryWindow(
                 True,
             )
         ).strip().lower() not in ("false", "0", "")
+
+        try:
+            self.min_emoji_events = max(
+                0,
+                min(
+                    10,
+                    int(
+                        self.settings.value(
+                            MIN_EMOJI_EVENTS,
+                            0,
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            self.min_emoji_events = 0
         try:
             self.fx_intensity = min(
                 2.0,
@@ -1555,6 +1573,46 @@ class ShortsFactoryWindow(
             self.generate_emoji_button
         )
 
+        emoji_min_label = QLabel(
+            "MIN EMOJI"
+        )
+        emoji_min_label.setObjectName(
+            "TinyLabel"
+        )
+
+        self.min_emoji_events_spinbox = QSpinBox()
+        self.min_emoji_events_spinbox.setObjectName(
+            "CompactSpinBox"
+        )
+        self.min_emoji_events_spinbox.setRange(
+            0,
+            10,
+        )
+        self.min_emoji_events_spinbox.setValue(
+            self.min_emoji_events
+        )
+        self.min_emoji_events_spinbox.setToolTip(
+            "Minimum number of emoji reactions to generate, even if "
+            "fewer natural keyword matches were found. 0 = no forced "
+            "minimum (today's behavior). Applies both to Generate Emoji "
+            "and to a final render's own automatic emoji selection."
+        )
+        self.min_emoji_events_spinbox.valueChanged.connect(
+            self.min_emoji_events_changed
+        )
+
+        emoji_min_row = QHBoxLayout()
+        emoji_min_row.setSpacing(
+            8
+        )
+        emoji_min_row.addWidget(
+            emoji_min_label
+        )
+        emoji_min_row.addWidget(
+            self.min_emoji_events_spinbox
+        )
+        emoji_min_row.addStretch()
+
         self.check_image_ai_button = QPushButton(
             "CHECK IMAGE AI"
         )
@@ -2106,6 +2164,9 @@ class ShortsFactoryWindow(
 
         visual_layout.addLayout(
             visual_header
+        )
+        visual_layout.addLayout(
+            emoji_min_row
         )
         visual_layout.addLayout(
             image_status_row

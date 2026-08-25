@@ -86,6 +86,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=float, required=True)
     parser.add_argument("--end", type=float, required=True)
     parser.add_argument("--energy", default="PUNCHY")
+    parser.add_argument(
+        "--min-events",
+        type=int,
+        default=0,
+        help=(
+            "Minimum number of emoji reactions to generate, even if "
+            "fewer natural keyword matches were found (0 = no forced "
+            "minimum)."
+        ),
+    )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument(
         "--editor-plan",
@@ -334,7 +344,12 @@ def main() -> int:
         events = []
     else:
         candidates = build_emoji_candidates(words)
-        events = choose_emoji_events(candidates, words, args.energy)
+        events = choose_emoji_events(
+            candidates,
+            words,
+            args.energy,
+            args.min_events,
+        )
 
     if args.editor_plan:
         events = merge_with_previous_preview_overrides(

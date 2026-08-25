@@ -20,6 +20,7 @@ from ..settings_keys import (
     AUTO_CUTS_ENABLED,
     EDIT_ENERGY,
     FX_INTENSITY,
+    MIN_EMOJI_EVENTS,
     SFX_MODE,
     TRANSCRIPTION_QUALITY,
 )
@@ -145,6 +146,47 @@ class SettingsMixin:
         )
 
 
+    def min_emoji_events_changed(
+        self,
+        value: int,
+    ):
+
+        count = max(
+            0,
+            min(
+                10,
+                int(value),
+            ),
+        )
+
+        self.min_emoji_events = count
+        self.settings.setValue(
+            MIN_EMOJI_EVENTS,
+            count,
+        )
+        self.save_render_settings()
+
+
+    def current_min_emoji_events(self) -> int:
+
+        try:
+            return max(
+                0,
+                min(
+                    10,
+                    int(
+                        getattr(
+                            self,
+                            "min_emoji_events",
+                            0,
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            return 0
+
+
     def fx_intensity_changed(
         self,
         value: int,
@@ -229,6 +271,7 @@ class SettingsMixin:
             "fx_intensity": self.current_fx_intensity(),
             "sfx_mode": self.current_sfx_mode(),
             "auto_cuts_enabled": self.current_auto_cuts_enabled(),
+            "min_emoji_events": self.current_min_emoji_events(),
             "transcription_quality": self.current_transcription_quality(),
             "source_video": (
                 str(

@@ -285,7 +285,7 @@ STYLESHEET =            """
                 background: #17120d;
             }
 
-            QComboBox#CompactCombo, QLineEdit#CompactLineEdit {
+            QComboBox#CompactCombo, QLineEdit#CompactLineEdit, QSpinBox#CompactSpinBox {
                 color: #ded7cf;
                 background: #09090A;
                 border: 1px solid #252429;
@@ -295,7 +295,8 @@ STYLESHEET =            """
             }
 
             QComboBox#CompactCombo:disabled,
-            QLineEdit#CompactLineEdit:disabled {
+            QLineEdit#CompactLineEdit:disabled,
+            QSpinBox#CompactSpinBox:disabled {
                 color: #625b58;
                 background: #101114;
                 border: 1px solid #201d20;
