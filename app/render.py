@@ -45,6 +45,7 @@ except ImportError:
 try:
     from .pipeline_paths import (
         CAPTIONS_PATH,
+        EDIT_PLAN_PATH,
         SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN_PATH,
         SHORT_PLAN_PATH as PLAN_PATH,
         SUBTITLES_PATH,
@@ -52,6 +53,7 @@ try:
 except ImportError:
     from pipeline_paths import (
         CAPTIONS_PATH,
+        EDIT_PLAN_PATH,
         SEMANTIC_EDIT_PLAN_PATH as SEMANTIC_PLAN_PATH,
         SHORT_PLAN_PATH as PLAN_PATH,
         SUBTITLES_PATH,
@@ -1616,6 +1618,26 @@ def main() -> int:
             "=== STEP 3/4: Auto Cuts disabled -- skipping "
             "pause and semantic-edit detection ==="
         )
+
+        # Not calling analyze_pauses()/analyze_semantic_cuts() only stops
+        # them from being *regenerated* -- it does nothing about a plan
+        # file left over from an earlier render where Auto Cuts was on.
+        # apply_smart_edit.py (STEP 5, which always runs) reads whatever
+        # is on disk at these paths, so a stale plan from last time would
+        # otherwise get silently reapplied even with the toggle off.
+        # Removing them makes this a genuinely missing file, which
+        # apply_smart_edit.py's existing load_json()/extract_*_cuts()
+        # already handle correctly (returns {} / [] -> no cuts).
+        for stale_plan_path in (EDIT_PLAN_PATH, SEMANTIC_PLAN_PATH):
+            try:
+                stale_plan_path.unlink()
+            except FileNotFoundError:
+                pass
+            else:
+                print(
+                    f"Removed stale plan: {stale_plan_path}"
+                )
+
         print()
 
     # --------------------------------------------------------
