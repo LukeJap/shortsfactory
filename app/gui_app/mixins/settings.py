@@ -16,7 +16,13 @@ from visual_emphasis import (
     write_render_settings,
 )
 
-from ..settings_keys import EDIT_ENERGY, FX_INTENSITY, SFX_MODE, TRANSCRIPTION_QUALITY
+from ..settings_keys import (
+    AUTO_CUTS_ENABLED,
+    EDIT_ENERGY,
+    FX_INTENSITY,
+    SFX_MODE,
+    TRANSCRIPTION_QUALITY,
+)
 
 
 class SettingsMixin:
@@ -107,6 +113,38 @@ class SettingsMixin:
         )
 
 
+    def auto_cuts_toggled(
+        self,
+        checked: bool,
+    ):
+
+        self.auto_cuts_enabled = bool(checked)
+        self.settings.setValue(
+            AUTO_CUTS_ENABLED,
+            self.auto_cuts_enabled,
+        )
+
+        if hasattr(self, "auto_cuts_button"):
+            self.auto_cuts_button.setText(
+                "AUTO CUTS: ON"
+                if self.auto_cuts_enabled
+                else "AUTO CUTS: OFF"
+            )
+
+        self.save_render_settings()
+
+
+    def current_auto_cuts_enabled(self) -> bool:
+
+        return bool(
+            getattr(
+                self,
+                "auto_cuts_enabled",
+                True,
+            )
+        )
+
+
     def fx_intensity_changed(
         self,
         value: int,
@@ -190,6 +228,7 @@ class SettingsMixin:
             "edit_energy": self.current_edit_energy(),
             "fx_intensity": self.current_fx_intensity(),
             "sfx_mode": self.current_sfx_mode(),
+            "auto_cuts_enabled": self.current_auto_cuts_enabled(),
             "transcription_quality": self.current_transcription_quality(),
             "source_video": (
                 str(

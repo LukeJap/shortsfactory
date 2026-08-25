@@ -515,6 +515,30 @@ STYLESHEET =            """
                 border: 1px solid #E05C6F;
             }
 
+            QPushButton#AutoCutsToggle {
+                color: #968B86;
+                background: #101012;
+                border: 1px solid #30292D;
+                border-radius: 4px;
+                padding: 8px 10px;
+                font-size: 10px;
+                font-weight: 900;
+                letter-spacing: 1px;
+                text-align: left;
+            }
+
+            QPushButton#AutoCutsToggle:hover {
+                color: #F2E6D4;
+                background: #1A1115;
+                border: 1px solid #8D3445;
+            }
+
+            QPushButton#AutoCutsToggle:checked {
+                color: #FFF3E3;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);
+                border: 1px solid #E05C6F;
+            }
+
             QPushButton#CutButton {
                 color: #ffd8dd;
                 background: #2a141a;

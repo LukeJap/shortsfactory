@@ -1543,6 +1543,16 @@ def main() -> int:
         args
     )
 
+    auto_cuts_enabled = bool(
+        render_settings.get(
+            "auto_cuts_enabled",
+            True,
+        )
+    )
+    print(
+        f"Auto Cuts: {'ON' if auto_cuts_enabled else 'OFF'}"
+    )
+
     OUTPUT_DIR.mkdir(
         parents=True,
         exist_ok=True,
@@ -1584,15 +1594,29 @@ def main() -> int:
     # STEP 3
     # Detect pauses
     # --------------------------------------------------------
-
-    analyze_pauses()
-
-    # --------------------------------------------------------
+    #
     # STEP 4
     # Detect + verify redundant speech
     # --------------------------------------------------------
+    #
+    # Both are skipped entirely -- not run with reduced aggressiveness --
+    # when Auto Cuts is off. STEP 5 always runs regardless: it's the sole
+    # producer of combined_edit_plan.json every later stage depends on, and
+    # its existing missing-plan-file handling already produces exactly the
+    # "full, untouched clip, manual cuts still applied" behavior needed
+    # here with no changes of its own.
+    # --------------------------------------------------------
 
-    analyze_semantic_cuts()
+    if auto_cuts_enabled:
+        analyze_pauses()
+        analyze_semantic_cuts()
+    else:
+        print()
+        print(
+            "=== STEP 3/4: Auto Cuts disabled -- skipping "
+            "pause and semantic-edit detection ==="
+        )
+        print()
 
     # --------------------------------------------------------
     # STEP 5

@@ -50,6 +50,7 @@ from visual_emphasis import DEFAULT_ENERGY, normalize_energy, normalize_sfx_mode
 
 from .constants import ROOT
 from .settings_keys import (
+    AUTO_CUTS_ENABLED,
     EDIT_ENERGY,
     FX_INTENSITY,
     PREVIEW_VOLUME,
@@ -456,6 +457,16 @@ class ShortsFactoryWindow(
             )
             or DEFAULT_ENERGY
         )
+
+        # QSettings can hand back a string ("true"/"false") instead of a
+        # real bool depending on platform backend -- coerce defensively
+        # rather than trusting the stored type.
+        self.auto_cuts_enabled = str(
+            self.settings.value(
+                AUTO_CUTS_ENABLED,
+                True,
+            )
+        ).strip().lower() not in ("false", "0", "")
         try:
             self.fx_intensity = min(
                 2.0,
@@ -767,6 +778,28 @@ class ShortsFactoryWindow(
         edit_style_label = QLabel("EDIT STYLE")
         edit_style_label.setObjectName("TinyLabel")
         edit_style_layout.addWidget(edit_style_label)
+
+        self.auto_cuts_button = QPushButton(
+            "AUTO CUTS: ON" if self.auto_cuts_enabled else "AUTO CUTS: OFF"
+        )
+        self.auto_cuts_button.setObjectName("AutoCutsToggle")
+        self.auto_cuts_button.setCheckable(True)
+        self.auto_cuts_button.setChecked(self.auto_cuts_enabled)
+        self.auto_cuts_button.setToolTip(
+            "Removes dead air, silence, and redundant speech at render "
+            "time. Turn off to render the clip exactly as trimmed, full "
+            "length -- only your own manual cuts still apply."
+        )
+        self.auto_cuts_button.clicked.connect(self.auto_cuts_toggled)
+        edit_style_layout.addWidget(self.auto_cuts_button)
+
+        auto_cuts_subtext = QLabel(
+            "Removes dead air, silence, and redundant speech. Turn off "
+            "to keep the clip exactly as trimmed."
+        )
+        auto_cuts_subtext.setObjectName("HintLabel")
+        auto_cuts_subtext.setWordWrap(True)
+        edit_style_layout.addWidget(auto_cuts_subtext)
 
         edit_style_buttons = QHBoxLayout()
         edit_style_buttons.setSpacing(6)
