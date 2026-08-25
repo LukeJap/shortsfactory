@@ -16,7 +16,14 @@ from visual_emphasis import (
     write_render_settings,
 )
 
-from ..settings_keys import EDIT_ENERGY, FX_INTENSITY, SFX_MODE, TRANSCRIPTION_QUALITY
+from ..settings_keys import (
+    AUTO_CUTS_ENABLED,
+    EDIT_ENERGY,
+    FX_INTENSITY,
+    MIN_EMOJI_EVENTS,
+    SFX_MODE,
+    TRANSCRIPTION_QUALITY,
+)
 
 
 class SettingsMixin:
@@ -107,6 +114,79 @@ class SettingsMixin:
         )
 
 
+    def auto_cuts_toggled(
+        self,
+        checked: bool,
+    ):
+
+        self.auto_cuts_enabled = bool(checked)
+        self.settings.setValue(
+            AUTO_CUTS_ENABLED,
+            self.auto_cuts_enabled,
+        )
+
+        if hasattr(self, "auto_cuts_button"):
+            self.auto_cuts_button.setText(
+                "AUTO CUTS: ON"
+                if self.auto_cuts_enabled
+                else "AUTO CUTS: OFF"
+            )
+
+        self.save_render_settings()
+
+
+    def current_auto_cuts_enabled(self) -> bool:
+
+        return bool(
+            getattr(
+                self,
+                "auto_cuts_enabled",
+                True,
+            )
+        )
+
+
+    def min_emoji_events_changed(
+        self,
+        value: int,
+    ):
+
+        count = max(
+            0,
+            min(
+                10,
+                int(value),
+            ),
+        )
+
+        self.min_emoji_events = count
+        self.settings.setValue(
+            MIN_EMOJI_EVENTS,
+            count,
+        )
+        self.save_render_settings()
+
+
+    def current_min_emoji_events(self) -> int:
+
+        try:
+            return max(
+                0,
+                min(
+                    10,
+                    int(
+                        getattr(
+                            self,
+                            "min_emoji_events",
+                            0,
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            return 0
+
+
     def fx_intensity_changed(
         self,
         value: int,
@@ -190,6 +270,8 @@ class SettingsMixin:
             "edit_energy": self.current_edit_energy(),
             "fx_intensity": self.current_fx_intensity(),
             "sfx_mode": self.current_sfx_mode(),
+            "auto_cuts_enabled": self.current_auto_cuts_enabled(),
+            "min_emoji_events": self.current_min_emoji_events(),
             "transcription_quality": self.current_transcription_quality(),
             "source_video": (
                 str(
@@ -207,6 +289,10 @@ class SettingsMixin:
         if caption_position_x is not None and caption_position_y is not None:
             payload["caption_position_x"] = caption_position_x
             payload["caption_position_y"] = caption_position_y
+
+        caption_scale = getattr(self, "caption_scale", None)
+        if caption_scale is not None:
+            payload["caption_scale"] = caption_scale
 
         try:
 

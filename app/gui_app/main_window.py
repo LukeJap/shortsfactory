@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -50,8 +51,10 @@ from visual_emphasis import DEFAULT_ENERGY, normalize_energy, normalize_sfx_mode
 
 from .constants import ROOT
 from .settings_keys import (
+    AUTO_CUTS_ENABLED,
     EDIT_ENERGY,
     FX_INTENSITY,
+    MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
     SFX_MODE,
     TRANSCRIPTION_QUALITY,
@@ -237,6 +240,7 @@ class ShortsFactoryWindow(
 
         self.caption_position_x: float | None = None
         self.caption_position_y: float | None = None
+        self.caption_scale: float | None = None
         self.caption_preview_dragging = False
         self.caption_preview_drag_origin = QPoint()
         self.caption_preview_drag_start_x = 0.0
@@ -455,6 +459,32 @@ class ShortsFactoryWindow(
             )
             or DEFAULT_ENERGY
         )
+
+        # QSettings can hand back a string ("true"/"false") instead of a
+        # real bool depending on platform backend -- coerce defensively
+        # rather than trusting the stored type.
+        self.auto_cuts_enabled = str(
+            self.settings.value(
+                AUTO_CUTS_ENABLED,
+                True,
+            )
+        ).strip().lower() not in ("false", "0", "")
+
+        try:
+            self.min_emoji_events = max(
+                0,
+                min(
+                    10,
+                    int(
+                        self.settings.value(
+                            MIN_EMOJI_EVENTS,
+                            0,
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            self.min_emoji_events = 0
         try:
             self.fx_intensity = min(
                 2.0,
@@ -766,6 +796,28 @@ class ShortsFactoryWindow(
         edit_style_label = QLabel("EDIT STYLE")
         edit_style_label.setObjectName("TinyLabel")
         edit_style_layout.addWidget(edit_style_label)
+
+        self.auto_cuts_button = QPushButton(
+            "AUTO CUTS: ON" if self.auto_cuts_enabled else "AUTO CUTS: OFF"
+        )
+        self.auto_cuts_button.setObjectName("AutoCutsToggle")
+        self.auto_cuts_button.setCheckable(True)
+        self.auto_cuts_button.setChecked(self.auto_cuts_enabled)
+        self.auto_cuts_button.setToolTip(
+            "Removes dead air, silence, and redundant speech at render "
+            "time. Turn off to render the clip exactly as trimmed, full "
+            "length -- only your own manual cuts still apply."
+        )
+        self.auto_cuts_button.clicked.connect(self.auto_cuts_toggled)
+        edit_style_layout.addWidget(self.auto_cuts_button)
+
+        auto_cuts_subtext = QLabel(
+            "Removes dead air, silence, and redundant speech. Turn off "
+            "to keep the clip exactly as trimmed."
+        )
+        auto_cuts_subtext.setObjectName("HintLabel")
+        auto_cuts_subtext.setWordWrap(True)
+        edit_style_layout.addWidget(auto_cuts_subtext)
 
         edit_style_buttons = QHBoxLayout()
         edit_style_buttons.setSpacing(6)
@@ -1521,6 +1573,46 @@ class ShortsFactoryWindow(
             self.generate_emoji_button
         )
 
+        emoji_min_label = QLabel(
+            "MIN EMOJI"
+        )
+        emoji_min_label.setObjectName(
+            "TinyLabel"
+        )
+
+        self.min_emoji_events_spinbox = QSpinBox()
+        self.min_emoji_events_spinbox.setObjectName(
+            "CompactSpinBox"
+        )
+        self.min_emoji_events_spinbox.setRange(
+            0,
+            10,
+        )
+        self.min_emoji_events_spinbox.setValue(
+            self.min_emoji_events
+        )
+        self.min_emoji_events_spinbox.setToolTip(
+            "Minimum number of emoji reactions to generate, even if "
+            "fewer natural keyword matches were found. 0 = no forced "
+            "minimum (today's behavior). Applies both to Generate Emoji "
+            "and to a final render's own automatic emoji selection."
+        )
+        self.min_emoji_events_spinbox.valueChanged.connect(
+            self.min_emoji_events_changed
+        )
+
+        emoji_min_row = QHBoxLayout()
+        emoji_min_row.setSpacing(
+            8
+        )
+        emoji_min_row.addWidget(
+            emoji_min_label
+        )
+        emoji_min_row.addWidget(
+            self.min_emoji_events_spinbox
+        )
+        emoji_min_row.addStretch()
+
         self.check_image_ai_button = QPushButton(
             "CHECK IMAGE AI"
         )
@@ -2074,6 +2166,9 @@ class ShortsFactoryWindow(
             visual_header
         )
         visual_layout.addLayout(
+            emoji_min_row
+        )
+        visual_layout.addLayout(
             image_status_row
         )
         visual_layout.addLayout(
@@ -2317,6 +2412,72 @@ class ShortsFactoryWindow(
             None,
         )
 
+        # Resize-handle hover: keep the corner/edge handles visible while the
+        # pointer is over the overlay or a handle itself, even when the
+        # native video surface swallows Enter/Leave on the child overlay
+        # widget (see the comment below on the move-drag path for why that
+        # matters).
+        if (
+            event.type() == QEvent.Type.Enter
+            and (
+                watched is overlay
+                or watched in getattr(self, "ai_visual_resize_handles", {}).values()
+                or watched in getattr(self, "ai_visual_resize_edge_handles", {}).values()
+            )
+        ):
+            self.set_ai_visual_resize_hover(True)
+        elif (
+            event.type() == QEvent.Type.Leave
+            and (
+                watched is overlay
+                or watched in getattr(self, "ai_visual_resize_handles", {}).values()
+                or watched in getattr(self, "ai_visual_resize_edge_handles", {}).values()
+            )
+        ):
+            self.set_ai_visual_resize_hover(False)
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and watched is video_widget
+            and overlay is not None
+            and overlay.isVisible()
+            and not self.visual_preview_dragging
+            and not getattr(self, "visual_resize_dragging", False)
+        ):
+            try:
+                hovering = overlay.geometry().adjusted(
+                    -8, -8, 8, 8
+                ).contains(event.position().toPoint())
+            except Exception:
+                hovering = False
+            self.set_ai_visual_resize_hover(hovering)
+
+        # Resize-handle drag takes priority over the overlay's own move-drag
+        # when a corner/edge handle overlaps the overlay's own geometry.
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "ai_visual_resize_handles")
+        ):
+            if self.begin_visual_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "visual_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_visual_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "visual_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_visual_resize_drag()
+            event.accept()
+            return True
+
         # QVideoWidget can use a native video surface on Windows, so mouse
         # events do not always arrive on the child QLabel overlay. Accept the
         # drag from either the overlay itself or the video widget when the
@@ -2359,6 +2520,90 @@ class ShortsFactoryWindow(
             and event.type() == QEvent.Type.MouseButtonRelease
         ):
             self.finish_visual_preview_drag()
+            event.accept()
+            return True
+
+        emoji_handle_widgets = [
+            handle
+            for handles in getattr(self, "emoji_resize_handles", [])
+            for handle in handles.values()
+        ]
+
+        if (
+            event.type() == QEvent.Type.Enter
+            and (
+                watched in getattr(self, "emoji_preview_labels", [])
+                or watched in emoji_handle_widgets
+            )
+        ):
+            hover_index = None
+            for index, label in enumerate(
+                getattr(self, "emoji_preview_labels", [])
+            ):
+                if watched is label:
+                    hover_index = index
+                    break
+            if hover_index is None:
+                for index, handles in enumerate(
+                    getattr(self, "emoji_resize_handles", [])
+                ):
+                    if watched in handles.values():
+                        hover_index = index
+                        break
+            if hover_index is not None:
+                self.set_emoji_resize_hover(hover_index)
+        elif (
+            event.type() == QEvent.Type.Leave
+            and (
+                watched in getattr(self, "emoji_preview_labels", [])
+                or watched in emoji_handle_widgets
+            )
+            and not getattr(self, "emoji_resize_dragging", False)
+        ):
+            self.set_emoji_resize_hover(None)
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and watched is video_widget
+            and not getattr(self, "emoji_preview_dragging", False)
+            and not getattr(self, "emoji_resize_dragging", False)
+        ):
+            hover_slot = None
+            try:
+                point = event.position().toPoint()
+                for index, label in enumerate(
+                    getattr(self, "emoji_preview_labels", [])
+                ):
+                    if label.isVisible() and label.geometry().adjusted(
+                        -8, -8, 8, 8
+                    ).contains(point):
+                        hover_slot = index
+                        break
+            except Exception:
+                hover_slot = None
+            self.set_emoji_resize_hover(hover_slot)
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "emoji_resize_handles")
+        ):
+            if self.begin_emoji_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "emoji_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_emoji_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "emoji_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_emoji_resize_drag()
             event.accept()
             return True
 
@@ -2408,6 +2653,83 @@ class ShortsFactoryWindow(
                     self.open_emoji_picker(slot_index)
                     event.accept()
                     return True
+
+        if (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            dbl_click_caption_label = getattr(self, "caption_preview_label", None)
+            if (
+                dbl_click_caption_label is not None
+                and dbl_click_caption_label.isVisible()
+                and (
+                    watched is dbl_click_caption_label
+                    or (
+                        watched is video_widget
+                        and self._point_in_widget(dbl_click_caption_label, event)
+                    )
+                )
+            ):
+                self.open_caption_corrector(self.player.position())
+                event.accept()
+                return True
+
+        caption_handle_widgets = list(
+            getattr(self, "caption_resize_handles", {}).values()
+        )
+        caption_label = getattr(self, "caption_preview_label", None)
+
+        if (
+            event.type() == QEvent.Type.Enter
+            and (watched is caption_label or watched in caption_handle_widgets)
+        ):
+            self.set_caption_resize_hover(True)
+        elif (
+            event.type() == QEvent.Type.Leave
+            and (watched is caption_label or watched in caption_handle_widgets)
+            and not getattr(self, "caption_resize_dragging", False)
+        ):
+            self.set_caption_resize_hover(False)
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and watched is video_widget
+            and caption_label is not None
+            and caption_label.isVisible()
+            and not getattr(self, "caption_preview_dragging", False)
+            and not getattr(self, "caption_resize_dragging", False)
+        ):
+            try:
+                hovering = caption_label.geometry().adjusted(
+                    -8, -8, 8, 8
+                ).contains(event.position().toPoint())
+            except Exception:
+                hovering = False
+            self.set_caption_resize_hover(hovering)
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "caption_resize_handles")
+        ):
+            if self.begin_caption_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "caption_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_caption_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "caption_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_caption_resize_drag()
+            event.accept()
+            return True
 
         if (
             not self.visual_preview_dragging

@@ -112,12 +112,27 @@ def coerce_emoji_fraction(value) -> float:
     return max(0.0, min(1.0, number))
 
 
-def emoji_pixel_to_fraction(x: float, y: float) -> tuple[float, float]:
-    # (x, y) is the top-left corner of the EMOJI_SIZE box, in canvas
-    # pixels. 0.0 = flush against the left/top edge, 1.0 = flush against
-    # the right/bottom edge.
-    x_span = max(1, CANVAS_WIDTH - EMOJI_SIZE)
-    y_span = max(1, CANVAS_HEIGHT - EMOJI_SIZE)
+def coerce_emoji_scale(value) -> float:
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+
+    return max(0.5, min(2.0, number))
+
+
+def emoji_pixel_to_fraction(
+    x: float,
+    y: float,
+    size: float = EMOJI_SIZE,
+) -> tuple[float, float]:
+    # (x, y) is the top-left corner of the emoji's on-screen box (EMOJI_SIZE
+    # * that event's own scale, or plain EMOJI_SIZE for callers that don't
+    # know about per-event scale), in canvas pixels. 0.0 = flush against the
+    # left/top edge, 1.0 = flush against the right/bottom edge.
+    x_span = max(1, CANVAS_WIDTH - size)
+    y_span = max(1, CANVAS_HEIGHT - size)
 
     return (
         coerce_emoji_fraction(x / x_span),
@@ -128,10 +143,11 @@ def emoji_pixel_to_fraction(x: float, y: float) -> tuple[float, float]:
 def emoji_fraction_to_pixel(
     position_x,
     position_y,
+    size: float = EMOJI_SIZE,
 ) -> tuple[float, float]:
 
-    x_span = max(1, CANVAS_WIDTH - EMOJI_SIZE)
-    y_span = max(1, CANVAS_HEIGHT - EMOJI_SIZE)
+    x_span = max(1, CANVAS_WIDTH - size)
+    y_span = max(1, CANVAS_HEIGHT - size)
 
     return (
         coerce_emoji_fraction(position_x) * x_span,
@@ -553,6 +569,14 @@ def build_emoji_filter_complex(
             end - start,
         )
 
+        event_scale = coerce_emoji_scale(
+            event.get("scale", 1.0)
+        )
+        event_size = max(
+            1,
+            round(EMOJI_SIZE * event_scale),
+        )
+
         stored_x = event.get("position_x")
         stored_y = event.get("position_y")
 
@@ -560,6 +584,7 @@ def build_emoji_filter_complex(
             x, y = emoji_fraction_to_pixel(
                 stored_x,
                 stored_y,
+                size=event_size,
             )
         else:
             x, y = event_default_position_px(
@@ -568,13 +593,14 @@ def build_emoji_filter_complex(
 
         # Prepare a normal static full-color emoji.
         #
-        # It has a fixed size and its own finite duration.
+        # It has its own (possibly manually resized) size and its own
+        # finite duration.
         filters.append(
             f"{input_label}"
             f"format=rgba,"
             f"scale="
-            f"{EMOJI_SIZE}:"
-            f"{EMOJI_SIZE},"
+            f"{event_size}:"
+            f"{event_size},"
             f"trim="
             f"duration={duration},"
             f"setpts="

@@ -1826,6 +1826,8 @@ class EditorAssetsMixin:
                 f"{self.end_ms / 1000:.3f}",
                 "--energy",
                 self.current_edit_energy(),
+                "--min-events",
+                str(self.current_min_emoji_events()),
                 "--editor-plan",
             ],
         )

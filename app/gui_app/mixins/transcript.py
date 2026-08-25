@@ -710,6 +710,25 @@ class TranscriptMixin:
         except (TypeError, ValueError):
             return
 
+        self.correct_transcript_segment(
+            segment_key
+        )
+
+
+    def correct_transcript_segment(
+        self,
+        segment_key: tuple[int, int],
+    ):
+        """
+        Opens the "Correct Transcript" dialog for one (start_ms, end_ms)
+        segment and applies/saves the result. The shared core behind
+        edit_transcript_item() (right-panel transcript list, double-click)
+        and the video-preview caption overlay's own double-click-to-correct
+        (gui_app/mixins/caption_preview.py::open_caption_corrector()) --
+        both identify "which line" the same way, by segment key, so they
+        share this one correction flow rather than duplicating it.
+        """
+
         segment = self.transcript_segment_for_key(
             segment_key
         )
@@ -767,6 +786,14 @@ class TranscriptMixin:
         self.update_transcript_panel()
         self.refresh_transcript_timeline_overlays()
         self.clear_visual_plan_display()
+
+        # The caption overlay only refreshes its text on the next position
+        # tick otherwise -- force it now so a correction made *from* the
+        # preview (or while paused) is visible immediately.
+        if hasattr(self, "player") and hasattr(self, "update_caption_preview_overlay"):
+            self.update_caption_preview_overlay(
+                self.player.position()
+            )
 
 
     def reset_selected_transcript_text(self):

@@ -336,6 +336,17 @@ EMOJI_DURATION_SECONDS = 1.50
 # semantic emoji opportunity at all.
 FALLBACK_EMOJI = r"\U0001f440"
 
+# Small rotation of tone-neutral "reaction" emoji used to top a Short up
+# to a user-configured minimum event count once real keyword matches run
+# out (see choose_emoji_events()'s min_events parameter). Reusing existing
+# EMOJI_MAP codepoints so no new cached asset ever needs downloading.
+FALLBACK_EMOJI_ROTATION = (
+    FALLBACK_EMOJI,
+    r"\U0001f525",
+    r"\U0001f62e",
+    r"\U0001f602",
+)
+
 LOCAL_ASSET_EXTENSIONS = {
     ".gif",
     ".png",
@@ -862,6 +873,7 @@ def choose_emoji_events(
     candidates: list[dict],
     words: list[dict],
     energy: str = DEFAULT_ENERGY,
+    min_events: int | None = None,
 ) -> list[dict]:
     """
     Pick a sparse, deterministic set of emoji moments.
@@ -871,6 +883,11 @@ def choose_emoji_events(
     - avoid repeated emoji
     - spread moments across the Short
     - target 1-3 total events
+
+    min_events is a user-configured floor (from render_settings.json's
+    min_emoji_events, 0 = no override / today's behavior) that can raise
+    the effective ceiling above the energy tier's normal max if needed --
+    a stronger, explicit request takes priority over the tier default.
     """
 
     if not words:
@@ -913,10 +930,23 @@ def choose_emoji_events(
     else:
         target_count = max_emoji_events
 
+    effective_min = (
+        max(
+            MIN_EMOJI_EVENTS,
+            int(min_events),
+        )
+        if min_events
+        else MIN_EMOJI_EVENTS
+    )
+    effective_max = max(
+        max_emoji_events,
+        effective_min,
+    )
+
     target_count = max(
-        MIN_EMOJI_EVENTS,
+        effective_min,
         min(
-            max_emoji_events,
+            effective_max,
             target_count,
         ),
     )
@@ -1003,59 +1033,111 @@ def choose_emoji_events(
         if len(selected) >= target_count:
             break
 
-    # A Short should not silently have zero visual reactions just
-    # because none of its nouns happened to be in the map.
-    if not selected and clip_duration > 0:
+    # A Short should not silently fall short of the target -- whether
+    # that's the usual "at least one reaction" floor, or a user-raised
+    # minimum that real keyword matches couldn't fill on their own -- so
+    # top up with evenly-spaced, tone-neutral filler reactions.
+    if len(selected) < effective_min and clip_duration > 0:
 
-        middle_time = (
-            clip_start
-            + clip_duration * 0.45
-        )
+        fill_count = effective_min - len(selected)
+        rotation_index = 0
 
-        nearest_word = min(
-            words,
-            key=lambda word: abs(
-                float(
-                    word.get(
-                        "start",
-                        middle_time,
-                    )
-                    or middle_time
-                )
-                - middle_time
-            ),
-        )
+        for slot in range(fill_count):
 
-        fallback_start = float(
-            nearest_word.get(
-                "start",
-                middle_time,
+            # Evenly spaced target times across the *whole* clip,
+            # independent of where real matches landed, so fillers
+            # spread out rather than bunching at one end.
+            target_time = clip_start + clip_duration * (
+                (slot + 1) / (fill_count + 1)
             )
-            or middle_time
-        )
 
-        fallback_x, fallback_y = event_default_position_px(0)
-        fallback_position_x, fallback_position_y = emoji_pixel_to_fraction(
-            fallback_x,
-            fallback_y,
-        )
-
-        selected.append(
-            {
-                "start": fallback_start,
-                "end": min(
-                    clip_end,
-                    fallback_start
-                    + EMOJI_DURATION_SECONDS,
+            # Scan every word ordered by proximity to that ideal target,
+            # taking the first one that doesn't violate spacing against
+            # anything already selected (real matches or earlier
+            # fillers). This is more robust than nudging by a few fixed
+            # offsets around one nearest word -- a crowded slot doesn't
+            # cost the whole fill, since the next candidate word is
+            # tried immediately, and a later slot's wider berth further
+            # along the clip still gets its own independent chance.
+            candidates_by_proximity = sorted(
+                words,
+                key=lambda word: abs(
+                    float(
+                        word.get(
+                            "start",
+                            target_time,
+                        )
+                        or target_time
+                    )
+                    - target_time
                 ),
-                "emoji": FALLBACK_EMOJI,
-                "matched_word": "fallback_reaction",
-                "position_x": fallback_position_x,
-                "position_y": fallback_position_y,
-            }
+            )
+
+            for word in candidates_by_proximity:
+
+                candidate_start = max(
+                    clip_start,
+                    min(
+                        clip_end,
+                        float(
+                            word.get(
+                                "start",
+                                target_time,
+                            )
+                            or target_time
+                        ),
+                    ),
+                )
+
+                if any(
+                    abs(
+                        candidate_start
+                        - float(event["start"])
+                    )
+                    < MIN_EMOJI_SPACING_SECONDS
+                    for event in selected
+                ):
+                    continue
+
+                fallback_x, fallback_y = event_default_position_px(
+                    len(selected)
+                )
+                fallback_position_x, fallback_position_y = emoji_pixel_to_fraction(
+                    fallback_x,
+                    fallback_y,
+                )
+
+                selected.append(
+                    {
+                        "start": candidate_start,
+                        "end": min(
+                            clip_end,
+                            candidate_start
+                            + EMOJI_DURATION_SECONDS,
+                        ),
+                        "emoji": FALLBACK_EMOJI_ROTATION[
+                            rotation_index
+                            % len(FALLBACK_EMOJI_ROTATION)
+                        ],
+                        "matched_word": "fallback_reaction",
+                        "position_x": fallback_position_x,
+                        "position_y": fallback_position_y,
+                    }
+                )
+                rotation_index += 1
+                break
+
+            # If this particular slot's search exhausts every word
+            # without finding room, this loop iteration just falls
+            # through with nothing appended -- the next slot's target,
+            # farther along the clip, still gets its own independent
+            # chance rather than abandoning the whole fill.
+
+        selected.sort(
+            key=lambda event: event["start"]
         )
 
-    return selected[:max_emoji_events]
+    return selected[:effective_max]
 
 
 EMOJI_POSITION_MERGE_TOLERANCE_SECONDS = 1.2
@@ -1138,12 +1220,30 @@ def apply_emoji_position_overrides(
 # KARAOKE CAPTION
 # ============================================================
 
+def coerce_caption_scale(value) -> float:
+    """
+    Clamp for the manual font-size scale a corner-resize drag on the
+    placement editor's caption preview writes into render_settings.json
+    (gui_app/mixins/caption_preview.py). Bounds mirror that mixin's own
+    CAPTION_SCALE_MIN/MAX -- kept as a plain constant pair here rather
+    than imported, since make_captions.py must not depend on the GUI.
+    """
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+
+    return max(0.7, min(1.6, number))
+
+
 def caption_size(
     level: str,
     energy: str,
+    scale: float = 1.0,
 ) -> int:
 
-    return int(
+    base = int(
         CAPTION_SIZES.get(
             energy,
             CAPTION_SIZES[DEFAULT_ENERGY],
@@ -1151,6 +1251,11 @@ def caption_size(
             level,
             FONT_SIZE,
         )
+    )
+
+    return max(
+        1,
+        round(base * coerce_caption_scale(scale)),
     )
 
 
@@ -1180,6 +1285,7 @@ def caption_word_text(
     classification: dict,
     highlighted: bool,
     energy: str,
+    scale: float = 1.0,
 ) -> str:
 
     safe_word = escape_ass_text(
@@ -1196,6 +1302,7 @@ def caption_word_text(
     size = caption_size(
         level,
         energy,
+        scale,
     )
 
     color = caption_color_tag(
@@ -1320,6 +1427,7 @@ def build_caption(
     words: list[dict],
     highlight_index: int,
     energy: str,
+    scale: float = 1.0,
 ) -> str:
     """
     Render one 2-3 word caption chunk while highlighting exactly
@@ -1368,6 +1476,7 @@ def build_caption(
                 classification,
                 i == highlight_index,
                 energy,
+                scale,
             )
         )
 
@@ -1538,6 +1647,13 @@ def main() -> int:
 
     print(f"Edit energy: {edit_energy}")
 
+    caption_scale = coerce_caption_scale(
+        render_settings.get(
+            "caption_scale",
+            1.0,
+        )
+    )
+
     caption_position_tag = caption_position_override_tag(render_settings)
     if caption_position_tag:
         print(f"Caption position override: {caption_position_tag}")
@@ -1614,6 +1730,7 @@ def main() -> int:
                 group,
                 highlight_index,
                 edit_energy,
+                caption_scale,
             )
 
             if text:
@@ -1684,10 +1801,22 @@ def main() -> int:
 
     if emoji_events is None:
 
+        try:
+            min_emoji_events = int(
+                render_settings.get(
+                    "min_emoji_events",
+                    0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            min_emoji_events = 0
+
         emoji_events = choose_emoji_events(
             emoji_candidates,
             words,
             edit_energy,
+            min_emoji_events,
         )
 
         previous_emoji_events = []
@@ -1754,7 +1883,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Shorts,Arial,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,8,4,2,70,70,250,1
+Style: Shorts,Arial,{max(1, round(FONT_SIZE * caption_scale))},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,8,4,2,70,70,250,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import sys
 
-from PySide6.QtCore import QProcess, QSize, Qt
+from PySide6.QtCore import QPoint, QProcess, QSize, Qt
 from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -44,6 +44,7 @@ from emoji_overlay import (
     EMOJI_DIR,
     EMOJI_SIZE,
     coerce_emoji_fraction,
+    coerce_emoji_scale,
     emoji_filename,
     emoji_pixel_to_fraction,
     event_default_position_px,
@@ -51,9 +52,24 @@ from emoji_overlay import (
     resolve_event_asset,
 )
 from make_captions import load_local_reaction_assets, relative_asset_path
+from .resize_geometry import (
+    CORNER_NAMES,
+    OPPOSITE_CORNER,
+    corner_handle_rects,
+    corner_point,
+    format_scale_readout,
+    uniform_scale_ratio,
+)
 
 
 EMOJI_PLANNER_SCRIPT = ROOT / "app" / "emoji_planner.py"
+
+EMOJI_CORNER_CURSORS = {
+    "nw": Qt.CursorShape.SizeFDiagCursor,
+    "se": Qt.CursorShape.SizeFDiagCursor,
+    "ne": Qt.CursorShape.SizeBDiagCursor,
+    "sw": Qt.CursorShape.SizeBDiagCursor,
+}
 
 
 class EmojiPreviewMixin:
@@ -263,6 +279,25 @@ class EmojiPreviewMixin:
         if not hasattr(self, "emoji_preview_labels"):
             self.emoji_preview_labels = []
 
+        if not hasattr(self, "emoji_resize_handles"):
+            # NOTE: main_window.py's __init__ pre-seeds
+            # self.emoji_preview_labels = [] before this mixin ever runs,
+            # so a hasattr() check on that attribute is always True here --
+            # this block must be guarded on its own attribute instead, or
+            # it silently never runs and every emoji_resize_* method below
+            # blows up with an AttributeError the first time anything
+            # touches self.emoji_resize_handles.
+            self.emoji_resize_handles = []
+            self.emoji_resize_hover_slot = None
+            self.emoji_resize_dragging = False
+            self.emoji_resize_readout = QLabel("", self.video_widget)
+            self.emoji_resize_readout.setObjectName("EmojiResizeReadout")
+            self.emoji_resize_readout.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                True,
+            )
+            self.emoji_resize_readout.hide()
+
         while len(self.emoji_preview_labels) < count:
             label = QLabel(self.video_widget)
             label.setObjectName("EmojiPreviewOverlay")
@@ -277,11 +312,26 @@ class EmojiPreviewMixin:
             label.hide()
             self.emoji_preview_labels.append(label)
 
+            handles = {}
+            for corner in CORNER_NAMES:
+                handle = QLabel(self.video_widget)
+                handle.setObjectName("EmojiResizeHandle")
+                handle.setCursor(EMOJI_CORNER_CURSORS[corner])
+                handle.hide()
+                handles[corner] = handle
+            self.emoji_resize_handles.append(handles)
+
 
     def hide_emoji_preview_overlays(self):
 
         for label in getattr(self, "emoji_preview_labels", []):
             label.hide()
+        for handles in getattr(self, "emoji_resize_handles", []):
+            for handle in handles.values():
+                handle.hide()
+        if hasattr(self, "emoji_resize_readout"):
+            self.emoji_resize_readout.hide()
+        self.emoji_resize_hover_slot = None
         self.emoji_preview_active = []
 
 
@@ -297,15 +347,24 @@ class EmojiPreviewMixin:
             self.ai_visual_preview_canvas_rect()
         )
 
-        emoji_width = max(1, round(canvas_width * (EMOJI_SIZE / OUTPUT_WIDTH)))
-        emoji_height = max(1, round(canvas_height * (EMOJI_SIZE / OUTPUT_HEIGHT)))
-
         for slot_index, label in enumerate(self.emoji_preview_labels):
             if slot_index >= len(active):
                 label.hide()
+                for handle in self.emoji_resize_handles[slot_index].values():
+                    handle.hide()
                 continue
 
             _source, _key, event = active[slot_index]
+
+            event_scale = coerce_emoji_scale(event.get("scale", 1.0))
+            emoji_width = max(
+                1,
+                round(canvas_width * (EMOJI_SIZE * event_scale / OUTPUT_WIDTH)),
+            )
+            emoji_height = max(
+                1,
+                round(canvas_height * (EMOJI_SIZE * event_scale / OUTPUT_HEIGHT)),
+            )
 
             position_x = coerce_emoji_fraction(event.get("position_x", 0.0))
             position_y = coerce_emoji_fraction(event.get("position_y", 0.0))
@@ -338,6 +397,8 @@ class EmojiPreviewMixin:
 
             label.raise_()
             label.show()
+
+            self.layout_emoji_resize_handles(slot_index, screen_x, screen_y, emoji_width, emoji_height)
 
         self.emoji_preview_active = active
 
@@ -398,8 +459,17 @@ class EmojiPreviewMixin:
         canvas_x, canvas_y, canvas_width, canvas_height = (
             self.ai_visual_preview_canvas_rect()
         )
-        emoji_width = max(1, round(canvas_width * (EMOJI_SIZE / OUTPUT_WIDTH)))
-        emoji_height = max(1, round(canvas_height * (EMOJI_SIZE / OUTPUT_HEIGHT)))
+
+        _source, _key, active_event = active[slot_index]
+        event_scale = coerce_emoji_scale(active_event.get("scale", 1.0))
+        emoji_width = max(
+            1,
+            round(canvas_width * (EMOJI_SIZE * event_scale / OUTPUT_WIDTH)),
+        )
+        emoji_height = max(
+            1,
+            round(canvas_height * (EMOJI_SIZE * event_scale / OUTPUT_HEIGHT)),
+        )
 
         delta = event.globalPosition().toPoint() - self.emoji_preview_drag_origin
 
@@ -413,7 +483,6 @@ class EmojiPreviewMixin:
             self.emoji_preview_drag_start_y + delta.y() / y_span
         )
 
-        _source, _key, active_event = active[slot_index]
         active_event["position_x"] = round(position_x, 3)
         active_event["position_y"] = round(position_y, 3)
 
@@ -421,6 +490,252 @@ class EmojiPreviewMixin:
         screen_x = canvas_x + round(position_x * x_span)
         screen_y = canvas_y + round(position_y * y_span)
         label.setGeometry(screen_x, screen_y, emoji_width, emoji_height)
+        self.layout_emoji_resize_handles(slot_index, screen_x, screen_y, emoji_width, emoji_height)
+
+
+    def layout_emoji_resize_handles(self, slot_index, x, y, width, height):
+        if slot_index >= len(self.emoji_resize_handles):
+            return
+
+        # Reentrancy guard -- see the matching comment in
+        # caption_preview.py's layout_caption_resize_handles().
+        if getattr(self, "_laying_out_emoji_resize_handles", False):
+            return
+        self._laying_out_emoji_resize_handles = True
+        try:
+            handles = self.emoji_resize_handles[slot_index]
+            rects = corner_handle_rects(x, y, width, height)
+            for corner, rect in rects.items():
+                handles[corner].setGeometry(rect)
+
+            active = self.emoji_resize_hover_slot == slot_index or (
+                getattr(self, "emoji_resize_dragging", False)
+                and getattr(self, "emoji_resize_drag_slot", None) == slot_index
+            )
+            for handle in handles.values():
+                if active:
+                    handle.raise_()
+                    handle.show()
+                else:
+                    handle.hide()
+        finally:
+            self._laying_out_emoji_resize_handles = False
+
+
+    def set_emoji_resize_hover(self, slot_index):
+        if not hasattr(self, "emoji_preview_labels"):
+            return
+        if self.emoji_resize_hover_slot == slot_index:
+            return
+
+        previous = self.emoji_resize_hover_slot
+        self.emoji_resize_hover_slot = slot_index
+
+        for index in {previous, slot_index}:
+            if index is None or index >= len(self.emoji_preview_labels):
+                continue
+            label = self.emoji_preview_labels[index]
+            if label.isVisible():
+                self.layout_emoji_resize_handles(
+                    index, label.x(), label.y(), label.width(), label.height()
+                )
+
+
+    def emoji_resize_handle_at(self, event, watched):
+        for slot_index, handles in enumerate(
+            getattr(self, "emoji_resize_handles", [])
+        ):
+            for corner, handle in handles.items():
+                if not handle.isVisible():
+                    continue
+                hit = watched is handle
+                if watched is self.video_widget:
+                    try:
+                        hit = handle.geometry().contains(
+                            event.position().toPoint()
+                        )
+                    except Exception:
+                        hit = False
+                if hit:
+                    return (slot_index, corner)
+        return None
+
+
+    def begin_emoji_resize_drag(self, event, watched) -> bool:
+        hit = self.emoji_resize_handle_at(event, watched)
+        if hit is None:
+            return False
+        slot_index, corner = hit
+
+        active = getattr(self, "emoji_preview_active", [])
+        if slot_index >= len(active):
+            return False
+
+        label = self.emoji_preview_labels[slot_index]
+        geometry = label.geometry()
+
+        anchor_name = OPPOSITE_CORNER[corner]
+        anchor_point = corner_point(
+            anchor_name,
+            geometry.x(),
+            geometry.y(),
+            geometry.width(),
+            geometry.height(),
+        )
+        start_point = corner_point(
+            corner,
+            geometry.x(),
+            geometry.y(),
+            geometry.width(),
+            geometry.height(),
+        )
+
+        _source, _key, active_event = active[slot_index]
+
+        # See the matching comment in ai_visual_preview.py's
+        # begin_visual_resize_drag(): anchor_point/start_point are in
+        # video_widget-local coordinates (needed below to solve for the
+        # new position fraction), but the live drag ratio is compared
+        # against the mouse's *global* position on every move -- so that
+        # comparison needs its own global-mapped copies of these two
+        # points, or the computed ratio is meaningless.
+        global_anchor = self.video_widget.mapToGlobal(
+            QPoint(anchor_point[0], anchor_point[1])
+        )
+        global_start = self.video_widget.mapToGlobal(
+            QPoint(start_point[0], start_point[1])
+        )
+
+        self.emoji_resize_dragging = True
+        self.emoji_resize_drag_slot = slot_index
+        self.emoji_resize_handle = corner
+        self.emoji_resize_anchor_name = anchor_name
+        self.emoji_resize_anchor = anchor_point
+        self.emoji_resize_start_point = start_point
+        self.emoji_resize_global_anchor = (global_anchor.x(), global_anchor.y())
+        self.emoji_resize_global_start = (global_start.x(), global_start.y())
+        self.emoji_resize_start_scale = coerce_emoji_scale(
+            active_event.get("scale", 1.0)
+        )
+        return True
+
+
+    def update_emoji_resize_drag(self, event):
+        if not getattr(self, "emoji_resize_dragging", False):
+            return
+
+        slot_index = self.emoji_resize_drag_slot
+        active = getattr(self, "emoji_preview_active", [])
+        if slot_index >= len(active):
+            return
+
+        canvas_x, canvas_y, canvas_width, canvas_height = (
+            self.ai_visual_preview_canvas_rect()
+        )
+
+        mouse = event.globalPosition().toPoint()
+        anchor_x, anchor_y = self.emoji_resize_anchor
+        global_anchor_x, global_anchor_y = self.emoji_resize_global_anchor
+        global_start_x, global_start_y = self.emoji_resize_global_start
+
+        ratio = uniform_scale_ratio(
+            global_anchor_x, global_anchor_y, global_start_x, global_start_y,
+            mouse.x(), mouse.y(),
+        )
+        new_scale = coerce_emoji_scale(self.emoji_resize_start_scale * ratio)
+
+        new_width = max(
+            1, round(canvas_width * (EMOJI_SIZE * new_scale / OUTPUT_WIDTH))
+        )
+        new_height = max(
+            1, round(canvas_height * (EMOJI_SIZE * new_scale / OUTPUT_HEIGHT))
+        )
+
+        anchor_name = self.emoji_resize_anchor_name
+        target_x = (
+            anchor_x if anchor_name in ("nw", "sw") else anchor_x - new_width
+        )
+        target_y = (
+            anchor_y if anchor_name in ("nw", "ne") else anchor_y - new_height
+        )
+
+        x_span = max(1, canvas_width - new_width)
+        y_span = max(1, canvas_height - new_height)
+        position_x = coerce_emoji_fraction((target_x - canvas_x) / x_span)
+        position_y = coerce_emoji_fraction((target_y - canvas_y) / y_span)
+
+        _source, _key, active_event = active[slot_index]
+        active_event["scale"] = round(new_scale, 2)
+        active_event["position_x"] = round(position_x, 3)
+        active_event["position_y"] = round(position_y, 3)
+
+        screen_x = canvas_x + round(position_x * x_span)
+        screen_y = canvas_y + round(position_y * y_span)
+        label = self.emoji_preview_labels[slot_index]
+        label.setGeometry(screen_x, screen_y, new_width, new_height)
+        pixmap = self.emoji_preview_glyph_pixmap(active_event)
+        if pixmap is not None:
+            label.setPixmap(
+                pixmap.scaled(
+                    label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self.layout_emoji_resize_handles(
+            slot_index, screen_x, screen_y, new_width, new_height
+        )
+
+        readout = self.emoji_resize_readout
+        readout.setText(format_scale_readout(new_scale))
+        readout.adjustSize()
+        readout.move(screen_x, max(0, screen_y - readout.height() - 4))
+        readout.raise_()
+        readout.show()
+
+
+    def finish_emoji_resize_drag(self):
+        if not getattr(self, "emoji_resize_dragging", False):
+            return
+
+        self.emoji_resize_dragging = False
+        self.emoji_resize_readout.hide()
+
+        slot_index = self.emoji_resize_drag_slot
+        active = getattr(self, "emoji_preview_active", [])
+        if slot_index >= len(active):
+            return
+
+        source, key, active_event = active[slot_index]
+        active_event["manual_override"] = True
+
+        if source == "editor_plan":
+            clip = self.find_editor_clip("EMOJI", key)
+            if clip is None:
+                return
+            clip["scale"] = active_event["scale"]
+            clip["position_x"] = active_event["position_x"]
+            clip["position_y"] = active_event["position_y"]
+            clip["manual_override"] = True
+            clip["locked"] = True
+            self.editor_asset_plan = upsert_clip(
+                self.editor_asset_plan,
+                clip,
+            )
+            self.save_editor_asset_plan_state()
+            self.refresh_editor_asset_timeline()
+            return
+
+        event_index = key
+        data = self.load_emoji_events_file()
+        events = data.get("events", [])
+        if isinstance(events, list) and 0 <= event_index < len(events):
+            events[event_index]["scale"] = active_event["scale"]
+            events[event_index]["position_x"] = active_event["position_x"]
+            events[event_index]["position_y"] = active_event["position_y"]
+            events[event_index]["manual_override"] = True
+            data["events"] = events
+            self.save_emoji_events_file(data)
 
 
     def reset_emoji_preview_position(self, slot_index: int) -> bool:
@@ -440,6 +755,7 @@ class EmojiPreviewMixin:
                 return False
             clip["position_x"] = round(position_x, 3)
             clip["position_y"] = round(position_y, 3)
+            clip["scale"] = 1.0
             clip["manual_override"] = False
             self.editor_asset_plan = upsert_clip(
                 self.editor_asset_plan,
@@ -458,6 +774,7 @@ class EmojiPreviewMixin:
 
         events[event_index]["position_x"] = round(position_x, 3)
         events[event_index]["position_y"] = round(position_y, 3)
+        events[event_index]["scale"] = 1.0
         events[event_index]["manual_override"] = False
         data["events"] = events
         self.save_emoji_events_file(data)

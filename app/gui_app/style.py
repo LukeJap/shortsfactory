@@ -285,7 +285,7 @@ STYLESHEET =            """
                 background: #17120d;
             }
 
-            QComboBox#CompactCombo, QLineEdit#CompactLineEdit {
+            QComboBox#CompactCombo, QLineEdit#CompactLineEdit, QSpinBox#CompactSpinBox {
                 color: #ded7cf;
                 background: #09090A;
                 border: 1px solid #252429;
@@ -295,7 +295,8 @@ STYLESHEET =            """
             }
 
             QComboBox#CompactCombo:disabled,
-            QLineEdit#CompactLineEdit:disabled {
+            QLineEdit#CompactLineEdit:disabled,
+            QSpinBox#CompactSpinBox:disabled {
                 color: #625b58;
                 background: #101114;
                 border: 1px solid #201d20;
@@ -408,6 +409,26 @@ STYLESHEET =            """
                 padding: 2px 6px;
             }
 
+            QLabel#VisualResizeHandle,
+            QLabel#EmojiResizeHandle,
+            QLabel#CaptionResizeHandle {
+                background: #C9384F;
+                border: 1px solid #F4EFE6;
+                border-radius: 2px;
+            }
+
+            QLabel#VisualResizeReadout,
+            QLabel#EmojiResizeReadout,
+            QLabel#CaptionResizeReadout {
+                background: #741C28;
+                color: #F4EFE6;
+                border: 1px solid #C9384F;
+                border-radius: 4px;
+                font-size: 10px;
+                font-weight: 900;
+                padding: 2px 6px;
+            }
+
             QVideoWidget#VideoPreview {
                 background: #020203;
                 border: 1px solid #2e272b;
@@ -490,6 +511,30 @@ STYLESHEET =            """
             }
 
             QPushButton#EditStyleButton:checked {
+                color: #FFF3E3;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);
+                border: 1px solid #E05C6F;
+            }
+
+            QPushButton#AutoCutsToggle {
+                color: #968B86;
+                background: #101012;
+                border: 1px solid #30292D;
+                border-radius: 4px;
+                padding: 8px 10px;
+                font-size: 10px;
+                font-weight: 900;
+                letter-spacing: 1px;
+                text-align: left;
+            }
+
+            QPushButton#AutoCutsToggle:hover {
+                color: #F2E6D4;
+                background: #1A1115;
+                border: 1px solid #8D3445;
+            }
+
+            QPushButton#AutoCutsToggle:checked {
                 color: #FFF3E3;
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);
                 border: 1px solid #E05C6F;

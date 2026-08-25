@@ -446,6 +446,16 @@ class AIVisualSlotsMixin:
         except (TypeError, ValueError):
             scale = 1.0
         scale = max(0.6, min(1.4, scale))
+        try:
+            stretch_x = float(slot.get("stretch_x", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            stretch_x = 1.0
+        try:
+            stretch_y = float(slot.get("stretch_y", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            stretch_y = 1.0
+        stretch_x = max(0.5, min(2.0, stretch_x))
+        stretch_y = max(0.5, min(2.0, stretch_y))
         display_mode = str(slot.get("display_mode", "OVERLAY_CARD") or "OVERLAY_CARD").strip().upper()
         if display_mode not in {"OVERLAY_CARD", "FULL_FRAME_CONTAIN", "FULL_FRAME_COVER"}:
             display_mode = "OVERLAY_CARD"
@@ -463,6 +473,8 @@ class AIVisualSlotsMixin:
             "label": str(slot.get("label", f"Visual {index + 1}") or f"Visual {index + 1}"),
             "display_mode": display_mode,
             "scale": round(scale, 2),
+            "stretch_x": round(stretch_x, 2),
+            "stretch_y": round(stretch_y, 2),
             "position_x": round(
                 self.coerce_visual_position(
                     slot.get("position_x", 0.0)
@@ -545,6 +557,16 @@ class AIVisualSlotsMixin:
             if clip.get("scale") is not None:
                 try:
                     slot["scale"] = float(clip["scale"])
+                except (TypeError, ValueError):
+                    pass
+            if clip.get("stretch_x") is not None:
+                try:
+                    slot["stretch_x"] = float(clip["stretch_x"])
+                except (TypeError, ValueError):
+                    pass
+            if clip.get("stretch_y") is not None:
+                try:
+                    slot["stretch_y"] = float(clip["stretch_y"])
                 except (TypeError, ValueError):
                     pass
             if clip.get("position_x") is not None:
@@ -1903,6 +1925,30 @@ class AIVisualSlotsMixin:
             0.6,
             min(
                 1.4,
+                number,
+            ),
+        )
+
+
+    def coerce_visual_stretch(
+        self,
+        value,
+    ) -> float:
+
+        try:
+            number = float(
+                value
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            number = 1.0
+
+        return max(
+            0.5,
+            min(
+                2.0,
                 number,
             ),
         )
