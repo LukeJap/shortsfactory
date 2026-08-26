@@ -219,21 +219,21 @@ class SuggestionSlider(QSlider):
                 1,
                 int(
                     available_lane_height
-                    * 0.30
+                    * 0.28
                 ),
             )
             edit_height = max(
                 1,
                 int(
                     available_lane_height
-                    * 0.18
+                    * 0.26
                 ),
             )
             visual_height = max(
                 1,
                 int(
                     available_lane_height
-                    * 0.27
+                    * 0.24
                 ),
             )
             remaining_height = max(
@@ -268,7 +268,7 @@ class SuggestionSlider(QSlider):
                     ),
                 ),
             )
-            edit_height = 26
+            edit_height = 48
 
             # Give VISUALS its preferred height only when doing so still
             # leaves a visible SFX lane inside the real widget bounds.
@@ -342,6 +342,50 @@ class SuggestionSlider(QSlider):
             "lane_bottom": emoji_top
             + emoji_height,
         }
+
+    def edit_row_geometry(
+        self,
+        index: int,
+        row_count: int,
+        edit_top: int,
+        edit_height: int,
+    ) -> tuple[int, int]:
+
+        # Give each EDITS-lane category (manual cuts, transcript edits,
+        # caption impact, motion, FX, graphics) its own non-overlapping
+        # row instead of cramming them into overlapping micro-bands —
+        # they used to visually stack on top of each other and read as
+        # illegible slivers.
+        padding = 2
+        gap = 1
+        usable = max(
+            row_count * 4,
+            edit_height - padding * 2,
+        )
+        row_height = max(
+            4,
+            int(
+                (
+                    usable
+                    - gap
+                    * (
+                        row_count
+                        - 1
+                    )
+                )
+                / row_count
+            ),
+        )
+        y = (
+            edit_top
+            + padding
+            + index
+            * (
+                row_height
+                + gap
+            )
+        )
+        return y, row_height
 
     def emit_viewport_changed(self):
 
@@ -1159,9 +1203,11 @@ class SuggestionSlider(QSlider):
             end_ms,
         )
 
-    def visual_clip_stack_row(
+    def asset_clip_stack_row(
         self,
         clip: dict,
+        kind: str,
+        max_rows: int = 3,
     ) -> tuple[int, int]:
 
         clip_id = str(
@@ -1171,7 +1217,7 @@ class SuggestionSlider(QSlider):
             )
             or ""
         )
-        visuals = [
+        siblings = [
             candidate
             for candidate in self.asset_clips
             if isinstance(
@@ -1184,7 +1230,7 @@ class SuggestionSlider(QSlider):
                     "",
                 )
                 or ""
-            ).upper() == "AI_VISUAL"
+            ).upper() == kind
             and not bool(
                 candidate.get(
                     "deleted",
@@ -1193,10 +1239,10 @@ class SuggestionSlider(QSlider):
             )
         ]
 
-        if len(visuals) <= 1:
+        if len(siblings) <= 1:
             return 0, 1
 
-        visuals.sort(
+        siblings.sort(
             key=lambda candidate: (
                 self.clip_time_bounds_ms(
                     candidate
@@ -1219,7 +1265,7 @@ class SuggestionSlider(QSlider):
         )
         overlapping = [
             candidate
-            for candidate in visuals
+            for candidate in siblings
             if (
                 self.clip_time_bounds_ms(
                     candidate
@@ -1235,14 +1281,10 @@ class SuggestionSlider(QSlider):
         if len(overlapping) <= 1:
             return 0, 1
 
-        rows_end = [
-            -1,
-            -1,
-            -1,
-        ]
+        rows_end = [-1] * max_rows
         row_by_id: dict[str, int] = {}
 
-        for candidate in visuals:
+        for candidate in siblings:
             start_ms, end_ms = self.clip_time_bounds_ms(
                 candidate
             )
@@ -1284,7 +1326,7 @@ class SuggestionSlider(QSlider):
                 0,
             ),
             min(
-                3,
+                max_rows,
                 max(
                     2,
                     len(
@@ -1310,71 +1352,88 @@ class SuggestionSlider(QSlider):
         lanes = self.lane_geometry()
 
         if kind == "SFX":
-            return (
-                lanes["sfx_top"] + 4,
-                max(
-                    18,
-                    lanes["sfx_height"] - 8,
-                ),
+            return self._stacked_asset_lane(
+                clip,
+                kind,
+                lanes["sfx_top"],
+                lanes["sfx_height"],
+                max_rows=2,
             )
 
         if kind == "EMOJI":
-            return (
-                lanes["emoji_top"] + 4,
-                max(
-                    18,
-                    lanes["emoji_height"] - 8,
-                ),
+            return self._stacked_asset_lane(
+                clip,
+                kind,
+                lanes["emoji_top"],
+                lanes["emoji_height"],
+                max_rows=2,
             )
 
         if kind == "AI_VISUAL":
-            row, row_count = self.visual_clip_stack_row(
-                clip
-            )
-            if row_count <= 1:
-                return (
-                    lanes["visual_top"] + 4,
-                    max(
-                        18,
-                        lanes["visual_height"] - 8,
-                    ),
-                )
-
-            usable_height = max(
-                18,
-                lanes["visual_height"] - 8,
-            )
-            gap = 2
-            row_height = max(
-                14,
-                int(
-                    (
-                        usable_height
-                        - gap
-                        * (
-                            row_count
-                            - 1
-                        )
-                    )
-                    / row_count
-                ),
-            )
-            row = min(
-                row,
-                row_count - 1,
-            )
-            return (
-                lanes["visual_top"]
-                + 4
-                + row
-                * (
-                    row_height
-                    + gap
-                ),
-                row_height,
+            return self._stacked_asset_lane(
+                clip,
+                kind,
+                lanes["visual_top"],
+                lanes["visual_height"],
+                max_rows=3,
             )
 
         return None
+
+    def _stacked_asset_lane(
+        self,
+        clip: dict,
+        kind: str,
+        lane_top: int,
+        lane_height: int,
+        max_rows: int,
+    ) -> tuple[int, int]:
+
+        row, row_count = self.asset_clip_stack_row(
+            clip,
+            kind,
+            max_rows=max_rows,
+        )
+        usable_height = max(
+            18,
+            lane_height - 8,
+        )
+
+        if row_count <= 1:
+            return (
+                lane_top + 4,
+                usable_height,
+            )
+
+        gap = 2
+        row_height = max(
+            14,
+            int(
+                (
+                    usable_height
+                    - gap
+                    * (
+                        row_count
+                        - 1
+                    )
+                )
+                / row_count
+            ),
+        )
+        row = min(
+            row,
+            row_count - 1,
+        )
+        return (
+            lane_top
+            + 4
+            + row
+            * (
+                row_height
+                + gap
+            ),
+            row_height,
+        )
 
 
     def asset_clip_geometry(
@@ -3162,14 +3221,21 @@ class SuggestionSlider(QSlider):
                         )
             tick += minor_interval
 
+        # Two semantic rows instead of one-row-per-category: cuts/transcript/
+        # caption edits share the top row, motion/FX/graphics share the
+        # bottom row. A 6-way split made every marker a razor-thin 6px
+        # sliver even after the lane was enlarged; two rows lets each
+        # marker use roughly a third of the whole lane height instead.
+        cut_row_y, cut_row_h = self.edit_row_geometry(
+            0, 2, edit_top, edit_height
+        )
         for start_ms, end_ms in self.manual_cut_ranges:
             self.draw_range(
                 painter,
                 start_ms,
                 end_ms,
-                edit_top
-                + 3,
-                7,
+                cut_row_y,
+                cut_row_h,
                 QColor(194, 66, 78, 230),
             )
 
@@ -3178,9 +3244,8 @@ class SuggestionSlider(QSlider):
                 painter,
                 start_ms,
                 end_ms,
-                edit_top
-                + 13,
-                7,
+                cut_row_y,
+                cut_row_h,
                 QColor(211, 153, 74, 230),
             )
 
@@ -3189,11 +3254,10 @@ class SuggestionSlider(QSlider):
                 painter,
                 start_ms,
                 end_ms,
-                edit_top
-                + 19,
-                3,
+                cut_row_y,
+                cut_row_h,
                 QColor(255, 214, 82, 230),
-                min_width=3,
+                min_width=4,
             )
 
         for index, (
@@ -3231,14 +3295,16 @@ class SuggestionSlider(QSlider):
                 min_width=5,
             )
 
+        fx_row_y, fx_row_h = self.edit_row_geometry(
+            1, 2, edit_top, edit_height
+        )
         for start_ms, end_ms in self.motion_ranges:
             self.draw_range(
                 painter,
                 start_ms,
                 end_ms,
-                edit_top
-                + 2,
-                6,
+                fx_row_y,
+                fx_row_h,
                 QColor(153, 113, 221, 205),
             )
 
@@ -3247,9 +3313,8 @@ class SuggestionSlider(QSlider):
                 painter,
                 start_ms,
                 end_ms,
-                edit_top
-                + 9,
-                5,
+                fx_row_y,
+                fx_row_h,
                 QColor(230, 79, 210, 210),
             )
 
@@ -3258,9 +3323,8 @@ class SuggestionSlider(QSlider):
                 painter,
                 start_ms,
                 end_ms,
-                edit_top
-                + 15,
-                5,
+                fx_row_y,
+                fx_row_h,
                 QColor(96, 233, 154, 215),
             )
 
