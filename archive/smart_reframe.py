@@ -6,6 +6,11 @@ crop-to-fill was adopted for render_base_video() -- see the comment in
 gui_app/mixins/render_pipeline.py referencing this. Left in place
 (untouched by the canvas_config.py/pipeline_paths.py consolidation
 passes) rather than deleted, in case reframing is wanted again later.
+
+Archived out of app/ into archive/ (same depth as app/, so the ROOT
+computation below still resolves to the repo root); shot_type.py and
+scene_detect.py it shells out to remain live in app/, only its
+speaker_focus.py reference below moved alongside it into archive/.
 """
 
 from __future__ import annotations
@@ -542,7 +547,7 @@ def detect_speaker_focus(
 
     script = (
         ROOT
-        / "app"
+        / "archive"
         / "speaker_focus.py"
     )
 

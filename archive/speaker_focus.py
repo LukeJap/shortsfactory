@@ -4,6 +4,10 @@ shot, using local face detection plus mouth-region motion analysis (no
 audio-based diarization). Only consumer found is smart_reframe.py, which
 is itself dead code (see that file's docstring) -- verify this is still
 reachable from the active pipeline before assuming it runs.
+
+Archived out of app/ into archive/ alongside smart_reframe.py (same
+depth as app/, so the ROOT computation below still resolves to the
+repo root).
 """
 
 from __future__ import annotations
