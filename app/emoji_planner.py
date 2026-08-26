@@ -62,6 +62,11 @@ except ImportError:
     from visual_emphasis import load_render_settings
 
 try:
+    from .render import caption_anchor_y_px
+except ImportError:
+    from render import caption_anchor_y_px
+
+try:
     from .pipeline_paths import EMOJI_EVENTS_PATH as DEFAULT_OUTPUT
 except ImportError:
     from pipeline_paths import EMOJI_EVENTS_PATH as DEFAULT_OUTPUT
@@ -344,11 +349,13 @@ def main() -> int:
         events = []
     else:
         candidates = build_emoji_candidates(words)
+        caption_anchor_y = caption_anchor_y_px(load_render_settings())
         events = choose_emoji_events(
             candidates,
             words,
             args.energy,
             args.min_events,
+            caption_anchor_y,
         )
 
     if args.editor_plan:
