@@ -31,6 +31,11 @@ try:
 except ImportError:
     from pipeline_paths import EMOJI_EVENTS_PATH as EVENTS_PATH
 
+try:
+    from .visual_emphasis import load_render_settings
+except ImportError:
+    from visual_emphasis import load_render_settings
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -707,6 +712,24 @@ def main() -> int:
         )
 
         return 1
+
+    emoji_enabled = bool(
+        load_render_settings().get(
+            "emoji_enabled",
+            True,
+        )
+    )
+    print(
+        f"Emoji: {'ON' if emoji_enabled else 'OFF'}"
+    )
+
+    if not emoji_enabled:
+
+        print(
+            "Emoji disabled -- leaving the captioned video unchanged."
+        )
+
+        return 0
 
     if not EVENTS_PATH.exists():
 

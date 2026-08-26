@@ -85,6 +85,12 @@ class SuggestionSlider(QSlider):
         self.asset_drag_start = 0
         self.asset_drag_end = 0
 
+        # Master render-time include/exclude toggle for the EMOJI lane
+        # (see gui_app/mixins/settings.py's emoji_toggled()) -- dims every
+        # EMOJI clip regardless of its own per-clip "active" flag, without
+        # touching selection/drag/double-click interaction.
+        self.emoji_feature_enabled = True
+
         self.handle_radius = 8
         self.minimum_selection_ms = 500
         self.minimum_asset_clip_ms = 80
@@ -2639,6 +2645,9 @@ class SuggestionSlider(QSlider):
             "active",
             True,
         ) is not False
+
+        if kind == "EMOJI" and not self.emoji_feature_enabled:
+            active = False
 
         if kind == "SFX":
             fill = QColor(

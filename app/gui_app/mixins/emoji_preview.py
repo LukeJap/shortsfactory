@@ -341,7 +341,16 @@ class EmojiPreviewMixin:
         if not hasattr(self, "video_widget"):
             return
 
-        active = self.active_emoji_preview_events(position_ms)
+        # Emoji toggled off (see mixins/settings.py's emoji_toggled()): the
+        # Placement Editor preview should never show something the final
+        # render won't actually produce, so hide every overlay rather than
+        # rendering any as active. The timeline's EMOJI lane and the
+        # underlying plan data are untouched -- this is display-only.
+        active = (
+            self.active_emoji_preview_events(position_ms)
+            if getattr(self, "emoji_enabled", True)
+            else []
+        )
         self.ensure_emoji_preview_label_pool(len(active))
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
