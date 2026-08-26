@@ -53,6 +53,8 @@ from .constants import ROOT
 from .settings_keys import (
     AUTO_CUTS_ENABLED,
     EDIT_ENERGY,
+    EMOJI_ENABLED,
+    FILTERS_ENABLED,
     FX_INTENSITY,
     MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
@@ -470,6 +472,20 @@ class ShortsFactoryWindow(
             )
         ).strip().lower() not in ("false", "0", "")
 
+        self.filters_enabled = str(
+            self.settings.value(
+                FILTERS_ENABLED,
+                True,
+            )
+        ).strip().lower() not in ("false", "0", "")
+
+        self.emoji_enabled = str(
+            self.settings.value(
+                EMOJI_ENABLED,
+                True,
+            )
+        ).strip().lower() not in ("false", "0", "")
+
         try:
             self.min_emoji_events = max(
                 0,
@@ -859,16 +875,40 @@ class ShortsFactoryWindow(
 
         edit_style_layout.addLayout(edit_style_buttons)
 
+        self.filters_button = QPushButton(
+            "FILTERS: ON" if self.filters_enabled else "FILTERS: OFF"
+        )
+        self.filters_button.setObjectName("FiltersToggle")
+        self.filters_button.setCheckable(True)
+        self.filters_button.setChecked(self.filters_enabled)
+        self.filters_button.setToolTip(
+            "Turns off color grading, vignette, and filter/graphic accents "
+            "for this render. Turn off for an unfiltered, natural-looking "
+            "export."
+        )
+        self.filters_button.clicked.connect(self.filters_toggled)
+        edit_style_layout.addWidget(self.filters_button)
+
+        filters_subtext = QLabel(
+            "Turns off color grading, vignette, and filter/graphic accents. "
+            "Smart motion (camera punch-ins) is unaffected."
+        )
+        filters_subtext.setObjectName("HintLabel")
+        filters_subtext.setWordWrap(True)
+        edit_style_layout.addWidget(filters_subtext)
+
         fx_intensity_row = QHBoxLayout()
         fx_intensity_row.setSpacing(8)
 
-        fx_intensity_title = QLabel("FILTER INTENSITY")
-        fx_intensity_title.setObjectName("TinyLabel")
+        self.fx_intensity_title = QLabel("FILTER INTENSITY")
+        self.fx_intensity_title.setObjectName("TinyLabel")
+        self.fx_intensity_title.setEnabled(self.filters_enabled)
 
         self.fx_intensity_label = QLabel(
             f"{round(self.fx_intensity * 100)}%"
         )
         self.fx_intensity_label.setObjectName("MusicVolumeLabel")
+        self.fx_intensity_label.setEnabled(self.filters_enabled)
 
         self.fx_intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.fx_intensity_slider.setObjectName("MusicVolumeSlider")
@@ -879,8 +919,9 @@ class ShortsFactoryWindow(
             "style. 100% is the style's normal look; 0% disables it."
         )
         self.fx_intensity_slider.valueChanged.connect(self.fx_intensity_changed)
+        self.fx_intensity_slider.setEnabled(self.filters_enabled)
 
-        fx_intensity_row.addWidget(fx_intensity_title)
+        fx_intensity_row.addWidget(self.fx_intensity_title)
         fx_intensity_row.addWidget(self.fx_intensity_slider, 1)
         fx_intensity_row.addWidget(self.fx_intensity_label)
 
@@ -1045,6 +1086,18 @@ class ShortsFactoryWindow(
         )
         self.generate_button.clicked.connect(self.generate_short)
 
+        self.render_features_summary_label = QLabel(
+            self.render_features_summary_text()
+        )
+        self.render_features_summary_label.setObjectName("MicroLabel")
+        self.render_features_summary_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        self.render_features_summary_label.setToolTip(
+            "What's currently switched on/off for the next render -- "
+            "Auto Cuts, Filters, and Emoji toggles all read back here."
+        )
+
         video_stack = QWidget()
         video_stack.setObjectName("VideoStack")
         video_stack_layout = QVBoxLayout(video_stack)
@@ -1053,9 +1106,11 @@ class ShortsFactoryWindow(
         video_stack_layout.addWidget(self.video_widget, 1)
         video_stack_layout.addLayout(playback)
         video_stack_layout.addWidget(self.generate_button)
+        video_stack_layout.addWidget(self.render_features_summary_label)
 
         self.timeline = SuggestionSlider(Qt.Orientation.Horizontal)
         self.timeline.setRange(0, 0)
+        self.timeline.emoji_feature_enabled = self.emoji_enabled
         self.timeline.sliderMoved.connect(self.seek_video)
         self.timeline.sliderReleased.connect(self.seek_to_slider_position)
         self.timeline.suggestionClicked.connect(self.select_ai_suggestion)
@@ -1613,6 +1668,27 @@ class ShortsFactoryWindow(
         )
         emoji_min_row.addStretch()
 
+        self.emoji_button = QPushButton(
+            "EMOJI: ON" if self.emoji_enabled else "EMOJI: OFF"
+        )
+        self.emoji_button.setObjectName("EmojiToggle")
+        self.emoji_button.setCheckable(True)
+        self.emoji_button.setChecked(self.emoji_enabled)
+        self.emoji_button.setToolTip(
+            "Turns off all emoji reactions for this render. Planned emoji "
+            "stay saved and reappear exactly as placed if you turn this "
+            "back on."
+        )
+        self.emoji_button.clicked.connect(self.emoji_toggled)
+
+        emoji_subtext = QLabel(
+            "Turns off emoji reactions for this render only. Nothing "
+            "planned is lost -- Generate Emoji, dragging/retiming, and "
+            "swapping reactions all keep working while this is off."
+        )
+        emoji_subtext.setObjectName("HintLabel")
+        emoji_subtext.setWordWrap(True)
+
         self.check_image_ai_button = QPushButton(
             "CHECK IMAGE AI"
         )
@@ -2167,6 +2243,12 @@ class ShortsFactoryWindow(
         )
         visual_layout.addLayout(
             emoji_min_row
+        )
+        visual_layout.addWidget(
+            self.emoji_button
+        )
+        visual_layout.addWidget(
+            emoji_subtext
         )
         visual_layout.addLayout(
             image_status_row

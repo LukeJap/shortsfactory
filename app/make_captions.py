@@ -54,9 +54,19 @@ except ImportError:
     )
 
 try:
-    from .render import OUTPUT_HEIGHT, OUTPUT_WIDTH, clamp_caption_drag_position
+    from .render import (
+        OUTPUT_HEIGHT,
+        OUTPUT_WIDTH,
+        caption_anchor_y_px,
+        clamp_caption_drag_position,
+    )
 except ImportError:
-    from render import OUTPUT_HEIGHT, OUTPUT_WIDTH, clamp_caption_drag_position
+    from render import (
+        OUTPUT_HEIGHT,
+        OUTPUT_WIDTH,
+        caption_anchor_y_px,
+        clamp_caption_drag_position,
+    )
 
 try:
     from .apply_ai_visuals import (
@@ -874,6 +884,7 @@ def choose_emoji_events(
     words: list[dict],
     energy: str = DEFAULT_ENERGY,
     min_events: int | None = None,
+    caption_anchor_y: float | None = None,
 ) -> list[dict]:
     """
     Pick a sparse, deterministic set of emoji moments.
@@ -888,6 +899,11 @@ def choose_emoji_events(
     min_emoji_events, 0 = no override / today's behavior) that can raise
     the effective ceiling above the energy tier's normal max if needed --
     a stronger, explicit request takes priority over the tier default.
+
+    caption_anchor_y (see render.py's caption_anchor_y_px()) keeps each
+    event's default position clear of wherever the caption currently
+    sits; pass None only when no render_settings is available (falls
+    back to the historical fixed position table).
     """
 
     if not words:
@@ -1012,7 +1028,8 @@ def choose_emoji_events(
                 ]
 
         default_x, default_y = event_default_position_px(
-            len(selected)
+            len(selected),
+            caption_anchor_y,
         )
         (
             event["position_x"],
@@ -1100,7 +1117,8 @@ def choose_emoji_events(
                     continue
 
                 fallback_x, fallback_y = event_default_position_px(
-                    len(selected)
+                    len(selected),
+                    caption_anchor_y,
                 )
                 fallback_position_x, fallback_position_y = emoji_pixel_to_fraction(
                     fallback_x,
@@ -1817,6 +1835,7 @@ def main() -> int:
             words,
             edit_energy,
             min_emoji_events,
+            caption_anchor_y_px(render_settings),
         )
 
         previous_emoji_events = []

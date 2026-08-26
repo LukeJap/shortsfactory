@@ -134,6 +134,32 @@ def clamp_caption_drag_position(
     )
 
 
+def caption_anchor_y_px(render_settings: dict) -> float:
+    """
+    Effective caption anchor y (pixels from top) for the current render
+    settings: the manually-dragged position if one is set (see
+    caption_position_override_tag() in make_captions.py), else the
+    default MarginV-based placement this module's ffmpeg force_style
+    applies (CAPTION_SAFE_MARGIN_BOTTOM from the bottom edge). Alignment=2
+    (bottom-center) means caption text grows upward from this point, not
+    downward -- used by emoji_overlay.py to keep auto-placed emoji clear
+    of wherever the caption actually sits.
+    """
+
+    position_y = render_settings.get("caption_position_y")
+
+    if position_y is None:
+        return float(OUTPUT_HEIGHT - CAPTION_SAFE_MARGIN_BOTTOM)
+
+    try:
+        raw_y = max(0.0, min(1.0, float(position_y)))
+    except (TypeError, ValueError):
+        return float(OUTPUT_HEIGHT - CAPTION_SAFE_MARGIN_BOTTOM)
+
+    _, fraction_y = clamp_caption_drag_position(0.5, raw_y)
+    return fraction_y * OUTPUT_HEIGHT
+
+
 # ============================================================
 # PIPELINE SCRIPTS
 # ============================================================

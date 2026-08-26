@@ -1,7 +1,7 @@
 # ShortsFactory — Project Context for Design
 
 *Written as a handoff doc so a designer (or a designer's AI assistant)
-can get oriented without reading the codebase. Current as of 2026-08-23.*
+can get oriented without reading the codebase. Current as of 2026-08-25.*
 
 ## 1. What this is
 
@@ -113,7 +113,10 @@ dragged **directly on the video preview**, live, before any render:
 - **Emoji reactions** — drag to reposition; **double-click** opens a
   picker (grid of local "reaction" image/GIF assets, plus a custom-emoji
   text field) to change *which* reaction is shown at that moment.
-  Right-click resets to the default position.
+  Right-click resets to the default position. That default position is
+  now caption-aware (see §9) — it auto-picks a spot above or below
+  wherever the caption currently sits, including a caption the user has
+  manually dragged, rather than a fixed spot that could land on top of it.
 - **AI visual cutaways** — drag to reposition/scale; a "FULL FRAME" tag
   toggle for cutaways meant to cover the whole canvas rather than sit as
   a card.
@@ -130,13 +133,17 @@ lanes, top to bottom:
 
 1. **V1 SOURCE** — the source video strip, with trim handles for the
    selected clip range
-2. **EDITS** — transcript cut markers, manual edits
+2. **EDITS** — transcript cut markers, manual edits, motion/FX/graphic
+   event markers — six marker categories split across two rows (cuts/
+   transcript/caption-impact on top, motion/FX/graphics below) so they
+   don't visually overlap each other
 3. **VISUALS** — AI visual cutaway clips (draggable to retime; overlap
    stacks into rows)
-4. **SFX** — sound effect clips (orange)
-5. **EMOJI** — emoji reaction clips (gold) — the newest lane; click to
-   select/seek, drag edges to retime, double-click to swap, plus a
-   Disable/Delete context panel in the right column
+4. **SFX** — sound effect clips (orange; overlap stacks into rows, same
+   as VISUALS)
+5. **EMOJI** — emoji reaction clips (gold) — click to select/seek, drag
+   edges to retime, double-click to swap, plus a Disable/Delete context
+   panel in the right column; overlap stacks into rows, same as VISUALS/SFX
 
 Selecting a clip in any of these lanes seeks the video preview to that
 moment and syncs the corresponding placement-editor overlay, so the
@@ -172,6 +179,34 @@ extend to the other two, since the plumbing is already shared.
 
 ## 9. Recent / current state (most recent work, roughly newest first)
 
+- **Emoji auto-placement now avoids the caption:** emoji default
+  positions used to come from one fixed 4-slot table with zero awareness
+  of where the caption actually sits, so a caption dragged toward the
+  bottom of its allowed range (a normal thing to do) could end up
+  directly under an auto-placed emoji. Fixed at the source: whenever a
+  *new* default position gets assigned (a fresh render, the pre-render
+  "Plan Visuals" preview, or right-click "reset to default" in the
+  editor), the app now computes the caption's current position first and
+  picks an above-caption or below-caption spot instead. Existing/
+  manually-placed emoji are left exactly where they are — this only
+  changes what a brand-new default position resolves to.
+- **Timeline lane readability pass:** two related legibility bugs in the
+  custom timeline widget (§6), both reported as things looking "smushed"/
+  too small to read. (1) SFX and EMOJI clips had no overlap handling, so
+  two clips close together in time literally painted on top of each
+  other — now they stack into up to 2 rows, the same mechanism the
+  VISUALS lane already used. (2) The EDITS lane crammed 6 different
+  marker categories (cuts, transcript edits, caption-impact, motion, FX,
+  graphics) into a fixed 26px-tall strip using 3-7px slivers that
+  sometimes literally overlapped each other — the lane is now taller and
+  split into 2 clearly separated rows, so each marker type reads as an
+  actual visible block rather than a hairline.
+- **Dead-code cleanup:** four long-superseded scripts (an early LLM
+  content-trim planner, an early LLM short-planner, a face-tracking
+  auto-reframe stage made obsolete when the render switched to
+  crop-to-fill framing, and its speaker-focus helper) moved out of
+  `app/` into a top-level `archive/` folder. No behavior change — purely
+  less clutter when browsing the live pipeline.
 - **Render pipeline efficiency pass:** merged two of the render's
   internal video-encode passes into one, dropped a faster encode preset
   onto intermediate stages, fixed leaked source-video chapter metadata,

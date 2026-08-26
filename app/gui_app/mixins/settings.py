@@ -19,6 +19,8 @@ from visual_emphasis import (
 from ..settings_keys import (
     AUTO_CUTS_ENABLED,
     EDIT_ENERGY,
+    EMOJI_ENABLED,
+    FILTERS_ENABLED,
     FX_INTENSITY,
     MIN_EMOJI_EVENTS,
     SFX_MODE,
@@ -132,6 +134,7 @@ class SettingsMixin:
                 else "AUTO CUTS: OFF"
             )
 
+        self.refresh_render_features_summary()
         self.save_render_settings()
 
 
@@ -144,6 +147,113 @@ class SettingsMixin:
                 True,
             )
         )
+
+
+    def filters_toggled(
+        self,
+        checked: bool,
+    ):
+
+        self.filters_enabled = bool(checked)
+        self.settings.setValue(
+            FILTERS_ENABLED,
+            self.filters_enabled,
+        )
+
+        if hasattr(self, "filters_button"):
+            self.filters_button.setText(
+                "FILTERS: ON"
+                if self.filters_enabled
+                else "FILTERS: OFF"
+            )
+
+        # Nothing left for these to control while filters are off -- grey
+        # them out rather than leaving an active-looking slider with no
+        # effect.
+        for widget_name in (
+            "fx_intensity_title",
+            "fx_intensity_slider",
+            "fx_intensity_label",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(self.filters_enabled)
+
+        self.refresh_render_features_summary()
+        self.save_render_settings()
+
+
+    def current_filters_enabled(self) -> bool:
+
+        return bool(
+            getattr(
+                self,
+                "filters_enabled",
+                True,
+            )
+        )
+
+
+    def emoji_toggled(
+        self,
+        checked: bool,
+    ):
+
+        self.emoji_enabled = bool(checked)
+        self.settings.setValue(
+            EMOJI_ENABLED,
+            self.emoji_enabled,
+        )
+
+        if hasattr(self, "emoji_button"):
+            self.emoji_button.setText(
+                "EMOJI: ON"
+                if self.emoji_enabled
+                else "EMOJI: OFF"
+            )
+
+        if hasattr(self, "timeline"):
+            self.timeline.emoji_feature_enabled = self.emoji_enabled
+            self.timeline.update()
+
+        if hasattr(self, "update_emoji_preview_overlay") and hasattr(
+            self, "player"
+        ):
+            self.update_emoji_preview_overlay(self.player.position())
+
+        self.refresh_render_features_summary()
+        self.save_render_settings()
+
+
+    def current_emoji_enabled(self) -> bool:
+
+        return bool(
+            getattr(
+                self,
+                "emoji_enabled",
+                True,
+            )
+        )
+
+
+    def render_features_summary_text(self) -> str:
+
+        def on_off(value: bool) -> str:
+            return "ON" if value else "OFF"
+
+        return (
+            f"Cuts: {on_off(self.current_auto_cuts_enabled())} · "
+            f"Filters: {on_off(self.current_filters_enabled())} · "
+            f"Emoji: {on_off(self.current_emoji_enabled())}"
+        )
+
+
+    def refresh_render_features_summary(self):
+
+        if hasattr(self, "render_features_summary_label"):
+            self.render_features_summary_label.setText(
+                self.render_features_summary_text()
+            )
 
 
     def min_emoji_events_changed(
@@ -271,6 +381,8 @@ class SettingsMixin:
             "fx_intensity": self.current_fx_intensity(),
             "sfx_mode": self.current_sfx_mode(),
             "auto_cuts_enabled": self.current_auto_cuts_enabled(),
+            "filters_enabled": self.current_filters_enabled(),
+            "emoji_enabled": self.current_emoji_enabled(),
             "min_emoji_events": self.current_min_emoji_events(),
             "transcription_quality": self.current_transcription_quality(),
             "source_video": (

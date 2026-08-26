@@ -52,6 +52,7 @@ from emoji_overlay import (
     resolve_event_asset,
 )
 from make_captions import load_local_reaction_assets, relative_asset_path
+from render import caption_anchor_y_px
 from .resize_geometry import (
     CORNER_NAMES,
     OPPOSITE_CORNER,
@@ -340,7 +341,16 @@ class EmojiPreviewMixin:
         if not hasattr(self, "video_widget"):
             return
 
-        active = self.active_emoji_preview_events(position_ms)
+        # Emoji toggled off (see mixins/settings.py's emoji_toggled()): the
+        # Placement Editor preview should never show something the final
+        # render won't actually produce, so hide every overlay rather than
+        # rendering any as active. The timeline's EMOJI lane and the
+        # underlying plan data are untouched -- this is display-only.
+        active = (
+            self.active_emoji_preview_events(position_ms)
+            if getattr(self, "emoji_enabled", True)
+            else []
+        )
         self.ensure_emoji_preview_label_pool(len(active))
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
@@ -746,7 +756,12 @@ class EmojiPreviewMixin:
 
         source, key, _active_event = active[slot_index]
 
-        default_x, default_y = event_default_position_px(slot_index)
+        caption_anchor_y = caption_anchor_y_px(
+            {"caption_position_y": getattr(self, "caption_position_y", None)}
+        )
+        default_x, default_y = event_default_position_px(
+            slot_index, caption_anchor_y
+        )
         position_x, position_y = emoji_pixel_to_fraction(default_x, default_y)
 
         if source == "editor_plan":

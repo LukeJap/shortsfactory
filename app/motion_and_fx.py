@@ -133,6 +133,12 @@ def main() -> int:
             1.0,
         )
     )
+    filters_enabled = bool(
+        settings.get(
+            "filters_enabled",
+            True,
+        )
+    )
     content_rect = content_rect_from_settings(
         settings
     )
@@ -143,6 +149,10 @@ def main() -> int:
     )
     print(
         f"FX intensity: {intensity:.2f}",
+        flush=True,
+    )
+    print(
+        f"Filters: {'ON' if filters_enabled else 'OFF'}",
         flush=True,
     )
 
@@ -367,23 +377,31 @@ def main() -> int:
         content_height,
     ) = content_rect
 
-    fx_chain = build_semantic_filter_chain(
-        fx_events,
-        intensity,
-        edit_energy,
+    # The FX plan above is always analyzed/written regardless of the
+    # toggle -- same "hide the render, don't lose the plan" rule the
+    # Filters toggle uses everywhere else -- but the filter chain itself
+    # is only folded into this pass's ffmpeg command when filters are on.
+    # Smart motion (zoompan_fragment) is a separate concern and is never
+    # affected by this toggle.
+    fx_chain = (
+        build_semantic_filter_chain(
+            fx_events,
+            intensity,
+            edit_energy,
+        )
+        if filters_enabled
+        else ""
     )
 
-    inner_chain = (
-        f"{zoompan_fragment},{fx_chain}"
-        if zoompan_fragment
-        else fx_chain
+    inner_chain = ",".join(
+        part for part in (zoompan_fragment, fx_chain) if part
     )
 
     filter_string = (
         f"crop={content_width}:{content_height}:"
-        f"{content_x}:{content_y},"
-        f"{inner_chain},"
-        f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
+        f"{content_x}:{content_y}"
+        + (f",{inner_chain}" if inner_chain else "")
+        + f",pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
         f"{content_x}:{content_y}:black"
     )
 

@@ -516,7 +516,9 @@ STYLESHEET =            """
                 border: 1px solid #E05C6F;
             }
 
-            QPushButton#AutoCutsToggle {
+            QPushButton#AutoCutsToggle,
+            QPushButton#FiltersToggle,
+            QPushButton#EmojiToggle {
                 color: #968B86;
                 background: #101012;
                 border: 1px solid #30292D;
@@ -528,13 +530,17 @@ STYLESHEET =            """
                 text-align: left;
             }
 
-            QPushButton#AutoCutsToggle:hover {
+            QPushButton#AutoCutsToggle:hover,
+            QPushButton#FiltersToggle:hover,
+            QPushButton#EmojiToggle:hover {
                 color: #F2E6D4;
                 background: #1A1115;
                 border: 1px solid #8D3445;
             }
 
-            QPushButton#AutoCutsToggle:checked {
+            QPushButton#AutoCutsToggle:checked,
+            QPushButton#FiltersToggle:checked,
+            QPushButton#EmojiToggle:checked {
                 color: #FFF3E3;
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);
                 border: 1px solid #E05C6F;
@@ -708,6 +714,19 @@ STYLESHEET =            """
             QSlider::sub-page:horizontal {
                 background: #741C28;
                 border-radius: 2px;
+            }
+
+            QSlider::groove:horizontal:disabled {
+                background: #101012;
+            }
+
+            QSlider::handle:horizontal:disabled {
+                background: #4A4540;
+                border: 2px solid #3A3436;
+            }
+
+            QSlider::sub-page:horizontal:disabled {
+                background: #3A2226;
             }
 
             QWidget#TimelineNavigator {

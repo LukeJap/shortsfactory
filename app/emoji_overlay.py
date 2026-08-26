@@ -6,9 +6,11 @@ emoji_planner.py) onto the captioned video via an ffmpeg overlay filter.
 Reads each event's stored position_x/position_y fraction if present
 (set via drag or the double-click picker in gui_app/mixins/
 emoji_preview.py), falling back to a fixed 4-slot round-robin table for
-events that predate that feature. Downloads/caches Twemoji PNGs for
-plain-unicode emoji; local "reaction" image assets (assets/emoji/) are
-used directly.
+events that predate that feature. New events get their default slot from
+a caption-aware version of that table (see default_position_slots()) so
+auto-placed emoji land above or below the caption's current text zone
+instead of on top of it. Downloads/caches Twemoji PNGs for plain-unicode
+emoji; local "reaction" image assets (assets/emoji/) are used directly.
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ try:
     from .pipeline_paths import EMOJI_EVENTS_PATH as EVENTS_PATH
 except ImportError:
     from pipeline_paths import EMOJI_EVENTS_PATH as EVENTS_PATH
+
+try:
+    from .visual_emphasis import load_render_settings
+except ImportError:
+    from visual_emphasis import load_render_settings
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,16 +68,91 @@ EMOJI_DURATION = 1.50
 EMOJI_SIZE = 175
 
 # Legacy fixed round-robin corner positions (top-left of the EMOJI_SIZE box,
-# in canvas pixels). Still used as the *default* position for any emoji
-# event that has no stored position_x/position_y (new events get one of
-# these converted to a fraction; events predating this feature have neither
-# field and fall back to this table directly).
+# in canvas pixels). Used as the default position when the caller has no
+# caption anchor to place around (e.g. events predating the position_x/
+# position_y feature, read back at render time with no render_settings in
+# hand) -- see event_default_position_px()/default_position_slots() below
+# for the caption-aware table used everywhere a new default gets assigned.
 EMOJI_DEFAULT_POSITIONS_PX = [
     (760, 1300),
     (170, 1340),
     (750, 1430),
     (190, 1460),
 ]
+
+# How tall a stretch of caption text is assumed to be when keeping default
+# emoji placement clear of it. Generous enough for a wrapped multi-line
+# caption -- Alignment=2 (bottom-center) grows text upward from its anchor,
+# so this is measured upward from caption_anchor_y, not downward.
+CAPTION_TEXT_HEIGHT_ESTIMATE_PX = 260
+EMOJI_CAPTION_GAP_PX = 30
+
+# How close to the very top/bottom of the canvas (platform status bar /
+# like-comment-share UI rail) an auto-placed emoji is still allowed to sit.
+EMOJI_TOP_SAFE_Y = 200
+EMOJI_BOTTOM_SAFE_Y = 1660  # mirrors render.py's CAPTION_DRAG_MARGIN_BOTTOM floor
+
+EMOJI_LEFT_X = 170
+EMOJI_RIGHT_X = 760
+
+
+def default_position_slots(
+    caption_anchor_y: float | None = None,
+) -> list[tuple[int, int]]:
+    """
+    Build the 4-slot round-robin table new emoji events default to.
+
+    With no caption_anchor_y (caller has no render_settings to work from),
+    this is just the historical fixed table. With one, two of the four
+    slots land above the caption's estimated text zone and two land below
+    it, so auto-placed emoji no longer land on top of the caption text --
+    only its own left/right variety within whichever band it's in.
+    """
+
+    if caption_anchor_y is None:
+        return list(EMOJI_DEFAULT_POSITIONS_PX)
+
+    caption_top = caption_anchor_y - CAPTION_TEXT_HEIGHT_ESTIMATE_PX
+    caption_bottom = caption_anchor_y + EMOJI_CAPTION_GAP_PX
+
+    above_low = EMOJI_TOP_SAFE_Y
+    above_high = caption_top - EMOJI_CAPTION_GAP_PX - EMOJI_SIZE
+    has_room_above = above_high >= above_low
+
+    below_low = caption_bottom + EMOJI_CAPTION_GAP_PX
+    below_high = EMOJI_BOTTOM_SAFE_Y - EMOJI_SIZE
+    has_room_below = below_high >= below_low
+
+    # A caption dragged close to one edge can erase that whole band. Don't
+    # let a clamp silently produce a point back inside the caption's own
+    # zone -- fall back to the other (real) band instead, and only pin to
+    # a single safe point if the caption somehow leaves neither.
+    if not has_room_above:
+        if has_room_below:
+            above_low, above_high = below_low, below_high
+        else:
+            above_low = above_high = EMOJI_TOP_SAFE_Y
+
+    if not has_room_below:
+        if has_room_above:
+            below_low, below_high = above_low, above_high
+        else:
+            below_low = below_high = EMOJI_BOTTOM_SAFE_Y - EMOJI_SIZE
+
+    def point(low: float, high: float, offset: float) -> int:
+        return int(low + (high - low) * offset)
+
+    above_y1 = point(above_low, above_high, 0.15)
+    above_y2 = point(above_low, above_high, 0.75)
+    below_y1 = point(below_low, below_high, 0.15)
+    below_y2 = point(below_low, below_high, 0.75)
+
+    return [
+        (EMOJI_RIGHT_X, below_y1),
+        (EMOJI_LEFT_X, below_y2),
+        (EMOJI_RIGHT_X, above_y1),
+        (EMOJI_LEFT_X, above_y2),
+    ]
 
 
 def console_safe_text(
@@ -155,11 +237,13 @@ def emoji_fraction_to_pixel(
     )
 
 
-def event_default_position_px(index: int) -> tuple[int, int]:
+def event_default_position_px(
+    index: int,
+    caption_anchor_y: float | None = None,
+) -> tuple[int, int]:
 
-    return EMOJI_DEFAULT_POSITIONS_PX[
-        index % len(EMOJI_DEFAULT_POSITIONS_PX)
-    ]
+    slots = default_position_slots(caption_anchor_y)
+    return slots[index % len(slots)]
 
 
 def normalize_emoji(emoji: str) -> str:
@@ -666,6 +750,24 @@ def main() -> int:
         )
 
         return 1
+
+    emoji_enabled = bool(
+        load_render_settings().get(
+            "emoji_enabled",
+            True,
+        )
+    )
+    print(
+        f"Emoji: {'ON' if emoji_enabled else 'OFF'}"
+    )
+
+    if not emoji_enabled:
+
+        print(
+            "Emoji disabled -- leaving the captioned video unchanged."
+        )
+
+        return 0
 
     if not EVENTS_PATH.exists():
 
