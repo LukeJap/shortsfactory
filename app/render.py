@@ -38,9 +38,17 @@ except ImportError:
     )
 
 try:
-    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+    from .canvas_config import (
+        OUTPUT_HEIGHT,
+        OUTPUT_WIDTH,
+        crop_to_fill_filter,
+    )
 except ImportError:
-    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+    from canvas_config import (
+        OUTPUT_HEIGHT,
+        OUTPUT_WIDTH,
+        crop_to_fill_filter,
+    )
 
 try:
     from .base_video_polish import (
@@ -69,6 +77,11 @@ except ImportError:
         SHORT_PLAN_PATH as PLAN_PATH,
         SUBTITLES_PATH,
     )
+
+try:
+    from .render_archive import is_archived_clip_name
+except ImportError:
+    from render_archive import is_archived_clip_name
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -158,6 +171,24 @@ def caption_anchor_y_px(render_settings: dict) -> float:
 
     _, fraction_y = clamp_caption_drag_position(0.5, raw_y)
     return fraction_y * OUTPUT_HEIGHT
+
+
+def caption_filter_fragment(
+    captions_path: Path = CAPTIONS_PATH,
+) -> str:
+    """Return the shared FFmpeg subtitles filter used by final rendering."""
+    try:
+        filter_path = captions_path.resolve().relative_to(ROOT.resolve())
+    except (OSError, ValueError):
+        filter_path = captions_path
+
+    normalized_path = str(filter_path).replace("\\", "/")
+    return (
+        f"subtitles={normalized_path}:"
+        f"force_style='Alignment=2,MarginL={CAPTION_SAFE_MARGIN_LEFT},"
+        f"MarginR={CAPTION_SAFE_MARGIN_RIGHT},"
+        f"MarginV={CAPTION_SAFE_MARGIN_BOTTOM}'"
+    )
 
 
 # ============================================================
@@ -391,6 +422,9 @@ def organize_rendered_output() -> None:
             continue
 
         if path.name == CAPTION_OUTPUT_PATH.name:
+            continue
+
+        if is_archived_clip_name(path.name):
             continue
 
         target = component_target_for(
@@ -693,11 +727,7 @@ def content_rect_for_source(
 
 def base_video_filter_chain() -> str:
     filters = [
-        (
-            f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
-            "force_original_aspect_ratio=increase:flags=lanczos"
-        ),
-        f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}",
+        crop_to_fill_filter(),
     ]
 
     filters.extend(
@@ -787,11 +817,10 @@ def render_base_video(
 
         # This encode's output gets re-cut/re-encoded again by at least
         # one later stage before delivery, so the better rate-distortion
-        # optimization "medium" buys is wasted here -- "faster" cuts
-        # render time with no visible cost, unlike the final-delivery
-        # encodes (burn_captions(), emoji_overlay.py) which keep "medium".
+        # optimization "medium" buys is wasted here. The final delivery
+        # encode uses the same CRF after captions and emoji are combined.
         "-preset",
-        "faster",
+        "veryfast",
 
         "-crf",
         "20",
@@ -1135,8 +1164,7 @@ def burn_captions() -> None:
 
     print()
     print(
-        "=== STEP 8: Burning captions "
-        "into SMART-EDITED video ==="
+        "=== STEP 8: Preparing captions for final composite ==="
     )
     print()
 
@@ -1154,53 +1182,8 @@ def burn_captions() -> None:
             f"{TIGHT_OUTPUT_PATH}"
         )
 
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(TIGHT_OUTPUT_PATH),
-
-        # Final-export guard: keep only picture + optional audio even if a
-        # future intermediate stage accidentally introduces subtitle/data
-        # tracks again.
-        "-map",
-        "0:v:0",
-
-        "-map",
-        "0:a:0?",
-
-        "-sn",
-        "-dn",
-
-        "-vf",
-        (
-            "subtitles=output/captions.ass:"
-            f"force_style='Alignment=2,MarginL={CAPTION_SAFE_MARGIN_LEFT},"
-            f"MarginR={CAPTION_SAFE_MARGIN_RIGHT},"
-            f"MarginV={CAPTION_SAFE_MARGIN_BOTTOM}'"
-        ),
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "medium",
-
-        "-crf",
-        "20",
-
-        "-c:a",
-        "copy",
-
-        "-movflags",
-        "+faststart",
-
-        str(CAPTION_OUTPUT_PATH),
-    ]
-
-    run_command(
-        command
+    print(
+        "Caption burn deferred until the combined caption + emoji encode."
     )
 
 
@@ -1212,8 +1195,8 @@ def add_emoji_overlay() -> None:
 
     print()
     print(
-        "=== STEP 9: Adding full-color "
-        "emoji overlays ==="
+        "=== STEP 9: Rendering captions and "
+        "full-color emoji overlays ==="
     )
     print()
 
@@ -1228,6 +1211,12 @@ def add_emoji_overlay() -> None:
         [
             python_executable(),
             str(EMOJI_SCRIPT),
+            "--input",
+            str(TIGHT_OUTPUT_PATH),
+            "--output",
+            str(CAPTION_OUTPUT_PATH),
+            "--captions",
+            str(CAPTIONS_PATH.relative_to(ROOT)),
         ]
     )
 

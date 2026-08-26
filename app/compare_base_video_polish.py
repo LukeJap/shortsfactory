@@ -16,10 +16,10 @@ from pathlib import Path
 
 try:
     from .base_video_polish import polish_filters
-    from .canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+    from .canvas_config import crop_to_fill_filter
 except ImportError:
     from base_video_polish import polish_filters
-    from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+    from canvas_config import crop_to_fill_filter
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -164,11 +164,7 @@ def base_filter_chain(
     preset: str,
 ) -> str:
     filters = [
-        (
-            f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
-            "force_original_aspect_ratio=increase:flags=lanczos"
-        ),
-        f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}",
+        crop_to_fill_filter(),
     ]
 
     filters.extend(

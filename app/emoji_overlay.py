@@ -1,6 +1,6 @@
 """
-STEP 9 of the render pipeline: composites emoji reaction overlays
-(output/emoji_events.json, written by make_captions.py's
+STEP 8/9 of the render pipeline: burns captions and composites emoji
+reaction overlays (output/emoji_events.json, written by make_captions.py's
 choose_emoji_events() during the real render, or previewed early by
 emoji_planner.py) onto the captioned video via an ffmpeg overlay filter.
 Reads each event's stored position_x/position_y fraction if present
@@ -9,13 +9,15 @@ emoji_preview.py), falling back to a fixed 4-slot round-robin table for
 events that predate that feature. New events get their default slot from
 a caption-aware version of that table (see default_position_slots()) so
 auto-placed emoji land above or below the caption's current text zone
-instead of on top of it. Downloads/caches Twemoji PNGs for plain-unicode
+instead of on top of it. Captions are applied before the emoji overlays
+in the same final encode. Downloads/caches Twemoji PNGs for plain-unicode
 emoji; local "reaction" image assets (assets/emoji/) are used directly.
 """
 
 from __future__ import annotations
 
 import json
+import argparse
 import subprocess
 import sys
 import urllib.request
@@ -26,6 +28,11 @@ try:
     from .canvas_config import OUTPUT_HEIGHT as CANVAS_HEIGHT, OUTPUT_WIDTH as CANVAS_WIDTH
 except ImportError:
     from canvas_config import OUTPUT_HEIGHT as CANVAS_HEIGHT, OUTPUT_WIDTH as CANVAS_WIDTH
+
+try:
+    from .render import caption_filter_fragment
+except ImportError:
+    from render import caption_filter_fragment
 
 try:
     from .pipeline_paths import EMOJI_EVENTS_PATH as EVENTS_PATH
@@ -554,6 +561,7 @@ def prepare_emoji_events(
 
 def build_emoji_inputs(
     prepared: list[dict[str, Any]],
+    input_path: Path = INPUT_PATH,
 ) -> list[str]:
     """
     Build the ffmpeg -i input arguments: one per emoji asset, looped
@@ -562,7 +570,7 @@ def build_emoji_inputs(
     """
     inputs = [
         "-i",
-        str(INPUT_PATH),
+        str(input_path),
     ]
 
     for event in prepared:
@@ -607,6 +615,7 @@ def build_emoji_inputs(
 
 def build_emoji_filter_complex(
     prepared: list[dict[str, Any]],
+    base_label: str = "[0:v]",
 ) -> tuple[str, str]:
     """
     Build the filter_complex chain overlaying every prepared emoji onto
@@ -617,7 +626,7 @@ def build_emoji_filter_complex(
     """
     filters = []
 
-    current = "[0:v]"
+    current = base_label
 
     for index, event in enumerate(
         prepared
@@ -734,19 +743,55 @@ def build_emoji_filter_complex(
     return ";".join(filters), current
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Composite captions and emoji overlays onto a render."
+    )
+    parser.add_argument(
+        "--input",
+        default=str(INPUT_PATH),
+        help="Input video path.",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(OUTPUT_PATH),
+        help="Output video path.",
+    )
+    parser.add_argument(
+        "--captions",
+        default="",
+        help="Optional ASS captions path to burn before emoji overlays.",
+    )
+    return parser.parse_args()
+
+
+def resolve_project_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
 def main() -> int:
 
-    print()
-    print(
-        "=== STEP 9: Adding colorful emojis ==="
+    args = parse_args()
+    input_path = resolve_project_path(args.input)
+    output_path = resolve_project_path(args.output)
+    captions_path = (
+        resolve_project_path(args.captions)
+        if str(args.captions).strip()
+        else None
     )
+
+    print()
+    print("=== STEP 9: Rendering captions and colorful emojis ===")
     print()
 
-    if not INPUT_PATH.exists():
+    if not input_path.exists():
 
         print(
             f"ERROR: Video not found: "
-            f"{INPUT_PATH}"
+            f"{input_path}"
         )
 
         return 1
@@ -762,46 +807,32 @@ def main() -> int:
     )
 
     if not emoji_enabled:
-
         print(
-            "Emoji disabled -- leaving the captioned video unchanged."
+            "Emoji disabled -- rendering captions without emoji overlays."
         )
 
-        return 0
+    events = []
+    if emoji_enabled and EVENTS_PATH.exists():
+        with EVENTS_PATH.open(
+            "r",
+            encoding="utf-8",
+        ) as f:
+            data = json.load(f)
 
-    if not EVENTS_PATH.exists():
-
-        print(
-            "No emoji events found."
+        events = data.get(
+            "events",
+            [],
         )
 
-        return 0
-
-    with EVENTS_PATH.open(
-        "r",
-        encoding="utf-8",
-    ) as f:
-
-        data = json.load(f)
-
-    events = data.get(
-        "events",
-        [],
-    )
-
-    if not events:
-
-        print(
-            "No emoji events to render."
-        )
-
+    if not events and captions_path is None:
+        print("No emoji events found.")
         return 0
 
     prepared = prepare_emoji_events(
         events
     )
 
-    if not prepared:
+    if not prepared and captions_path is None:
 
         print(
             "No emoji assets available."
@@ -809,18 +840,29 @@ def main() -> int:
 
         return 0
 
-    print(
-        f"Emoji events ready: "
-        f"{len(prepared)}"
-    )
+    print(f"Emoji events ready: {len(prepared)}")
 
     inputs = build_emoji_inputs(
-        prepared
+        prepared,
+        input_path,
     )
 
-    filter_complex, current = build_emoji_filter_complex(
-        prepared
-    )
+    filter_parts = []
+    current = "[0:v]"
+    if captions_path is not None:
+        filter_parts.append(
+            f"[0:v]{caption_filter_fragment(captions_path)}[captioned]"
+        )
+        current = "[captioned]"
+
+    if prepared:
+        emoji_filters, current = build_emoji_filter_complex(
+            prepared,
+            current,
+        )
+        filter_parts.append(emoji_filters)
+
+    filter_complex = ";".join(filter_parts)
 
     command = [
         "ffmpeg",
@@ -841,7 +883,7 @@ def main() -> int:
         "libx264",
 
         "-preset",
-        "medium",
+        "faster",
 
         "-crf",
         "20",
@@ -854,21 +896,23 @@ def main() -> int:
         "-movflags",
         "+faststart",
 
-        str(OUTPUT_PATH),
+        str(output_path),
     ]
 
     run(command)
 
-    # Replace working captioned video with final version.
-    if OUTPUT_PATH.exists():
-
-        INPUT_PATH.unlink(
-            missing_ok=True
-        )
-
-        OUTPUT_PATH.replace(
-            INPUT_PATH
-        )
+    # Preserve the legacy standalone invocation. Production passes distinct
+    # input/output paths so captions and emojis share one encode.
+    if (
+        input_path == INPUT_PATH.resolve()
+        and output_path == OUTPUT_PATH.resolve()
+        and output_path.exists()
+    ):
+        input_path.unlink(missing_ok=True)
+        output_path.replace(input_path)
+        final_path = input_path
+    else:
+        final_path = output_path
 
     print()
     print(
@@ -877,7 +921,7 @@ def main() -> int:
 
     print(
         f"Final video: "
-        f"{INPUT_PATH}"
+        f"{final_path}"
     )
 
     print()

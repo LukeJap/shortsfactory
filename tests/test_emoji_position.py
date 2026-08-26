@@ -1,4 +1,5 @@
 from emoji_overlay import (
+    build_emoji_filter_complex,
     console_safe_text,
     coerce_emoji_fraction,
     emoji_fraction_to_pixel,
@@ -42,6 +43,22 @@ def test_event_default_position_cycles_through_table():
     assert event_default_position_px(0) == (760, 1300)
     assert event_default_position_px(4) == (760, 1300)
     assert event_default_position_px(1) == (170, 1340)
+
+
+def test_emoji_filter_can_chain_after_caption_video_label():
+    filters, current = build_emoji_filter_complex(
+        [
+            {
+                "start": 1.0,
+                "end": 2.5,
+                "path": "assets/emoji/example.png",
+            }
+        ],
+        "[captioned]",
+    )
+
+    assert ";[captioned][emoji0]overlay=" in filters
+    assert current == "[ov0]"
 
 
 def test_console_safe_text_escapes_emoji_for_windows_codepage():

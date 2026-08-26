@@ -423,7 +423,7 @@ def main() -> int:
         # Intermediate stage -- this output gets re-encoded again by
         # later pipeline stages before delivery.
         "-preset",
-        "faster",
+        "veryfast",
         "-crf",
         "20",
         "-c:a",

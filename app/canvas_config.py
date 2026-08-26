@@ -13,3 +13,19 @@ from __future__ import annotations
 
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
+
+
+def crop_to_fill_filter() -> str:
+    """Return a crop-before-scale filter for the shared vertical canvas."""
+    target_aspect = OUTPUT_WIDTH / OUTPUT_HEIGHT
+    inverse_aspect = OUTPUT_HEIGHT / OUTPUT_WIDTH
+    aspect_test = f"gte(iw/ih\\,{target_aspect:.4f})"
+    crop_width = f"if({aspect_test}\\,ih*{target_aspect:.4f}\\,iw)"
+    crop_height = f"if({aspect_test}\\,ih\\,iw*{inverse_aspect:.4f})"
+
+    # Cropping first avoids creating an oversized intermediate frame before
+    # the center crop discards most of it (3413x1920 for a 16:9 source).
+    return (
+        f"crop={crop_width}:{crop_height}:(iw-ow)/2:(ih-oh)/2,"
+        f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:flags=bicubic"
+    )

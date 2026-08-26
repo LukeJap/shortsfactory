@@ -43,6 +43,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 SEMANTIC_AI_TIMEOUT_ENV = "SHORTSFACTORY_SEMANTIC_AI_TIMEOUT_SECONDS"
 DEFAULT_SEMANTIC_AI_TIMEOUT_SECONDS = 30.0
+SEMANTIC_AI_PREFLIGHT_TIMEOUT_SECONDS = 1.0
 
 
 def semantic_ai_timeout_seconds() -> float:
@@ -63,6 +64,22 @@ def semantic_ai_timeout_seconds() -> float:
         1.0,
         timeout,
     )
+
+
+def semantic_ai_preflight_warning() -> str | None:
+    """Return quickly when the optional local AI service is unavailable."""
+    url = f"{OLLAMA_HOST.rstrip('/')}/api/tags"
+
+    try:
+        response = requests.get(
+            url,
+            timeout=SEMANTIC_AI_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        return str(exc)
+
+    return None
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -778,6 +795,27 @@ def main() -> int:
         "Analyzing speech for safe "
         "semantic cuts..."
     )
+
+    preflight_warning = semantic_ai_preflight_warning()
+    if preflight_warning:
+        print()
+        print(
+            "WARNING: Semantic AI is unavailable for this render."
+        )
+        print(
+            preflight_warning
+        )
+        print(
+            "Continuing with pause and manual edits only."
+        )
+        write_plan(
+            summary="Semantic editing skipped for this render.",
+            proposed_cuts=[],
+            approved_cuts=[],
+            verification_results=[],
+            warning=preflight_warning,
+        )
+        return 0
 
     prompt = build_prompt(
         words,

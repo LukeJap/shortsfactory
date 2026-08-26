@@ -1685,9 +1685,14 @@ def main() -> int:
 
     words = data.get("words", [])
 
-    if not isinstance(words, list) or not words:
-        print("ERROR: No word timestamps found.")
-        return 1
+    if not isinstance(words, list):
+        words = []
+
+    if not words:
+        print(
+            "No word timestamps found; writing an empty caption and "
+            "emoji plan for this clip."
+        )
 
     events = []
     emoji_candidates = []

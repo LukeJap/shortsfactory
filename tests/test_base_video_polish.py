@@ -97,8 +97,10 @@ def test_comparison_chain_uses_crop_polish_setsar_and_format():
     chain = base_filter_chain("VIRAL_POP")
 
     assert chain.startswith(
-        "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
-        "crop=1080:1920,"
+        "crop=if(gte(iw/ih\\,0.5625)\\,ih*0.5625\\,iw):"
+        "if(gte(iw/ih\\,0.5625)\\,ih\\,iw*1.7778):"
+        "(iw-ow)/2:(ih-oh)/2,"
+        "scale=1080:1920:flags=bicubic,"
         "eq=contrast=1.1800:brightness=0.0080:saturation=1.3000:gamma=0.9800,"
     )
     assert "colorbalance=rs=0.1200:rm=0.1200:rh=0.0600:bs=-0.1200:bm=-0.1200:bh=-0.0600" in chain
@@ -112,8 +114,10 @@ def test_production_base_video_chain_uses_viral_pop_polish():
     chain = base_video_filter_chain()
 
     assert chain.startswith(
-        "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
-        "crop=1080:1920,"
+        "crop=if(gte(iw/ih\\,0.5625)\\,ih*0.5625\\,iw):"
+        "if(gte(iw/ih\\,0.5625)\\,ih\\,iw*1.7778):"
+        "(iw-ow)/2:(ih-oh)/2,"
+        "scale=1080:1920:flags=bicubic,"
         "eq=contrast=1.1800:brightness=0.0080:saturation=1.3000:gamma=0.9800,"
     )
     assert "colorbalance=rs=0.1200:rm=0.1200:rh=0.0600:bs=-0.1200:bm=-0.1200:bh=-0.0600" in chain

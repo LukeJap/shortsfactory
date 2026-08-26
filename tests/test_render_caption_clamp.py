@@ -6,7 +6,15 @@ from render import (
     OUTPUT_HEIGHT,
     OUTPUT_WIDTH,
     clamp_caption_drag_position,
+    caption_filter_fragment,
 )
+
+
+def test_caption_filter_fragment_matches_final_caption_style():
+    assert caption_filter_fragment() == (
+        "subtitles=output/captions.ass:"
+        "force_style='Alignment=2,MarginL=110,MarginR=180,MarginV=980'"
+    )
 
 
 def test_center_position_is_unaffected():

@@ -23,6 +23,11 @@ from PySide6.QtGui import QDesktopServices
 
 from ..constants import ROOT
 
+try:
+    from render_archive import archive_final_video
+except ImportError:
+    from ...render_archive import archive_final_video
+
 RENDER_LOG_FILE_PATH = ROOT / "output" / "render_log.txt"
 
 # Every ffmpeg invocation prints this same fixed, zero-information banner
@@ -599,7 +604,26 @@ class RenderPipelineMixin:
 
     def finish_short_success(self):
 
-        self.write_render_log_snapshot()
+        current_final_video = (
+            ROOT
+            / "output"
+            / "rendered"
+            / "short1_captioned.mp4"
+        )
+
+        try:
+            final_video = archive_final_video(
+                current_final_video
+            )
+        except OSError as exc:
+            # The render itself already succeeded. Keep the fixed-path final
+            # usable if Windows briefly has it open, while making the issue
+            # visible instead of turning a completed render into a failure.
+            final_video = current_final_video
+            self.render_log.append(
+                "WARNING: Could not archive final video as a numbered "
+                f"clip: {exc}"
+            )
 
         self.generate_button.setEnabled(
             True
@@ -629,19 +653,42 @@ class RenderPipelineMixin:
             "✓ SHORT COMPLETE"
         )
 
-        final_video = (
-            ROOT
-            / "output"
-            / "rendered"
-            / "short1_captioned.mp4"
-        )
-
         self.render_log.append(
             f"Final video: {final_video}"
         )
 
         self.load_render_timeline_overlays()
         self.open_final_video(final_video)
+        self.write_render_log_snapshot()
+
+
+    def preserve_existing_final_before_render(self):
+        """Archive a legacy fixed-path final before the next render replaces it."""
+
+        current_final_video = (
+            ROOT
+            / "output"
+            / "rendered"
+            / "short1_captioned.mp4"
+        )
+
+        if not current_final_video.exists():
+            return
+
+        try:
+            archived_video = archive_final_video(
+                current_final_video
+            )
+        except OSError as exc:
+            self.render_log.append(
+                "WARNING: Could not preserve the previous final video "
+                f"before rendering: {exc}"
+            )
+            return
+
+        self.render_log.append(
+            f"Previous final preserved as: {archived_video}"
+        )
 
 
     def open_final_video(
@@ -727,6 +774,8 @@ class RenderPipelineMixin:
 
         self.render_log.clear()
         self.reset_render_log_file()
+
+        self.preserve_existing_final_before_render()
 
         self.render_log.append(
             "Starting ShortsFactory..."

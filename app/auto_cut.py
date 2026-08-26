@@ -289,10 +289,10 @@ def render_tight_edit(
         "-c:v",
         "libx264",
         # Intermediate stage -- this output gets re-encoded again by
-        # later pipeline stages before delivery, so "faster" trades away
+        # later pipeline stages before delivery, so "veryfast" trades away
         # rate-distortion optimization that would just be discarded.
         "-preset",
-        "faster",
+        "veryfast",
         "-crf",
         "20",
 
@@ -329,12 +329,14 @@ def main() -> int:
 
     words = data.get("words", [])
 
-    if not isinstance(words, list) or not words:
+    if not isinstance(words, list):
+        words = []
+
+    if not words:
         print(
-            "ERROR: subtitles.json has no word "
-            "timestamps."
+            "No word timestamps found; skipping pause-cut analysis "
+            "and preserving the full selected clip."
         )
-        return 1
 
     settings = load_render_settings()
     energy = normalize_energy(

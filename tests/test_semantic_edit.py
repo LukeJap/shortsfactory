@@ -28,6 +28,29 @@ def test_semantic_ai_timeout_has_safe_minimum(monkeypatch):
     assert semantic_edit.semantic_ai_timeout_seconds() == 1.0
 
 
+def test_semantic_ai_preflight_uses_short_connectivity_timeout(monkeypatch):
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, *, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return DummyResponse()
+
+    monkeypatch.setattr(
+        semantic_edit.requests,
+        "get",
+        fake_get,
+    )
+
+    assert semantic_edit.semantic_ai_preflight_warning() is None
+    assert captured["url"].endswith("/api/tags")
+    assert captured["timeout"] == 1.0
+
+
 def test_call_ollama_uses_semantic_timeout(monkeypatch):
     captured = {}
 
