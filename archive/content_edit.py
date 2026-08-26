@@ -5,6 +5,10 @@ verification pass). NOT currently wired into the active render pipeline
 (render.py) or any GUI mixin -- semantic_edit.py is the live equivalent
 (STEP 4). Kept as a standalone, independently-runnable script; verify it
 is still unused before removing or before assuming it runs.
+
+Archived out of app/ as dead code; moved to archive/ (same depth as
+app/, so the ROOT computation below still resolves to the repo root)
+rather than deleted, in case this planning approach is wanted again.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 
 try:
     from .ollama_config import OLLAMA_HOST, OLLAMA_MODEL

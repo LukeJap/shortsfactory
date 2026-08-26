@@ -4,6 +4,10 @@ a short_plan.json (candidate short-form video plan) via a local Ollama
 call. Predates/overlaps with analyze.py's more developed "Find Best
 Clips" flow; verify current usage before relying on this as the live
 path for clip selection.
+
+Archived out of app/ as dead code; moved to archive/ (same depth as
+app/, so the ROOT computation below still resolves to the repo root)
+rather than deleted, in case this planning approach is wanted again.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 
 try:
     from .ollama_config import OLLAMA_HOST, OLLAMA_MODEL
