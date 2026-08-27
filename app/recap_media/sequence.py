@@ -1,27 +1,48 @@
 """
-B3 -- exact recap sequence assembly. Turns each recap_script.json
-segment's candidate ranges (recap_media.loader.load_recap_script()) into
-an ordered list of exact source shots and writes
+B4-B13 (SHORTSFACTORY_AI_RECAP_TRACK_B_MEDIA_EDITOR_CREATIVE_REVISED.md)
+-- exact recap sequence assembly. Turns each recap_script.json segment's
+candidate ranges (recap_media.loader.load_recap_script()) into an
+ordered list of exact source shots and writes
 output/recap/recap_sequence.json.
 
 recap_sequence.json's schema belongs entirely to Track B (the shared
 contract never defines it, and Track A never reads it back) -- documented
 inline below rather than in the shared contract doc.
 
+Revision note: this supersedes the original (simpler) B3 spec's
+lexicographic "unused, then highest score, then earliest start" shot
+selection. The creative-quality revision asks for genuine editorial
+judgment -- visual-function diversity, non-contiguous evidence used
+naturally, avoiding giant-range/single-candidate bias, and NOT padding a
+segment to an arbitrary target duration once nothing left is worth
+adding. See select_shots()/infer_visual_function() below for how that's
+approximated without a real Track A (whose frozen recap_script.json
+schema has no visual-function field yet -- inferred from each
+candidate's own "reason" text as an honest, documented stand-in).
+
 Shot-selection policy, in order of priority:
 1. Never invent time outside a candidate's own verified (start, end) --
    a shot's duration is clamped to that span before anything else.
-2. Prefer a candidate not already used elsewhere in the sequence
-   ("minimal unnecessary range reuse"); only reuse one when every
-   available candidate for a segment has already been used at least
-   once, and mark that shot reused=true so it's inspectable.
-3. Among remaining ties, prefer the highest-scored candidate ("direct
-   visual support for narration"), then the earliest start time
-   (deterministic).
-4. Each shot's duration targets the presentation type's cadence band
-   (narration importance decides "normal illustrative" vs "important";
-   reaction_beat and original_dialogue have their own bands) -- but
+2. Score each remaining candidate: semantic relevance (Track A's own
+   "score"), plus a diversity bonus for a visual function not yet used
+   in this segment, minus a reuse penalty (this exact range already
+   used elsewhere in the sequence) and a same-function-as-the-previous-
+   shot penalty (discourages two near-duplicate-feeling shots back to
+   back). Highest score wins; earliest start breaks ties.
+3. Every segment with any candidates gets at least one shot regardless
+   of score. Beyond the first, a candidate must clear
+   MIN_USEFUL_SELECTION_SCORE or selection stops -- a segment may
+   legitimately end up shorter than its own target_duration rather than
+   padding with a low-value reuse.
+4. Each shot's duration targets a cadence band chosen from *that
+   specific candidate's* inferred visual function first (reaction/
+   detail/payoff get their own bands), falling back to the segment's
+   own importance only when the function gives no stronger signal --
    never at the expense of rule 1.
+5. The selected set is then reordered toward a cause-then-reaction-then-
+   consequence-like progression (by inferred visual function) rather
+   than left in raw selection order -- a no-op today whenever every
+   candidate infers to the same default, since the sort is stable.
 
 "Chronological source progression" / "no nonsensical jumps" are not
 enforced by refusing a candidate outright (Track A's own scoring already
@@ -30,6 +51,12 @@ instead a large backward jump between consecutive segments' shots is
 surfaced as an inspectable warning (segment-level and in the top-level
 sequence_warnings list), the same "AI proposes, human/inspector reviews"
 principle the rest of ShortsFactory already follows.
+
+Not attempted in this pass (left for a follow-up): the motion/FX
+vocabulary and narrative intensity hierarchy (hook/escalation/payoff/
+exit), black-frame/invalid-frame validation via real frame sampling, and
+shot-level GUI editing (replace/trim/reorder/lock one shot) -- those are
+each a separately-scoped, substantial piece of the creative revision.
 """
 
 from __future__ import annotations
@@ -45,16 +72,67 @@ from recap_media.loader import RecapInputError
 SEQUENCE_SCHEMA_VERSION = 1
 
 # Per-shot cadence bands, seconds (low, high) -- see
-# SHORTSFACTORY_AI_RECAP_TRACK_B_MEDIA_EDITOR.md's "Initial cadence
-# heuristics".
-CADENCE_NORMAL_ILLUSTRATIVE = (1.3, 3.0)
-CADENCE_IMPORTANT = (2.5, 4.0)
-CADENCE_QUICK_REACTION = (0.6, 1.5)
+# SHORTSFACTORY_AI_RECAP_TRACK_B_MEDIA_EDITOR_CREATIVE_REVISED.md's B5.
+# Keyed by inferred visual function rather than one band per segment.
+CADENCE_DETAIL = (0.7, 1.4)
+CADENCE_REACTION = (0.6, 1.5)
+CADENCE_ILLUSTRATIVE = (1.2, 2.5)
+CADENCE_IMPORTANT = (2.0, 3.5)
 CADENCE_ORIGINAL_DIALOGUE = (1.5, 4.5)
+CADENCE_PAYOFF = (2.0, 4.5)
 
 # A segment's own "importance" (0-1, from recap_script.json) at or above
-# this uses the wider "important shot" band instead of the normal one.
+# this uses the wider "important"/"payoff" bands instead of the default
+# illustrative one, when a candidate's own inferred function doesn't
+# already imply a band.
 IMPORTANT_THRESHOLD = 0.75
+PAYOFF_THRESHOLD = 0.9
+
+DEFAULT_VISUAL_FUNCTION = "illustrative"
+
+# Crude, honest stand-in for a real Track A "visual_function" tag (not
+# part of the frozen recap_script.json schema) -- keyword-matched
+# against a candidate's own "reason" text. An explicit
+# candidate["visual_function"], if a future Track A ever provides one,
+# always wins over this inference.
+VISUAL_FUNCTION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "reaction": ("react", "reaction", "shock", "surpris", "gasp", "stare", "stunned", "horrified"),
+    "payoff": ("payoff", "reveal", "climax", "twist", "resolution", "finally"),
+    "detail": ("detail", "object", "close-up", "closeup", "prop"),
+    "consequence": ("result", "consequence", "aftermath", "ruin", "wreck", "damage"),
+    "context": ("location", "establish", "context", "setting", "wide shot", "background"),
+    "escalation": ("escalat", "worse", "intensif", "spiral"),
+}
+
+# Cause -> reaction -> consequence -like ordering (B9) applied to an
+# already-selected shot list. Unranked/tied functions keep their
+# selection order (Python's sort is stable).
+VISUAL_FUNCTION_PROGRESSION_ORDER = [
+    "context",
+    "before",
+    "action",
+    DEFAULT_VISUAL_FUNCTION,
+    "escalation",
+    "reaction",
+    "consequence",
+    "payoff",
+    "detail",
+]
+
+# Diversity/reuse/redundancy scoring (B28/B29) -- see _selection_score().
+DIVERSITY_BONUS = 0.15
+REUSE_PENALTY = 0.5
+ADJACENT_SAME_FUNCTION_PENALTY = 0.2
+
+# Below this score, adding another shot isn't worth it -- stop selection
+# short of target_duration rather than pad with a low-value/reused shot
+# (B27). Never applied to a segment's first shot (every segment with any
+# candidates gets at least one, regardless of score).
+MIN_USEFUL_SELECTION_SCORE = 0.35
+
+# A shot shorter than this doesn't communicate anything on its own --
+# stop selection rather than add a sliver.
+MIN_SHOT_DURATION_SECONDS = 0.4
 
 # Speaking-rate fallback (~150 wpm) for estimating a segment's target
 # duration before Orpheus has actually measured one (voiceover.py's
@@ -71,19 +149,64 @@ NONSEQUENTIAL_JUMP_TOLERANCE_SECONDS = 5.0
 MAX_SHOTS_PER_SEGMENT = 20
 
 
-def cadence_for_segment(
-    segment: dict[str, Any],
+def infer_visual_function(candidate: dict[str, Any]) -> str:
+    """See the module docstring's note on visual-function inference."""
+
+    explicit = candidate.get("visual_function")
+    if explicit:
+        return str(explicit).strip().lower()
+
+    reason = str(candidate.get("reason", "")).lower()
+    for function, keywords in VISUAL_FUNCTION_KEYWORDS.items():
+        if any(keyword in reason for keyword in keywords):
+            return function
+
+    return DEFAULT_VISUAL_FUNCTION
+
+
+def cadence_for_candidate(
+    visual_function: str,
+    segment_importance: float,
     use_dialogue_band: bool = False,
 ) -> tuple[float, float]:
 
     if use_dialogue_band:
         return CADENCE_ORIGINAL_DIALOGUE
 
+    if visual_function == "reaction":
+        return CADENCE_REACTION
+    if visual_function == "detail":
+        return CADENCE_DETAIL
+    if visual_function == "payoff" or segment_importance >= PAYOFF_THRESHOLD:
+        return CADENCE_PAYOFF
+    if segment_importance >= IMPORTANT_THRESHOLD:
+        return CADENCE_IMPORTANT
+
+    return CADENCE_ILLUSTRATIVE
+
+
+def cadence_for_shot(
+    segment: dict[str, Any],
+    candidate: dict[str, Any] | None,
+    use_dialogue_band: bool = False,
+) -> tuple[float, float]:
+    """
+    Per-shot cadence: the segment's presentation_hint can force a band
+    outright (reaction_beat -> always CADENCE_REACTION, dialogue
+    treatment -> always CADENCE_ORIGINAL_DIALOGUE); otherwise this
+    candidate's own inferred visual function decides, falling back to
+    the segment's importance.
+    """
+
+    if use_dialogue_band:
+        return CADENCE_ORIGINAL_DIALOGUE
+
     if segment.get("presentation_hint") == "reaction_beat":
-        return CADENCE_QUICK_REACTION
+        return CADENCE_REACTION
 
     importance = float(segment.get("importance", 0.0))
-    return CADENCE_IMPORTANT if importance >= IMPORTANT_THRESHOLD else CADENCE_NORMAL_ILLUSTRATIVE
+    visual_function = infer_visual_function(candidate) if candidate else DEFAULT_VISUAL_FUNCTION
+    return cadence_for_candidate(visual_function, importance)
 
 
 def estimate_narration_seconds(text: str) -> float:
@@ -106,7 +229,8 @@ def target_duration_for_segment(
     segment_id = segment["segment_id"]
 
     if segment.get("presentation_hint") == "visual_only":
-        low, high = cadence_for_segment(segment)
+        importance = float(segment.get("importance", 0.0))
+        low, high = cadence_for_candidate(DEFAULT_VISUAL_FUNCTION, importance)
         return (low + high) / 2.0, "visual_only_default"
 
     if segment_id in narration_durations:
@@ -119,13 +243,55 @@ def _range_key(candidate: dict[str, Any]) -> tuple[float, float]:
     return (round(float(candidate["start"]), 2), round(float(candidate["end"]), 2))
 
 
+def _selection_score(
+    candidate: dict[str, Any],
+    visual_function: str,
+    used_ranges: set[tuple[float, float]],
+    functions_used: set[str],
+    last_function: str | None,
+) -> float:
+    """
+    B28's "internal score": Track A's own semantic relevance, plus a
+    diversity bonus (this visual function hasn't been used yet in this
+    segment), minus a reuse penalty (this exact range already appears
+    elsewhere in the sequence) and a same-function-as-immediately-
+    before penalty (B29 -- avoid two near-duplicate-feeling shots back
+    to back).
+    """
+
+    score = float(candidate["score"])
+
+    if visual_function not in functions_used:
+        score += DIVERSITY_BONUS
+
+    if _range_key(candidate) in used_ranges:
+        score -= REUSE_PENALTY
+
+    if last_function is not None and visual_function == last_function:
+        score -= ADJACENT_SAME_FUNCTION_PENALTY
+
+    return score
+
+
+def _reorder_for_progression(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+
+    def rank(shot: dict[str, Any]) -> int:
+        function = shot.get("visual_function", DEFAULT_VISUAL_FUNCTION)
+        try:
+            return VISUAL_FUNCTION_PROGRESSION_ORDER.index(function)
+        except ValueError:
+            return VISUAL_FUNCTION_PROGRESSION_ORDER.index(DEFAULT_VISUAL_FUNCTION)
+
+    return sorted(shots, key=rank)
+
+
 def select_shots(
     candidates: list[dict[str, Any]],
+    segment: dict[str, Any],
     target_duration: float,
-    cadence_low: float,
-    cadence_high: float,
     used_ranges: set[tuple[float, float]],
     source_list_name: str,
+    use_dialogue_band: bool = False,
 ) -> list[dict[str, Any]]:
 
     if not candidates:
@@ -133,23 +299,42 @@ def select_shots(
 
     shots: list[dict[str, Any]] = []
     remaining = target_duration
+    functions_used: set[str] = set()
+    last_function: str | None = None
 
-    while remaining > 0.05 and len(shots) < MAX_SHOTS_PER_SEGMENT:
+    while (not shots or remaining > MIN_SHOT_DURATION_SECONDS) and len(shots) < MAX_SHOTS_PER_SEGMENT:
 
-        candidate = min(
-            candidates,
-            key=lambda c: (
-                _range_key(c) in used_ranges,  # unused ranges sort first
-                -float(c["score"]),  # then highest score
-                float(c["start"]),  # then earliest start (deterministic)
-            ),
+        scored = [
+            (
+                _selection_score(
+                    candidate,
+                    infer_visual_function(candidate),
+                    used_ranges,
+                    functions_used,
+                    last_function,
+                ),
+                candidate,
+            )
+            for candidate in candidates
+        ]
+        best_score, best_candidate = max(
+            scored,
+            key=lambda item: (item[0], -float(item[1]["start"])),
         )
 
-        span = float(candidate["end"]) - float(candidate["start"])
+        # Every segment gets at least one shot regardless of score; only
+        # a *second-or-later* shot can be skipped for not being worth it.
+        if shots and best_score < MIN_USEFUL_SELECTION_SCORE:
+            break
+
+        visual_function = infer_visual_function(best_candidate)
+        cadence_low, cadence_high = cadence_for_shot(segment, best_candidate, use_dialogue_band)
+
+        span = float(best_candidate["end"]) - float(best_candidate["start"])
         shot_duration = min(span, cadence_high, max(cadence_low, remaining))
-        shot_start = float(candidate["start"])
+        shot_start = float(best_candidate["start"])
         shot_end = round(shot_start + shot_duration, 3)
-        reused = _range_key(candidate) in used_ranges
+        reused = _range_key(best_candidate) in used_ranges
 
         shots.append(
             {
@@ -157,16 +342,20 @@ def select_shots(
                 "end": shot_end,
                 "duration": round(shot_duration, 3),
                 "source_list": source_list_name,
-                "score": candidate["score"],
-                "reason": candidate.get("reason", ""),
+                "score": best_candidate["score"],
+                "selection_score": round(best_score, 3),
+                "reason": best_candidate.get("reason", ""),
+                "visual_function": visual_function,
                 "reused": reused,
             }
         )
 
-        used_ranges.add(_range_key(candidate))
+        used_ranges.add(_range_key(best_candidate))
+        functions_used.add(visual_function)
+        last_function = visual_function
         remaining -= shot_duration
 
-    return shots
+    return _reorder_for_progression(shots)
 
 
 def assemble_sequence(
@@ -193,7 +382,6 @@ def assemble_sequence(
 
         hint = segment["presentation_hint"]
         use_dialogue_band = hint == "original_dialogue"
-        cadence_low, cadence_high = cadence_for_segment(segment, use_dialogue_band=use_dialogue_band)
         target_duration, duration_source = target_duration_for_segment(segment, narration_durations)
 
         primary_list = (
@@ -213,11 +401,11 @@ def assemble_sequence(
 
         shots = select_shots(
             candidates,
+            segment,
             target_duration,
-            cadence_low,
-            cadence_high,
             used_ranges,
             source_list_name,
+            use_dialogue_band=use_dialogue_band,
         )
 
         # Per-shot, not just per-segment -- a narration_over_source
@@ -404,7 +592,9 @@ def interweave_original_dialogue(
             "duration": round(insert_duration, 3),
             "source_list": "original_dialogue_candidates",
             "score": best["score"],
+            "selection_score": best["score"],
             "reason": best.get("reason", ""),
+            "visual_function": "original_dialogue",
             "reused": _range_key(best) in used_ranges,
             "treatment": "original_dialogue",
         }
