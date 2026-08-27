@@ -533,6 +533,8 @@ def normalize_script(
     raw: dict[str, Any],
     story_map: dict[str, Any],
     config: RecapWritingConfig,
+    *,
+    deterministic_segment_ids: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise RecapWritingError("Recap writer response must be an object")
@@ -593,10 +595,13 @@ def normalize_script(
         purposes = " ".join(_purpose(verified_beats[beat_id]) for beat_id in beat_ids)
         if any(token in purposes for token in ("payoff", "climax", "reversal", "reveal")):
             importance += 0.025
-        segment_id = str(raw_segment.get("segment_id") or f"VO_{index:03d}").strip()
-        if not segment_id or segment_id in seen_segment_ids:
-            raise RecapWritingError("Recap segment IDs must be present and unique")
-        seen_segment_ids.add(segment_id)
+        if deterministic_segment_ids:
+            segment_id = f"VO_{index:03d}"
+        else:
+            segment_id = str(raw_segment.get("segment_id") or f"VO_{index:03d}").strip()
+            if not segment_id or segment_id in seen_segment_ids:
+                raise RecapWritingError("Recap segment IDs must be present and unique")
+            seen_segment_ids.add(segment_id)
         segments.append(
             {
                 "segment_id": segment_id,
@@ -2345,7 +2350,12 @@ class RecapWriter:
         story_map: dict[str, Any],
         outline: dict[str, Any],
     ) -> dict[str, Any]:
-        script = normalize_script(raw, story_map, self.config)
+        script = normalize_script(
+            raw,
+            story_map,
+            self.config,
+            deterministic_segment_ids=self._uses_rich_fast_path(story_map),
+        )
         validate_script_quality_invariants(script, story_map, outline, self.config)
         return script
 

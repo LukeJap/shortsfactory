@@ -501,6 +501,72 @@ def test_rich_writer_schema_repair_never_exceeds_two_calls():
     assert len(writer.last_diagnostics["attempts"]) == 2
 
 
+def test_rich_writer_normalizes_duplicate_model_segment_ids():
+    source = rich_story_map()
+    response = rich_draft(source)
+    for segment in response["segments"]:
+        segment["segment_id"] = "SEG_01"
+    model = SequenceModel([response])
+
+    script = RecapWriter(model, config=small_config()).write(source)
+
+    assert [segment["segment_id"] for segment in script["segments"]] == [
+        f"VO_{index:03d}" for index in range(1, len(response["segments"]) + 1)
+    ]
+    assert len(model.prompts) == 1
+
+
+def test_rich_writer_normalizes_missing_model_segment_ids():
+    source = rich_story_map()
+    response = rich_draft(source)
+    for segment in response["segments"]:
+        del segment["segment_id"]
+    model = SequenceModel([response])
+
+    script = RecapWriter(model, config=small_config()).write(source)
+
+    assert [segment["segment_id"] for segment in script["segments"]] == [
+        f"VO_{index:03d}" for index in range(1, len(response["segments"]) + 1)
+    ]
+    assert len(model.prompts) == 1
+
+
+def test_rich_writer_normalizes_arbitrary_model_segment_ids():
+    source = rich_story_map()
+    response = rich_draft(source)
+    for index, segment in enumerate(response["segments"], start=1):
+        segment["segment_id"] = f"untrusted-{index * 17}"
+    model = SequenceModel([response])
+
+    script = RecapWriter(model, config=small_config()).write(source)
+
+    assert [segment["segment_id"] for segment in script["segments"]] == [
+        f"VO_{index:03d}" for index in range(1, len(response["segments"]) + 1)
+    ]
+    assert len(model.prompts) == 1
+
+
+def test_rich_writer_preserves_segment_order_when_normalizing_ids():
+    source = rich_story_map()
+    response = rich_draft(source)
+    expected_texts = [segment["text"] for segment in response["segments"]]
+    expected_beat_ids = [segment["beat_ids"] for segment in response["segments"]]
+    for segment, segment_id in zip(
+        response["segments"], ["later", "first", "middle", "last", "extra"]
+    ):
+        segment["segment_id"] = segment_id
+    model = SequenceModel([response])
+
+    script = RecapWriter(model, config=small_config()).write(source)
+
+    assert [segment["text"] for segment in script["segments"]] == expected_texts
+    assert [segment["beat_ids"] for segment in script["segments"]] == expected_beat_ids
+    assert [segment["segment_id"] for segment in script["segments"]] == [
+        f"VO_{index:03d}" for index in range(1, len(response["segments"]) + 1)
+    ]
+    assert len(model.prompts) == 1
+
+
 def test_narration_plan_chooses_conflict_hook_instead_of_chronological_setup():
     plan = build_narration_plan(richer_story_map(), RecapWritingConfig())
 
