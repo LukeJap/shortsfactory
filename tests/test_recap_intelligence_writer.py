@@ -13,6 +13,8 @@ from recap_intelligence.writer import (
     RecapWritingConfig,
     RecapWritingError,
     TemplateRecapWriter,
+    build_narration_plan,
+    normalize_script,
 )
 
 
@@ -163,7 +165,7 @@ def test_template_writer_is_grounded_and_valid():
 
 
 def test_staged_writer_fills_candidates_from_verified_evidence():
-    model = SequenceModel([outline(), draft(), PASSING_CRITIQUE])
+    model = SequenceModel([draft(), PASSING_CRITIQUE])
     writer = RecapWriter(model, config=small_config())
 
     script = writer.write(story_map())
@@ -172,8 +174,7 @@ def test_staged_writer_fills_candidates_from_verified_evidence():
     assert script["segments"][0]["candidate_visuals"][0]["end"] == 3.0
     assert script["segments"][0]["original_dialogue_candidates"][0]["start"] == 1.4
     assert [attempt["stage"] for attempt in writer.last_diagnostics["attempts"]] == [
-        "narrative_outline",
-        "narration_draft",
+        "narration_section_full_story",
         "quality_critique",
     ]
 
@@ -187,9 +188,8 @@ def test_malformed_and_wrong_shape_outputs_are_repaired_and_logged(tmp_path):
     model = SequenceModel(
         [
             malformed,
-            outline(),
-            {"beats": []},
             draft(),
+            {"beats": []},
             PASSING_CRITIQUE,
         ]
     )
@@ -213,14 +213,17 @@ def test_malformed_and_wrong_shape_outputs_are_repaired_and_logged(tmp_path):
 def test_invalid_output_fails_after_bounded_repairs_and_preserves_raw(tmp_path):
     invalid = draft()
     invalid["segments"][0]["beat_ids"] = ["B999"]
-    model = SequenceModel([outline(), invalid, invalid])
+    model = SequenceModel([invalid, invalid])
     writer = RecapWriter(
         model,
         config=small_config(max_revision_attempts=0),
         debug_dir=tmp_path / "debug",
     )
 
-    with pytest.raises(RecapWritingError, match="narration_draft remained invalid"):
+    with pytest.raises(
+        RecapWritingError,
+        match="narration_section_full_story remained invalid",
+    ):
         writer.write(story_map())
 
     diagnostics = json.loads(
@@ -241,26 +244,24 @@ def test_candidate_visual_must_come_from_referenced_verified_beat():
             }
         ]
     )
-    model = SequenceModel([outline(), unsupported, draft(), PASSING_CRITIQUE])
+    model = SequenceModel([unsupported, PASSING_CRITIQUE])
     writer = RecapWriter(model, config=small_config())
 
     script = writer.write(story_map())
 
-    assert writer.last_diagnostics["repair_attempt_count"] == 1
+    assert writer.last_diagnostics["repair_attempt_count"] == 0
     assert script["segments"][0]["candidate_visuals"][0]["start"] == 1.0
 
 
 def test_payoff_selected_by_outline_must_be_represented():
     missing_payoff = draft()
-    model = SequenceModel(
-        [outline(with_payoff=True), missing_payoff, missing_payoff]
-    )
+    model = SequenceModel([missing_payoff, missing_payoff])
     writer = RecapWriter(
         model,
         config=small_config(max_revision_attempts=0),
     )
 
-    with pytest.raises(RecapWritingError, match="essential causal-chain beats"):
+    with pytest.raises(RecapWritingError, match="omits planned beats"):
         writer.write(story_map(with_payoff=True))
 
 
@@ -286,7 +287,7 @@ def test_subjective_quality_failure_uses_separate_revision_stage():
     }
     revised = draft(text="The locked door forces Alice to act immediately.")
     model = SequenceModel(
-        [outline(), draft(), failing_critique, revised, PASSING_CRITIQUE]
+        [draft(), failing_critique, revised, PASSING_CRITIQUE]
     )
     writer = RecapWriter(model, config=small_config())
 
@@ -294,7 +295,7 @@ def test_subjective_quality_failure_uses_separate_revision_stage():
 
     assert script["segments"][0]["text"].startswith("The locked door")
     assert writer.last_diagnostics["revision_attempt_count"] == 1
-    assert "QUALITY CRITIQUE" in model.prompts[3]
+    assert "QUALITY CRITIQUE" in model.prompts[2]
 
 
 def test_quality_gate_cannot_pass_an_unsupported_segment():
@@ -310,13 +311,221 @@ def test_quality_gate_cannot_pass_an_unsupported_segment():
         "issues": [],
         "revision_instructions": [],
     }
-    model = SequenceModel([outline(), draft(), contradictory, PASSING_CRITIQUE])
+    model = SequenceModel([draft(), contradictory, PASSING_CRITIQUE])
     writer = RecapWriter(model, config=small_config())
 
     script = writer.write(story_map())
 
     assert script["segments"]
     assert writer.last_diagnostics["repair_attempt_count"] == 1
+
+
+def richer_story_map():
+    purposes = [
+        "setup",
+        "inciting_incident",
+        "escalation",
+        "conflict_escalation",
+        "reversal_reveal",
+        "climax_payoff",
+        "resolution_button",
+    ]
+    importances = [0.35, 0.68, 0.58, 0.88, 0.92, 0.98, 0.55]
+    beats = []
+    for index, (purpose, importance) in enumerate(
+        zip(purposes, importances), start=1
+    ):
+        beats.append(
+            {
+                "beat_id": f"B{index:03d}",
+                "chronological_order": index,
+                "summary": f"Verified story event number {index} changes the situation.",
+                "story_purpose": purpose,
+                "verification_status": "verified",
+                "importance": importance,
+                "motivation": "The lead tries to repair the relationship."
+                if index in {2, 4}
+                else "",
+                "change": "The emotional conflict becomes explicit."
+                if index == 4
+                else "",
+                "emotional_conflict": "A painful rejection drives the response."
+                if index == 4
+                else "",
+                "payoff_significance": "The misunderstanding is finally resolved."
+                if index == 6
+                else "",
+                "causal_parents": [f"B{index - 1:03d}"] if index > 1 else [],
+                "causal_children": [f"B{index + 1:03d}"] if index < 7 else [],
+                "actual_video_evidence_ranges": [
+                    {
+                        "start": float(index * 10),
+                        "end": float(index * 10 + 4),
+                        "confidence": 0.9,
+                        "evidence_type": "transcript",
+                        "transcript_excerpt": f"Verified concise line {index}.",
+                    }
+                ],
+                "original_dialogue_candidates": [],
+            }
+        )
+    return {"beats": beats}
+
+
+def test_narration_plan_chooses_conflict_hook_instead_of_chronological_setup():
+    plan = build_narration_plan(richer_story_map(), RecapWritingConfig())
+
+    assert plan["hook"]["beat_ids"] == ["B004"]
+    assert plan["minimum_setup"]["beat_ids"] == ["B002"]
+    assert plan["payoff_climax"]["beat_ids"] == ["B006"]
+    assert plan["planned_segments"][-2]["function"] == "reversal_payoff"
+    assert plan["planned_segments"][-2]["target_words"] > plan["planned_segments"][0]["target_words"]
+
+
+def test_underbudget_draft_gets_one_targeted_grounded_expansion():
+    expanded_text = (
+        "Opening the door creates a question Alice cannot ignore, and the hidden "
+        "package gives her a concrete reason to keep investigating. Each clue "
+        "narrows the possibilities until the discovery behind the doorway finally "
+        "connects the action to the answer and resolves the mystery cleanly."
+    )
+    model = SequenceModel(
+        [
+            draft(with_payoff=True),
+            draft(text=expanded_text, with_payoff=True),
+            PASSING_CRITIQUE,
+        ]
+    )
+    writer = RecapWriter(
+        model,
+        config=small_config(minimum_word_count=99, maximum_word_count=360),
+    )
+
+    script = writer.write(story_map(with_payoff=True))
+
+    assert script["actual_word_count"] >= 32
+    assert writer.last_diagnostics["targeted_expansion_used"] is True
+    assert [item["stage"] for item in writer.last_diagnostics["attempts"]] == [
+        "narration_section_full_story",
+        "targeted_budget_expansion",
+        "quality_critique",
+    ]
+    assert "deficit_words" in model.prompts[1]
+
+
+def test_thin_payoff_triggers_targeted_expansion_even_above_global_floor():
+    setup_text = (
+        "Alice studies the doorway from every angle, checks the frame, follows "
+        "the marks on the floor, and keeps testing each possibility because the "
+        "unexplained entrance gives her a concrete mystery to solve."
+    )
+    initial = {
+        "segments": [
+            {"segment_id": "VO_001", "text": setup_text, "beat_ids": ["B001"]},
+            {"segment_id": "VO_002", "text": "The package answers it.", "beat_ids": ["B002"]},
+        ]
+    }
+    expanded_text = (
+        "That discovery connects the hidden package to her question and gives the "
+        "search a clear consequence. Instead of ending on another clue, Alice can "
+        "finally understand why opening the doorway mattered."
+    )
+    payoff_patch = {
+        "segments": [
+            {"segment_id": "ADD_001", "text": expanded_text, "beat_ids": ["B002"]}
+        ]
+    }
+    source = story_map(with_payoff=True)
+    config = small_config(minimum_word_count=180, maximum_word_count=360)
+    writer = RecapWriter(SequenceModel([]), config=config)
+    script = normalize_script(initial, source, config)
+    plan = build_narration_plan(source, config)
+    deficits = writer._budget_deficits(script, source, plan)
+    patch = normalize_script(payoff_patch, source, config)
+
+    expanded = writer._append_expansion(script, patch, source)
+
+    assert any(item["function"] == "payoff_climax" for item in deficits)
+    assert expanded["actual_word_count"] > script["actual_word_count"]
+    assert len(expanded["segments"]) == len(script["segments"]) + 1
+
+
+def test_generic_intro_is_repaired_before_quality_critique():
+    generic = draft(text="In this episode, Alice opens the door.")
+    grounded = draft(text="A stubborn locked door gives Alice a reason to act.")
+    model = SequenceModel([generic, grounded, PASSING_CRITIQUE])
+    writer = RecapWriter(model, config=small_config())
+
+    script = writer.write(story_map())
+
+    assert script["segments"][0]["text"].startswith("A stubborn")
+    assert writer.last_diagnostics["repair_attempt_count"] == 1
+
+
+def test_verbatim_story_summary_is_rejected():
+    source = story_map()
+    source["beats"][0]["summary"] = "Alice slowly opens the locked door and discovers a clue."
+    copied = draft(text=source["beats"][0]["summary"])
+    model = SequenceModel([copied, copied])
+    writer = RecapWriter(model, config=small_config(max_revision_attempts=0))
+
+    with pytest.raises(RecapWritingError, match="copying story-map summaries"):
+        writer.write(source)
+
+
+def test_multi_beat_segment_gets_short_diverse_noncontiguous_visuals():
+    source = story_map(with_payoff=True)
+    source["beats"][0]["actual_video_evidence_ranges"].insert(
+        0,
+        {"start": 0.0, "end": 20.0, "confidence": 0.95},
+    )
+    script = normalize_script(
+        draft(text="One action leads directly to the resolving discovery.", with_payoff=True),
+        source,
+        small_config(),
+    )
+
+    visuals = script["segments"][0]["candidate_visuals"]
+    assert [(item["start"], item["end"]) for item in visuals[:2]] == [
+        (1.0, 3.0),
+        (4.0, 7.0),
+    ]
+    assert len(visuals) == 3
+
+
+def test_dialogue_is_derived_only_from_verified_high_value_evidence():
+    source = story_map(with_payoff=True)
+    source["beats"][1]["actual_video_evidence_ranges"][0][
+        "transcript_excerpt"
+    ] = "The answer was inside the package."
+    script = normalize_script(
+        draft(text="The package resolves the question.", with_payoff=True),
+        source,
+        small_config(),
+    )
+
+    dialogue = script["segments"][0]["original_dialogue_candidates"]
+    assert dialogue[0]["start"] == 1.4
+    assert dialogue[1]["start"] == 4.0
+    assert dialogue[1]["end"] == 7.0
+
+
+def test_importance_is_derived_from_beats_and_not_uniform_model_values():
+    source = richer_story_map()
+    raw = {
+        "segments": [
+            {
+                "segment_id": f"VO_{index:03d}",
+                "text": f"An original grounded narration thought for event {index}.",
+                "beat_ids": [f"B{index:03d}"],
+                "importance": 0.9,
+            }
+            for index in range(1, 5)
+        ]
+    }
+    script = normalize_script(raw, source, small_config())
+
+    assert len({segment["importance"] for segment in script["segments"]}) > 1
 
 
 def test_tolerant_json_parser_keeps_raw_text_for_repair():

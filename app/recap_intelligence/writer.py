@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import hashlib
 import json
 from pathlib import Path
@@ -24,7 +25,7 @@ DEFAULT_OUTLINE_PROMPT_PATH = ROOT / "prompts" / "recap_outline.md"
 DEFAULT_PROMPT_PATH = ROOT / "prompts" / "recap_writer.md"
 DEFAULT_CRITIC_PROMPT_PATH = ROOT / "prompts" / "recap_critic.md"
 DEFAULT_REPAIR_PROMPT_PATH = ROOT / "prompts" / "recap_repair.md"
-WRITER_PROMPT_VERSION = "recap-writer-high-retention-v2"
+WRITER_PROMPT_VERSION = "recap-writer-creative-budget-v3"
 
 
 class RecapWritingError(RuntimeError):
@@ -74,8 +75,14 @@ def _story_payload(story_map: dict[str, Any]) -> dict[str, Any]:
         "characters",
         "location",
         "importance",
+        "motivation",
+        "change",
+        "emotional_conflict",
+        "payoff_significance",
         "causal_parents",
         "causal_children",
+        "causal_reasoning",
+        "semantic_unit_ids",
         "actual_video_evidence_ranges",
         "original_dialogue_candidates",
         "confidence",
@@ -99,10 +106,11 @@ def _ranges_for_beats(
     beat_ids: list[str],
     beats: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    ranges: list[dict[str, Any]] = []
+    by_beat: list[tuple[str, list[dict[str, Any]]]] = []
     seen: set[tuple[float, float]] = set()
     for beat_id in beat_ids:
         beat = beats.get(beat_id, {})
+        candidates: list[dict[str, Any]] = []
         for item in beat.get("actual_video_evidence_ranges", []) or []:
             if not isinstance(item, dict):
                 continue
@@ -113,16 +121,94 @@ def _ranges_for_beats(
                 continue
             if end <= start or (start, end) in seen:
                 continue
-            seen.add((start, end))
-            ranges.append(
+            candidates.append(
                 {
                     "start": round(start, 4),
                     "end": round(end, 4),
                     "score": round(float(item.get("confidence", 0.0) or 0.0), 4),
-                    "reason": f"Verified source evidence for story beat {beat_id}.",
+                    "reason": f"Primary verified source evidence for story beat {beat_id}.",
                 }
             )
-    return ranges
+        candidates.sort(
+            key=lambda value: (
+                value["end"] - value["start"],
+                -value["score"],
+                value["start"],
+            )
+        )
+        if candidates:
+            by_beat.append((beat_id, candidates))
+
+    ranges: list[dict[str, Any]] = []
+    for _, candidates in by_beat:
+        candidate = candidates[0]
+        key = (candidate["start"], candidate["end"])
+        if key not in seen:
+            seen.add(key)
+            ranges.append(candidate)
+    extras = sorted(
+        (
+            candidate
+            for _, candidates in by_beat
+            for candidate in candidates[1:]
+        ),
+        key=lambda value: (
+            value["end"] - value["start"],
+            -value["score"],
+            value["start"],
+        ),
+    )
+    for candidate in extras:
+        if len(ranges) >= 4:
+            break
+        key = (candidate["start"], candidate["end"])
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate = dict(candidate)
+        candidate["reason"] = "Additional distinct verified evidence for this narration thought."
+        ranges.append(candidate)
+    return ranges[:4]
+
+
+def _dialogue_sources_for_beat(beat: dict[str, Any]) -> list[dict[str, Any]]:
+    explicit = [
+        dict(item)
+        for item in beat.get("original_dialogue_candidates", []) or []
+        if isinstance(item, dict)
+    ]
+    if explicit:
+        return explicit
+    purpose = str(beat.get("story_purpose", "") or "").casefold()
+    conflict = str(beat.get("emotional_conflict", "") or "").casefold()
+    if not any(
+        token in purpose or token in conflict
+        for token in ("reversal", "reveal", "payoff", "climax", "resolution", "emotional", "conflict", "anger", "heartbreak")
+    ):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for evidence in beat.get("actual_video_evidence_ranges", []) or []:
+        if not isinstance(evidence, dict):
+            continue
+        excerpt = " ".join(
+            str(evidence.get("transcript_excerpt", "") or "").split()
+        )
+        try:
+            start = float(evidence.get("start"))
+            end = float(evidence.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not excerpt or _word_count(excerpt) > 32 or end <= start or end - start > 18:
+            continue
+        candidates.append(
+            {
+                "start": round(start, 4),
+                "end": round(end, 4),
+                "score": round(float(evidence.get("confidence", 0.7) or 0.7), 4),
+                "reason": "Verified concise source dialogue for a high-value story beat.",
+            }
+        )
+    return candidates[:1]
 
 
 def _dialogue_for_beats(
@@ -131,10 +217,285 @@ def _dialogue_for_beats(
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for beat_id in beat_ids:
-        for item in beats.get(beat_id, {}).get("original_dialogue_candidates", []) or []:
+        for item in _dialogue_sources_for_beat(beats.get(beat_id, {})):
             if isinstance(item, dict):
                 candidates.append(dict(item))
-    return candidates
+    return candidates[:2]
+
+
+def _purpose(beat: dict[str, Any]) -> str:
+    return str(beat.get("story_purpose", "") or "").casefold()
+
+
+def _meaningful_text(value: Any) -> bool:
+    normalized = _normalized_prose(str(value or ""))
+    return bool(normalized) and normalized not in {
+        "none",
+        "unknown",
+        "unclear",
+        "not stated",
+        "not available",
+        "n a",
+        "no conflict",
+    }
+
+
+def _ordered_verified_beats(story_map: dict[str, Any]) -> list[dict[str, Any]]:
+    return sorted(
+        _beat_map(story_map, verified_only=True).values(),
+        key=lambda beat: (
+            int(beat.get("chronological_order", 0) or 0),
+            str(beat.get("beat_id", "")),
+        ),
+    )
+
+
+def _has_story_signal(beat: dict[str, Any]) -> bool:
+    return any(
+        _meaningful_text(beat.get(field, ""))
+        for field in (
+            "motivation",
+            "change",
+            "emotional_conflict",
+            "payoff_significance",
+        )
+    )
+
+
+def _hook_score(beat: dict[str, Any]) -> float:
+    purpose = _purpose(beat)
+    score = 3.0 * float(beat.get("importance", 0.5) or 0.5)
+    score += 1.4 if _meaningful_text(beat.get("emotional_conflict")) else 0.0
+    score += 0.8 if _meaningful_text(beat.get("motivation")) else 0.0
+    score += 0.8 if _meaningful_text(beat.get("change")) else 0.0
+    if "inciting" in purpose:
+        score += 1.7
+    elif any(token in purpose for token in ("escalation", "conflict")):
+        score += 1.5
+    elif "attempt" in purpose:
+        score += 0.9
+    elif "setup" in purpose:
+        score -= 0.7
+    elif any(token in purpose for token in ("resolution", "button")):
+        score -= 1.3
+    # A reveal can frame a hook, but avoid spending the ending when a strong
+    # conflict beat can open the story instead.
+    elif any(token in purpose for token in ("reversal", "reveal", "payoff", "climax")):
+        score += 0.2
+    return score
+
+
+def _choice_payload(beat_ids: list[str], intent: str) -> dict[str, Any]:
+    return {"beat_ids": beat_ids, "intent": intent}
+
+
+def _segment_budget(function: str, beat_count: int) -> int:
+    base = {
+        "hook": 39,
+        "setup": 38,
+        "escalation": 64,
+        "reversal_payoff": 84,
+        "resolution": 25,
+    }.get(function, 42)
+    return base + max(0, beat_count - 1) * 6
+
+
+def build_narration_plan(
+    story_map: dict[str, Any],
+    config: RecapWritingConfig,
+) -> dict[str, Any]:
+    """Select and budget a grounded story spine without asking the model."""
+    beats = _ordered_verified_beats(story_map)
+    if not beats:
+        raise RecapWritingError("No verified beats are available for recap writing")
+
+    non_terminal = [
+        beat
+        for beat in beats
+        if not any(
+            token in _purpose(beat)
+            for token in ("reversal", "reveal", "payoff", "climax", "resolution", "button")
+        )
+    ]
+    signaled = [beat for beat in non_terminal if _has_story_signal(beat)]
+    hook_pool = signaled or non_terminal or beats
+    hook = max(hook_pool, key=_hook_score)
+    hook_id = str(hook["beat_id"])
+    hook_order = int(hook.get("chronological_order", 0) or 0)
+
+    setup_candidates = [
+        beat
+        for beat in beats
+        if int(beat.get("chronological_order", 0) or 0) < hook_order
+        and any(
+            token in _purpose(beat)
+            for token in ("setup", "inciting", "conflict", "escalation", "attempt")
+        )
+    ]
+    meaningful_setup = [beat for beat in setup_candidates if _has_story_signal(beat)]
+    setup = max(
+        meaningful_setup or setup_candidates,
+        key=lambda beat: (
+            int(beat.get("chronological_order", 0) or 0),
+            float(beat.get("importance", 0.5) or 0.5),
+        ),
+        default=None,
+    )
+
+    terminal = [
+        beat
+        for beat in beats
+        if any(token in _purpose(beat) for token in ("reversal", "reveal", "payoff", "climax"))
+    ]
+    resolution = [
+        beat
+        for beat in beats
+        if any(token in _purpose(beat) for token in ("resolution", "button"))
+    ]
+    selected = []
+    for beat in beats:
+        order = int(beat.get("chronological_order", 0) or 0)
+        keep = (
+            beat is hook
+            or beat is setup
+            or beat in terminal
+            or beat in resolution
+            or float(beat.get("importance", 0.5) or 0.5) >= 0.52
+            or _has_story_signal(beat)
+        )
+        # Once a later conflict earns the hook, earlier connective beats are
+        # compressed into the single chosen setup instead of being narrated as
+        # equal-weight chronology.
+        if order < hook_order and beat is not setup and not _meaningful_text(
+            beat.get("emotional_conflict")
+        ):
+            keep = False
+        if keep:
+            selected.append(beat)
+    selected_ids = [str(beat["beat_id"]) for beat in selected]
+
+    planned_segments: list[dict[str, Any]] = []
+
+    def add_segment(function: str, beat_ids: list[str]) -> None:
+        ids = list(dict.fromkeys(value for value in beat_ids if value))
+        if not ids:
+            return
+        target = _segment_budget(function, len(ids))
+        planned_segments.append(
+            {
+                "plan_id": f"P{len(planned_segments) + 1:02d}",
+                "function": function,
+                "beat_ids": ids,
+                "target_words": target,
+                "word_range": [max(12, target - 8), target + 8],
+            }
+        )
+
+    setup_id = str(setup["beat_id"]) if setup is not None else ""
+    add_segment("hook", [hook_id, setup_id])
+    used = {hook_id, setup_id} - {""}
+
+    terminal_ids = {str(beat["beat_id"]) for beat in terminal}
+    resolution_ids = {str(beat["beat_id"]) for beat in resolution}
+    middle = [
+        beat_id
+        for beat_id in selected_ids
+        if beat_id not in used | terminal_ids | resolution_ids
+    ]
+    for index in range(0, len(middle), 2):
+        add_segment("escalation", middle[index : index + 2])
+    add_segment(
+        "reversal_payoff",
+        [str(beat["beat_id"]) for beat in terminal],
+    )
+    add_segment(
+        "resolution",
+        [str(beat["beat_id"]) for beat in resolution],
+    )
+
+    # Tiny fixtures and genuinely tiny stories still need a useful plan.
+    if not planned_segments:
+        add_segment("hook", [hook_id])
+
+    sections: list[dict[str, Any]] = []
+    if len(planned_segments) <= 2:
+        section_groups = [("full_story", planned_segments)]
+    else:
+        opening = [
+            item for item in planned_segments if item["function"] in {"hook", "setup"}
+        ]
+        ending = [
+            item
+            for item in planned_segments
+            if item["function"] in {"reversal_payoff", "resolution"}
+        ]
+        middle_segments = [
+            item for item in planned_segments if item not in opening and item not in ending
+        ]
+        section_groups = [
+            ("hook_setup", opening),
+            ("conflict_escalation", middle_segments),
+            ("reversal_payoff_resolution", ending),
+        ]
+    for section_id, items in section_groups:
+        if not items:
+            continue
+        sections.append(
+            {
+                "section_id": section_id,
+                "planned_segments": items,
+                "beat_ids": list(
+                    dict.fromkeys(
+                        beat_id
+                        for item in items
+                        for beat_id in item["beat_ids"]
+                    )
+                ),
+                "target_words": sum(item["target_words"] for item in items),
+            }
+        )
+
+    reversal_ids = [
+        str(beat["beat_id"])
+        for beat in terminal
+        if any(token in _purpose(beat) for token in ("reversal", "reveal"))
+    ]
+    payoff_ids = [
+        str(beat["beat_id"])
+        for beat in terminal
+        if any(token in _purpose(beat) for token in ("payoff", "climax"))
+    ]
+    escalation_groups = [
+        _choice_payload(item["beat_ids"], "Material conflict growth or response.")
+        for item in planned_segments
+        if item["function"] == "escalation"
+    ]
+    omitted = [str(beat["beat_id"]) for beat in beats if str(beat["beat_id"]) not in selected_ids]
+    return {
+        "hook": _choice_payload(
+            [hook_id],
+            "Open on the strongest grounded conflict or emotionally consequential choice.",
+        ),
+        "minimum_setup": _choice_payload(
+            [str(setup["beat_id"])] if setup is not None else [],
+            "Only the context required to understand the conflict.",
+        ),
+        "essential_causal_chain": [
+            _choice_payload(item["beat_ids"], f"Selected {item['function']} story movement.")
+            for item in planned_segments
+        ],
+        "escalation_beats": escalation_groups,
+        "reversal": _choice_payload(reversal_ids, "The verified turn or reveal."),
+        "payoff_climax": _choice_payload(payoff_ids, "The earned verified outcome."),
+        "resolution_button": _choice_payload(
+            [str(beat["beat_id"]) for beat in resolution],
+            "The shortest useful consequence after the payoff.",
+        ),
+        "omitted_beat_ids": omitted,
+        "planned_segments": planned_segments,
+        "sections": sections,
+        "planned_word_count": sum(item["target_words"] for item in planned_segments),
+    }
 
 
 def _normalize_ranges(value: Any, field: str) -> list[dict[str, Any]]:
@@ -214,30 +575,24 @@ def normalize_script(
         if hint not in PRESENTATION_HINTS:
             raise RecapWritingError(f"Invalid presentation hint: {hint}")
 
-        visuals = raw_segment.get("candidate_visuals")
-        if not isinstance(visuals, list) or not visuals:
-            visuals = _ranges_for_beats(beat_ids, verified_beats)
-        else:
-            visuals = _normalize_ranges(visuals, f"segment {index}.candidate_visuals")
-        dialogue = raw_segment.get("original_dialogue_candidates")
-        if not isinstance(dialogue, list) or not dialogue:
-            dialogue = _dialogue_for_beats(beat_ids, verified_beats)
+        # Grounding metadata is deterministic. The language model authors the
+        # narration, but cannot invent timing ranges or flatten beat priority.
+        visuals = _ranges_for_beats(beat_ids, verified_beats)
         dialogue = _normalize_ranges(
-            dialogue if isinstance(dialogue, list) else [],
+            _dialogue_for_beats(beat_ids, verified_beats),
             f"segment {index}.original_dialogue_candidates",
         )
 
-        importance = raw_segment.get("importance")
-        try:
-            importance = float(importance)
-        except (TypeError, ValueError):
-            importance = max(
-                [
-                    float(verified_beats[beat_id].get("importance", 0.5) or 0.5)
-                    for beat_id in beat_ids
-                ]
-                or [0.5]
-            )
+        importance = max(
+            [
+                float(verified_beats[beat_id].get("importance", 0.5) or 0.5)
+                for beat_id in beat_ids
+            ]
+            or [0.5]
+        )
+        purposes = " ".join(_purpose(verified_beats[beat_id]) for beat_id in beat_ids)
+        if any(token in purposes for token in ("payoff", "climax", "reversal", "reveal")):
+            importance += 0.025
         segment_id = str(raw_segment.get("segment_id") or f"VO_{index:03d}").strip()
         if not segment_id or segment_id in seen_segment_ids:
             raise RecapWritingError("Recap segment IDs must be present and unique")
@@ -268,6 +623,57 @@ def normalize_script(
     }
     validate_recap_script(script, story_map)
     return script
+
+
+def _normalized_prose(value: str) -> str:
+    return " ".join(
+        "".join(character if character.isalnum() else " " for character in value.casefold()).split()
+    )
+
+
+def _looks_copied_from_summary(text: str, beat: dict[str, Any]) -> bool:
+    summary = _normalized_prose(str(beat.get("summary", "") or ""))
+    narration = _normalized_prose(text)
+    if _word_count(summary) < 6 or not narration:
+        return False
+    if summary == narration:
+        return True
+    if summary in narration and _word_count(narration) <= _word_count(summary) + 5:
+        return True
+    return SequenceMatcher(None, summary, narration).ratio() >= 0.92
+
+
+def _validate_narration_originality(
+    script: dict[str, Any],
+    story_map: dict[str, Any],
+    *,
+    check_intro: bool,
+) -> None:
+    segments = script.get("segments", [])
+    if check_intro and segments:
+        opening = _normalized_prose(str(segments[0].get("text", "") or ""))
+        generic_openings = (
+            "in this episode",
+            "welcome back",
+            "today we",
+            "here is a recap",
+            "heres a recap",
+        )
+        if any(opening.startswith(value) for value in generic_openings):
+            raise RecapWritingError("The narration opens with a generic introduction")
+    beats = _beat_map(story_map, verified_only=True)
+    for segment in segments:
+        text = str(segment.get("text", "") or "")
+        copied = [
+            beat_id
+            for beat_id in segment.get("beat_ids", [])
+            if beat_id in beats and _looks_copied_from_summary(text, beats[beat_id])
+        ]
+        if copied:
+            raise RecapWritingError(
+                "Narration must synthesize verified evidence instead of copying "
+                f"story-map summaries verbatim: {copied}"
+            )
 
 
 def _choice(
@@ -401,6 +807,8 @@ def validate_script_quality_invariants(
     if not segments:
         raise RecapWritingError("Recap writer returned no segments")
 
+    _validate_narration_originality(script, story_map, check_intro=True)
+
     verified_beats = _beat_map(story_map, verified_only=True)
     represented: set[str] = set()
     for segment in segments:
@@ -433,9 +841,7 @@ def validate_script_quality_invariants(
         dialogue_sources = [
             item
             for beat_id in beat_ids
-            for item in verified_beats.get(beat_id, {}).get(
-                "original_dialogue_candidates", []
-            )
+            for item in _dialogue_sources_for_beat(verified_beats.get(beat_id, {}))
             if isinstance(item, dict)
         ]
         for dialogue in segment.get("original_dialogue_candidates", []):
@@ -475,6 +881,30 @@ def validate_script_quality_invariants(
     payoff_ids = set(outline["payoff_climax"]["beat_ids"])
     if payoff_ids and not payoff_ids.intersection(represented):
         raise RecapWritingError("Recap omits the selected payoff/climax")
+    if payoff_ids and config.minimum_word_count >= 100:
+        payoff_words = sum(
+            int(segment.get("word_count", 0) or 0)
+            for segment in segments
+            if payoff_ids.intersection(segment.get("beat_ids", []))
+        )
+        if payoff_words < 24:
+            raise RecapWritingError(
+                "The selected payoff/climax is underdeveloped; it needs at least "
+                "24 grounded narration words"
+            )
+
+    importance_values = {
+        round(float(segment.get("importance", 0.5) or 0.5), 3)
+        for segment in segments
+    }
+    beat_importance_values = {
+        round(float(beat.get("importance", 0.5) or 0.5), 3)
+        for beat in verified_beats.values()
+    }
+    if len(segments) >= 4 and len(beat_importance_values) > 1 and len(importance_values) == 1:
+        raise RecapWritingError(
+            "Narration importance is uniform despite varied verified beat importance"
+        )
 
 
 def normalize_critique(
@@ -513,9 +943,9 @@ def normalize_critique(
             if " ".join(str(value).split()).strip()
         ]
         if not item["supported"] and not normalized_claims:
-            raise RecapWritingError(
-                f"Unsupported segment {segment_id} must identify unsupported claims"
-            )
+            normalized_claims = [
+                "The critic marked this segment unsupported without itemizing the claim."
+            ]
         seen_grounding.add(segment_id)
         grounding.append(
             {
@@ -554,21 +984,18 @@ def normalize_critique(
                 ],
             }
         )
-    if not raw["passes"] and not issues:
+    passes = raw["passes"]
+    if any(issue["severity"] == "major" for issue in issues) or any(
+        not item["supported"] for item in grounding
+    ):
+        passes = False
+    if not passes and not issues:
         raise RecapWritingError("A failing quality critique must explain its issues")
-    if raw["passes"] and any(issue["severity"] == "major" for issue in issues):
-        raise RecapWritingError(
-            "A passing quality critique cannot contain a major issue"
-        )
-    if raw["passes"] and any(not item["supported"] for item in grounding):
-        raise RecapWritingError(
-            "A passing quality critique cannot contain unsupported segments"
-        )
     instructions = raw.get("revision_instructions", [])
     if not isinstance(instructions, list):
         raise RecapWritingError("revision_instructions must be a list")
     return {
-        "passes": raw["passes"],
+        "passes": passes,
         "segment_grounding": grounding,
         "issues": issues,
         "revision_instructions": [
@@ -664,6 +1091,51 @@ class RecapWriter:
         prior_script: dict[str, Any] | None = None,
         critique: dict[str, Any] | None = None,
     ) -> str:
+        if prior_script is not None and critique is not None:
+            compact_beats = [
+                {
+                    "beat_id": beat.get("beat_id"),
+                    "summary": beat.get("summary"),
+                    "story_purpose": beat.get("story_purpose"),
+                    "characters": beat.get("characters", []),
+                    "motivation": beat.get("motivation"),
+                    "change": beat.get("change"),
+                    "emotional_conflict": beat.get("emotional_conflict"),
+                    "payoff_significance": beat.get("payoff_significance"),
+                    "causal_reasoning": beat.get("causal_reasoning", []),
+                    "evidence_excerpts": [
+                        str(item.get("transcript_excerpt", "") or "")
+                        for item in beat.get("actual_video_evidence_ranges", []) or []
+                        if isinstance(item, dict)
+                        and str(item.get("transcript_excerpt", "") or "").strip()
+                    ],
+                }
+                for beat in _ordered_verified_beats(story_map)
+            ]
+            compact_script = {
+                "actual_word_count": prior_script.get("actual_word_count"),
+                "segments": [
+                    {
+                        "segment_id": segment.get("segment_id"),
+                        "text": segment.get("text"),
+                        "beat_ids": segment.get("beat_ids"),
+                    }
+                    for segment in prior_script.get("segments", [])
+                ],
+            }
+            return (
+                self._read_prompt(self.prompt_path)
+                + "\n\nREVISION TASK: Return the complete revised narration. "
+                "Resolve every major issue while preserving grounded facts, beat "
+                "references, the payoff, and the 280-330 word target.\n\n"
+                + "QUALITY CRITIQUE:\n"
+                + json.dumps(critique, indent=2, ensure_ascii=False)
+                + "\n\nCURRENT SCRIPT:\n"
+                + json.dumps(compact_script, indent=2, ensure_ascii=False)
+                + "\n\nCOMPACT VERIFIED STORY EVIDENCE:\n"
+                + json.dumps(compact_beats, indent=2, ensure_ascii=False)
+                + "\n\nReturn JSON only."
+            )
         verified_beat_ids = list(_beat_map(story_map, verified_only=True))
         prompt = (
             self._read_prompt(self.prompt_path)
@@ -674,14 +1146,579 @@ class RecapWriter:
             + "\n\nVERIFIED STORY MAP:\n"
             + json.dumps(_story_payload(story_map), indent=2, ensure_ascii=False)
         )
-        if prior_script is not None and critique is not None:
-            prompt += (
-                "\n\nSCRIPT TO REVISE:\n"
-                + json.dumps(prior_script, indent=2, ensure_ascii=False)
-                + "\n\nQUALITY CRITIQUE:\n"
-                + json.dumps(critique, indent=2, ensure_ascii=False)
-            )
         return prompt + "\n\nReturn JSON only."
+
+    def _section_prompt(
+        self,
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+        section: dict[str, Any],
+    ) -> str:
+        beats = _beat_map(story_map, verified_only=True)
+        section_story = {
+            **_story_payload(story_map),
+            "verified_beats": [
+                beats[beat_id]
+                for beat_id in section["beat_ids"]
+                if beat_id in beats
+            ],
+        }
+        return (
+            self._read_prompt(self.prompt_path)
+            + "\n\nDETERMINISTIC NARRATION PLAN:\n"
+            + json.dumps(
+                {
+                    "hook": outline["hook"],
+                    "minimum_setup": outline["minimum_setup"],
+                    "reversal": outline["reversal"],
+                    "payoff_climax": outline["payoff_climax"],
+                    "resolution_button": outline["resolution_button"],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n\nSECTION TO WRITE:\n"
+            + json.dumps(section, indent=2, ensure_ascii=False)
+            + "\n\nVERIFIED EVIDENCE FOR THIS SECTION:\n"
+            + json.dumps(section_story, indent=2, ensure_ascii=False)
+            + "\n\nWrite every planned segment. Stay near each segment's word_range. "
+            "Return exactly one narration segment for each planned_segments item, "
+            "in that order, with beat_ids exactly matching that item. Do not split "
+            "a planned multi-beat thought into one segment per event. "
+            "Synthesize across summary, purpose, motivation, change, emotional "
+            "conflict, payoff significance, and evidence. Do not copy summary "
+            "sentences. Use only this section's beat IDs. Return JSON only."
+        )
+
+    def _expansion_prompt(
+        self,
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+        script: dict[str, Any],
+        minimum_words: int,
+        budget_deficits: list[dict[str, Any]],
+        *,
+        patch_only: bool,
+    ) -> str:
+        beats = _beat_map(story_map, verified_only=True)
+        target_ids = {
+            str(beat_id)
+            for item in budget_deficits
+            for beat_id in item.get("beat_ids", [])
+        }
+        focus_ids = set(target_ids)
+        if not patch_only and any(
+            item.get("function") == "complete_script" for item in budget_deficits
+        ):
+            focus_ids.update(beats)
+        if not patch_only:
+            for beat_id in list(focus_ids):
+                beat = beats.get(beat_id, {})
+                focus_ids.update(
+                    str(value) for value in beat.get("causal_parents", []) or []
+                )
+                focus_ids.update(
+                    str(value) for value in beat.get("causal_children", []) or []
+                )
+            for field in ("reversal", "payoff_climax", "resolution_button"):
+                focus_ids.update(outline.get(field, {}).get("beat_ids", []))
+
+        fields = (
+            "beat_id",
+            "summary",
+            "story_purpose",
+            "characters",
+            "importance",
+            "motivation",
+            "change",
+            "emotional_conflict",
+            "payoff_significance",
+            "causal_parents",
+            "causal_children",
+            "causal_reasoning",
+        )
+        focus_beats = [
+            {field: beat.get(field) for field in fields if field in beat}
+            for beat_id, beat in beats.items()
+            if beat_id in focus_ids
+        ]
+        compact_script = {
+            "actual_word_count": script.get("actual_word_count"),
+            "segments": [
+                {
+                    "segment_id": segment.get("segment_id"),
+                    **(
+                        {}
+                        if patch_only
+                        else {"text": segment.get("text")}
+                    ),
+                    "beat_ids": segment.get("beat_ids"),
+                    "presentation_hint": segment.get("presentation_hint"),
+                }
+                for segment in script.get("segments", [])
+                if not patch_only
+                or target_ids.intersection(segment.get("beat_ids", []))
+            ],
+        }
+        deficit = max(0, minimum_words - int(script.get("actual_word_count", 0) or 0))
+        additional_words = max(
+            [
+                int(item.get("minimum_words", 0) or 0)
+                - int(item.get("actual_words", 0) or 0)
+                for item in budget_deficits
+            ]
+            or [deficit]
+        )
+        task_instructions = (
+            [
+                "Return only new additive segments for the deficit beat IDs.",
+                "Do not rewrite or repeat the existing script.",
+                "Add one compact grounded thought that develops unexpressed meaning.",
+            ]
+            if patch_only
+            else ["Return the complete revised script, not a patch."]
+        )
+        return (
+            self._read_prompt(self.prompt_path)
+            + "\n\nTARGETED BUDGET EXPANSION TASK:\n"
+            + json.dumps(
+                {
+                    "current_words": script.get("actual_word_count"),
+                    "minimum_words": minimum_words,
+                    "deficit_words": deficit,
+                    "minimum_additional_words": max(10, additional_words),
+                    "mode": "additive_segments" if patch_only else "complete_script",
+                    "only_valid_beat_ids": sorted(target_ids) if patch_only else sorted(beats),
+                    "story_function_deficits": budget_deficits,
+                    "preferred_total_words": min(
+                        self.config.maximum_word_count,
+                        max(minimum_words, self.config.target_word_count),
+                    ),
+                    "instructions": [
+                        *task_instructions,
+                        "Expand only with unexpressed verified causal, emotional, or payoff information.",
+                        "Protect the reversal and payoff budget.",
+                        "Do not repeat a fact merely to add words.",
+                    ],
+                },
+                indent=2,
+            )
+            + "\n\nDETERMINISTIC NARRATION PLAN:\n"
+            + json.dumps(
+                (
+                    {"deficit_beat_ids": sorted(target_ids)}
+                    if patch_only
+                    else {
+                        "hook": outline["hook"],
+                        "reversal": outline["reversal"],
+                        "payoff_climax": outline["payoff_climax"],
+                        "resolution_button": outline["resolution_button"],
+                    }
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n\nCURRENT SCRIPT:\n"
+            + json.dumps(compact_script, indent=2, ensure_ascii=False)
+            + "\n\nVERIFIED MATERIAL RELEVANT TO THE DEFICIT:\n"
+            + json.dumps(focus_beats, indent=2, ensure_ascii=False)
+            + "\n\nThe top-level response must be an object with a non-empty "
+            "segments array. Return JSON only."
+        )
+
+    def _validate_expansion_patch(
+        self,
+        raw: dict[str, Any],
+        story_map: dict[str, Any],
+        budget_deficits: list[dict[str, Any]],
+        existing_script: dict[str, Any],
+    ) -> dict[str, Any]:
+        allowed = {
+            str(beat_id)
+            for item in budget_deficits
+            for beat_id in item.get("beat_ids", [])
+        }
+        normalized_raw = dict(raw) if isinstance(raw, dict) else raw
+        if isinstance(normalized_raw, dict) and isinstance(
+            normalized_raw.get("segments"), list
+        ):
+            normalized_raw["segments"] = [
+                {**segment, "segment_id": f"PATCH_{index:03d}"}
+                if isinstance(segment, dict)
+                else segment
+                for index, segment in enumerate(normalized_raw["segments"], start=1)
+            ]
+        script = normalize_script(normalized_raw, story_map, self.config)
+        scoped_segments = [
+            segment
+            for segment in script["segments"]
+            if set(segment["beat_ids"]).issubset(allowed)
+        ]
+        existing_texts = [
+            _normalized_prose(str(segment.get("text", "") or ""))
+            for segment in existing_script.get("segments", [])
+        ]
+        scoped_segments = [
+            segment
+            for segment in scoped_segments
+            if not any(
+                SequenceMatcher(
+                    None,
+                    _normalized_prose(segment["text"]),
+                    existing,
+                ).ratio()
+                >= 0.9
+                for existing in existing_texts
+                if existing
+            )
+        ]
+        verified_beats = _beat_map(story_map, verified_only=True)
+        scoped_segments = [
+            segment
+            for segment in scoped_segments
+            if not any(
+                _looks_copied_from_summary(
+                    segment["text"],
+                    verified_beats.get(beat_id, {}),
+                )
+                for beat_id in segment["beat_ids"]
+            )
+        ]
+        if not scoped_segments:
+            raise RecapWritingError(
+                "Expansion patch returned no new non-duplicative segment scoped "
+                "to the deficit beats"
+            )
+        script = normalize_script(
+            raw_segments_payload(
+                [
+                    {
+                        "segment_id": f"ADD_{index:03d}",
+                        "text": segment["text"],
+                        "beat_ids": segment["beat_ids"],
+                        "presentation_hint": segment["presentation_hint"],
+                    }
+                    for index, segment in enumerate(scoped_segments, start=1)
+                ]
+            ),
+            story_map,
+            self.config,
+        )
+        represented = {
+            str(beat_id)
+            for segment in script["segments"]
+            for beat_id in segment["beat_ids"]
+        }
+        uncovered = [
+            str(item.get("function", "deficit"))
+            for item in budget_deficits
+            if item.get("function") in {"reversal_payoff", "payoff_climax"}
+            and not represented.intersection(item.get("beat_ids", []))
+        ]
+        if uncovered:
+            raise RecapWritingError(
+                "Expansion patch omits required deficit functions: "
+                + ", ".join(uncovered)
+            )
+        required_addition = max(
+            10,
+            max(
+                max(
+                    0,
+                    int(item.get("minimum_words", 0) or 0)
+                    - int(item.get("actual_words", 0) or 0)
+                    - (10 if item.get("function") == "narration_target" else 0),
+                )
+                for item in budget_deficits
+            ),
+        )
+        if script["actual_word_count"] < required_addition:
+            raise RecapWritingError(
+                f"Expansion patch has {script['actual_word_count']} words; "
+                f"at least {required_addition} new grounded words are required"
+            )
+        current_totals = [
+            int(item.get("actual_words", 0) or 0)
+            for item in budget_deficits
+            if item.get("function") in {"complete_script", "narration_target"}
+        ]
+        if current_totals:
+            maximum_addition = max(1, self.config.maximum_word_count - max(current_totals))
+            if script["actual_word_count"] > maximum_addition:
+                raise RecapWritingError(
+                    f"Expansion patch has {script['actual_word_count']} words; "
+                    f"at most {maximum_addition} can be added without exceeding "
+                    "the script budget"
+                )
+        _validate_narration_originality(script, story_map, check_intro=False)
+        return script
+
+    def _append_expansion(
+        self,
+        script: dict[str, Any],
+        patch: dict[str, Any],
+        story_map: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_segments: list[dict[str, Any]] = []
+        pending = list(patch["segments"])
+        for segment in script["segments"]:
+            raw_segments.append(
+                {
+                    "text": segment["text"],
+                    "beat_ids": segment["beat_ids"],
+                    "presentation_hint": segment["presentation_hint"],
+                }
+            )
+            matching = [
+                addition
+                for addition in pending
+                if set(addition["beat_ids"]).intersection(segment["beat_ids"])
+            ]
+            for addition in matching:
+                raw_segments.append(
+                    {
+                        "text": addition["text"],
+                        "beat_ids": addition["beat_ids"],
+                        "presentation_hint": addition["presentation_hint"],
+                    }
+                )
+                pending.remove(addition)
+        raw_segments.extend(
+            {
+                "text": addition["text"],
+                "beat_ids": addition["beat_ids"],
+                "presentation_hint": addition["presentation_hint"],
+            }
+            for addition in pending
+        )
+        for index, segment in enumerate(raw_segments, start=1):
+            segment["segment_id"] = f"VO_{index:03d}"
+        return normalize_script(raw_segments_payload(raw_segments), story_map, self.config)
+
+    def _validate_section(
+        self,
+        raw: dict[str, Any],
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+        section: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_raw = dict(raw) if isinstance(raw, dict) else raw
+        if isinstance(normalized_raw, dict) and isinstance(
+            normalized_raw.get("segments"), list
+        ):
+            normalized_raw["segments"] = [
+                {
+                    **segment,
+                    "segment_id": f"SECTION_{index:03d}",
+                }
+                if isinstance(segment, dict)
+                else segment
+                for index, segment in enumerate(
+                    normalized_raw["segments"],
+                    start=1,
+                )
+            ]
+        script = normalize_script(normalized_raw, story_map, self.config)
+        if self.config.minimum_word_count >= 100:
+            coalesced: list[dict[str, Any]] = []
+            source_segments = list(script["segments"])
+            for planned in section.get("planned_segments", []):
+                planned_ids = set(planned.get("beat_ids", []))
+                fragments = [
+                    segment
+                    for segment in source_segments
+                    if set(segment["beat_ids"]).issubset(planned_ids)
+                    and planned_ids.intersection(segment["beat_ids"])
+                ]
+                if fragments:
+                    coalesced.append(
+                        {
+                            "segment_id": f"VO_{len(coalesced) + 1:03d}",
+                            "text": " ".join(fragment["text"] for fragment in fragments),
+                            "beat_ids": list(planned.get("beat_ids", [])),
+                            "presentation_hint": "narration_over_source",
+                        }
+                    )
+            if coalesced:
+                script = normalize_script(
+                    raw_segments_payload(coalesced),
+                    story_map,
+                    self.config,
+                )
+        allowed = set(section["beat_ids"])
+        represented: set[str] = set()
+        for segment in script["segments"]:
+            ids = set(segment["beat_ids"])
+            invalid = sorted(ids - allowed)
+            if invalid:
+                raise RecapWritingError(
+                    f"Section {section['section_id']} references out-of-section beats: {invalid}"
+                )
+            represented.update(ids)
+        missing = sorted(allowed - represented)
+        if missing:
+            raise RecapWritingError(
+                f"Section {section['section_id']} omits planned beats: {missing}"
+            )
+        if self.config.minimum_word_count >= 100:
+            budget_errors: list[str] = []
+            for planned in section.get("planned_segments", []):
+                planned_ids = set(planned.get("beat_ids", []))
+                matching = [
+                    segment
+                    for segment in script["segments"]
+                    if set(segment["beat_ids"]) == planned_ids
+                ]
+                if len(matching) != 1:
+                    budget_errors.append(
+                        f"Planned thought {planned.get('plan_id')} must be exactly "
+                        "one narration segment with beat_ids "
+                        f"{sorted(planned_ids)}; found {len(matching)}"
+                    )
+                    continue
+                planned_minimum = int(planned.get("word_range", [1])[0] or 1)
+                minimum = max(10, planned_minimum // 4)
+                if matching[0]["word_count"] < minimum:
+                    budget_errors.append(
+                        f"Planned thought {planned.get('plan_id')} has "
+                        f"{matching[0]['word_count']} words; its grounded allocation "
+                        f"requires at least {minimum}"
+                    )
+            if budget_errors:
+                raise RecapWritingError("; ".join(budget_errors))
+        starts_story = bool(allowed.intersection(outline["hook"]["beat_ids"]))
+        _validate_narration_originality(
+            script,
+            story_map,
+            check_intro=starts_story,
+        )
+        if starts_story:
+            first_ids = set(script["segments"][0]["beat_ids"])
+            if not first_ids.intersection(outline["hook"]["beat_ids"]):
+                raise RecapWritingError(
+                    "The opening section must begin on the selected hook beat"
+                )
+        return script
+
+    def _assemble_sections(
+        self,
+        scripts: list[dict[str, Any]],
+        story_map: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_segments: list[dict[str, Any]] = []
+        for script in scripts:
+            for segment in script.get("segments", []):
+                raw_segments.append(
+                    {
+                        "segment_id": f"VO_{len(raw_segments) + 1:03d}",
+                        "text": segment["text"],
+                        "beat_ids": segment["beat_ids"],
+                        "presentation_hint": segment.get(
+                            "presentation_hint", "narration_over_source"
+                        ),
+                    }
+                )
+        return normalize_script(raw_segments_payload(raw_segments), story_map, self.config)
+
+    def _minimum_words(self, story_map: dict[str, Any]) -> int:
+        return min(
+            self.config.minimum_word_count,
+            max(1, len(_beat_map(story_map, verified_only=True)) * 16),
+        )
+
+    def _budget_deficits(
+        self,
+        script: dict[str, Any],
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        deficits: list[dict[str, Any]] = []
+        actual_words = int(script.get("actual_word_count", 0) or 0)
+        minimum_words = self._minimum_words(story_map)
+        if actual_words < minimum_words:
+            selected_ids = list(
+                dict.fromkeys(
+                    beat_id
+                    for item in outline.get("planned_segments", [])
+                    for beat_id in item.get("beat_ids", [])
+                )
+            )
+            deficits.append(
+                {
+                    "function": "complete_script",
+                    "beat_ids": selected_ids,
+                    "actual_words": actual_words,
+                    "minimum_words": minimum_words,
+                }
+            )
+        if self.config.minimum_word_count < 100:
+            return deficits
+
+        for item in outline.get("planned_segments", []):
+            function = str(item.get("function", "") or "")
+            if function not in {"escalation", "reversal_payoff"}:
+                continue
+            beat_ids = set(item.get("beat_ids", []))
+            section_words = sum(
+                int(segment.get("word_count", 0) or 0)
+                for segment in script.get("segments", [])
+                if beat_ids.intersection(segment.get("beat_ids", []))
+            )
+            planned_floor = int(item.get("word_range", [0])[0] or 0)
+            # The per-thought ranges direct generation. Expansion is reserved
+            # for material misses, not a few harmless words of variance.
+            material_floor = 24 if function == "reversal_payoff" else max(20, planned_floor // 2)
+            if section_words < material_floor:
+                deficits.append(
+                    {
+                        "function": function,
+                        "beat_ids": sorted(beat_ids),
+                        "actual_words": section_words,
+                        "minimum_words": material_floor,
+                        "planned_range": item.get("word_range", []),
+                    }
+                )
+        payoff_ids = set(outline.get("payoff_climax", {}).get("beat_ids", []))
+        if payoff_ids:
+            payoff_words = sum(
+                int(segment.get("word_count", 0) or 0)
+                for segment in script.get("segments", [])
+                if payoff_ids.intersection(segment.get("beat_ids", []))
+            )
+            if payoff_words < 24 and not any(
+                item.get("function") == "payoff_climax" for item in deficits
+            ):
+                deficits.append(
+                    {
+                        "function": "payoff_climax",
+                        "beat_ids": sorted(payoff_ids),
+                        "actual_words": payoff_words,
+                        "minimum_words": 24,
+                    }
+                )
+        preferred_floor = min(
+            self.config.maximum_word_count,
+            max(minimum_words, self.config.target_word_count - 30),
+        )
+        if len(_beat_map(story_map, verified_only=True)) >= 6 and actual_words < preferred_floor:
+            focus_ids = list(
+                dict.fromkeys(
+                    beat_id
+                    for item in outline.get("planned_segments", [])
+                    for beat_id in item.get("beat_ids", [])
+                )
+            )
+            if not focus_ids:
+                focus_ids = list(outline.get("hook", {}).get("beat_ids", []))
+            deficits.append(
+                {
+                    "function": "narration_target",
+                    "beat_ids": focus_ids,
+                    "actual_words": actual_words,
+                    "minimum_words": preferred_floor,
+                }
+            )
+        return deficits
 
     def _critique_prompt(
         self,
@@ -692,18 +1729,207 @@ class RecapWriter:
         critique_script = {
             "actual_word_count": script.get("actual_word_count"),
             "voice_style": script.get("voice_style"),
-            "segments": script.get("segments", []),
+            "segments": [
+                {
+                    "segment_id": segment.get("segment_id"),
+                    "text": segment.get("text"),
+                    "beat_ids": segment.get("beat_ids"),
+                }
+                for segment in script.get("segments", [])
+            ],
+        }
+        compact_beats = []
+        for beat in _ordered_verified_beats(story_map):
+            compact_beats.append(
+                {
+                    "beat_id": beat.get("beat_id"),
+                    "summary": beat.get("summary"),
+                    "story_purpose": beat.get("story_purpose"),
+                    "motivation": beat.get("motivation"),
+                    "change": beat.get("change"),
+                    "emotional_conflict": beat.get("emotional_conflict"),
+                    "payoff_significance": beat.get("payoff_significance"),
+                    "causal_reasoning": beat.get("causal_reasoning", []),
+                    "evidence_excerpts": [
+                        str(item.get("transcript_excerpt", "") or "")
+                        for item in beat.get("actual_video_evidence_ranges", []) or []
+                        if isinstance(item, dict)
+                        and str(item.get("transcript_excerpt", "") or "").strip()
+                    ],
+                }
+            )
+        compact_outline = {
+            field: outline[field]
+            for field in (
+                "hook",
+                "minimum_setup",
+                "essential_causal_chain",
+                "reversal",
+                "payoff_climax",
+                "resolution_button",
+            )
         }
         return (
             self._read_prompt(self.critic_prompt_path)
             + "\n\nSELECTED NARRATIVE OUTLINE:\n"
-            + json.dumps(outline, indent=2, ensure_ascii=False)
-            + "\n\nVERIFIED STORY MAP:\n"
-            + json.dumps(_story_payload(story_map), indent=2, ensure_ascii=False)
+            + json.dumps(compact_outline, indent=2, ensure_ascii=False)
+            + "\n\nCOMPACT VERIFIED STORY EVIDENCE:\n"
+            + json.dumps(compact_beats, indent=2, ensure_ascii=False)
             + "\n\nRECAP SCRIPT:\n"
             + json.dumps(critique_script, indent=2, ensure_ascii=False)
             + "\n\nReturn JSON only."
         )
+
+    @staticmethod
+    def _revision_target_ids(critique: dict[str, Any]) -> list[str]:
+        ids = [
+            str(segment_id)
+            for issue in critique.get("issues", [])
+            if issue.get("severity") == "major"
+            for segment_id in issue.get("segment_ids", [])
+        ]
+        ids.extend(
+            str(item.get("segment_id"))
+            for item in critique.get("segment_grounding", [])
+            if not item.get("supported", True)
+        )
+        return list(dict.fromkeys(value for value in ids if value))
+
+    def _revision_prompt(
+        self,
+        story_map: dict[str, Any],
+        script: dict[str, Any],
+        critique: dict[str, Any],
+        target_ids: list[str],
+    ) -> str:
+        targets = [
+            {
+                "segment_id": segment["segment_id"],
+                "text": segment["text"],
+                "beat_ids": segment["beat_ids"],
+            }
+            for segment in script["segments"]
+            if segment["segment_id"] in target_ids
+        ]
+        beat_ids = {
+            str(beat_id)
+            for segment in targets
+            for beat_id in segment["beat_ids"]
+        }
+        evidence = [
+            {
+                "beat_id": beat.get("beat_id"),
+                "summary": beat.get("summary"),
+                "story_purpose": beat.get("story_purpose"),
+                "characters": beat.get("characters", []),
+                "motivation": beat.get("motivation"),
+                "change": beat.get("change"),
+                "emotional_conflict": beat.get("emotional_conflict"),
+                "payoff_significance": beat.get("payoff_significance"),
+                "causal_reasoning": beat.get("causal_reasoning", []),
+                "evidence_excerpts": [
+                    str(item.get("transcript_excerpt", "") or "")
+                    for item in beat.get("actual_video_evidence_ranges", []) or []
+                    if isinstance(item, dict)
+                    and str(item.get("transcript_excerpt", "") or "").strip()
+                ],
+            }
+            for beat in _ordered_verified_beats(story_map)
+            if str(beat.get("beat_id")) in beat_ids
+        ]
+        forbidden_summaries = {
+            str(beat.get("beat_id")): str(beat.get("summary", "") or "")
+            for beat in _ordered_verified_beats(story_map)
+            if str(beat.get("beat_id")) in beat_ids
+            and str(beat.get("summary", "") or "").strip()
+        }
+        return (
+            self._read_prompt(self.prompt_path)
+            + "\n\nTARGETED REVISION TASK: Rewrite only the listed segments. "
+            "Return exactly one segment for each listed segment_id, preserve each "
+            "segment_id and its exact beat_ids, and resolve every cited issue. Do "
+            "not return unaffected segments. Keep roughly the same word count per "
+            "segment and do not add unsupported interpretation. None of the "
+            "forbidden summary sentences may appear verbatim; change the syntax "
+            "and synthesize from the other verified fields.\n\n"
+            + "QUALITY CRITIQUE:\n"
+            + json.dumps(critique, indent=2, ensure_ascii=False)
+            + "\n\nSEGMENTS TO REVISE:\n"
+            + json.dumps(targets, indent=2, ensure_ascii=False)
+            + "\n\nFORBIDDEN VERBATIM SUMMARY SENTENCES:\n"
+            + json.dumps(forbidden_summaries, indent=2, ensure_ascii=False)
+            + "\n\nVERIFIED EVIDENCE FOR THOSE SEGMENTS:\n"
+            + json.dumps(evidence, indent=2, ensure_ascii=False)
+            + "\n\nReturn JSON only."
+        )
+
+    def _validate_revision_patch(
+        self,
+        raw: dict[str, Any],
+        story_map: dict[str, Any],
+        script: dict[str, Any],
+        critique: dict[str, Any],
+        target_ids: list[str],
+    ) -> dict[str, Any]:
+        patch = normalize_script(raw, story_map, self.config)
+        expected = {
+            segment["segment_id"]: segment
+            for segment in script["segments"]
+            if segment["segment_id"] in target_ids
+        }
+        actual = {segment["segment_id"]: segment for segment in patch["segments"]}
+        if set(actual) != set(expected):
+            raise RecapWritingError(
+                "Revision patch segment IDs must exactly match targets; "
+                f"expected={sorted(expected)}, actual={sorted(actual)}"
+            )
+        patch = normalize_script(
+            raw_segments_payload(
+                [
+                    {
+                        "segment_id": segment_id,
+                        "text": actual[segment_id]["text"],
+                        "beat_ids": expected[segment_id]["beat_ids"],
+                        "presentation_hint": actual[segment_id][
+                            "presentation_hint"
+                        ],
+                    }
+                    for segment_id in target_ids
+                ]
+            ),
+            story_map,
+            self.config,
+        )
+        _validate_narration_originality(
+            patch,
+            story_map,
+            check_intro="VO_001" in actual,
+        )
+        return patch
+
+    def _merge_revision_patch(
+        self,
+        script: dict[str, Any],
+        patch: dict[str, Any],
+        story_map: dict[str, Any],
+    ) -> dict[str, Any]:
+        replacements = {
+            segment["segment_id"]: segment for segment in patch["segments"]
+        }
+        segments = []
+        for segment in script["segments"]:
+            replacement = replacements.get(segment["segment_id"], segment)
+            segments.append(
+                {
+                    "segment_id": segment["segment_id"],
+                    "text": replacement["text"],
+                    "beat_ids": segment["beat_ids"],
+                    "presentation_hint": replacement.get(
+                        "presentation_hint", segment["presentation_hint"]
+                    ),
+                }
+            )
+        return normalize_script(raw_segments_payload(segments), story_map, self.config)
 
     def _repair_prompt(
         self,
@@ -722,6 +1948,10 @@ class RecapWriter:
             + generation.raw_text
             + "\n\nORIGINAL TASK AND SOURCE OF TRUTH:\n"
             + original_prompt
+            + "\n\nRepair every listed error. If narration copied a summary, rebuild "
+            "that thought from the beat's purpose, motivation, change, conflict, "
+            "payoff significance, and evidence; do not preserve the copied "
+            "sentence structure or merely swap synonyms."
             + "\n\nReturn the repaired JSON object only."
         )
 
@@ -834,16 +2064,81 @@ class RecapWriter:
                 raise RecapWritingError(
                     "No verified story beats are available for the Ollama writer"
                 )
-            outline = self._run_stage(
-                "narrative_outline",
-                self._outline_prompt(story_map),
-                lambda raw: normalize_outline(raw, story_map, self.config),
+            outline = build_narration_plan(story_map, self.config)
+            self.last_diagnostics["narration_plan"] = outline
+            section_scripts: list[dict[str, Any]] = []
+            for section in outline["sections"]:
+                section_scripts.append(
+                    self._run_stage(
+                        f"narration_section_{section['section_id']}",
+                        self._section_prompt(story_map, outline, section),
+                        lambda raw, current=section: self._validate_section(
+                            raw,
+                            story_map,
+                            outline,
+                            current,
+                        ),
+                    )
+                )
+            script = self._assemble_sections(section_scripts, story_map)
+            minimum_words = self._minimum_words(story_map)
+            budget_deficits = self._budget_deficits(
+                script,
+                story_map,
+                outline,
             )
-            script = self._run_stage(
-                "narration_draft",
-                self._draft_prompt(story_map, outline),
-                lambda raw: self._validated_script(raw, story_map, outline),
-            )
+            self.last_diagnostics["initial_word_count"] = script["actual_word_count"]
+            self.last_diagnostics["minimum_word_count"] = minimum_words
+            self.last_diagnostics["initial_budget_deficits"] = budget_deficits
+            if budget_deficits:
+                self.last_diagnostics["targeted_expansion_used"] = True
+                patch_only = (
+                    self.config.minimum_word_count >= 100
+                    and all(item.get("beat_ids") for item in budget_deficits)
+                )
+                if patch_only:
+                    expansion_validator = lambda raw: self._validate_expansion_patch(
+                        raw,
+                        story_map,
+                        budget_deficits,
+                        script,
+                    )
+                else:
+                    expansion_validator = lambda raw: self._validated_script(
+                        raw,
+                        story_map,
+                        outline,
+                    )
+                expansion = self._run_stage(
+                    "targeted_budget_expansion",
+                    self._expansion_prompt(
+                        story_map,
+                        outline,
+                        script,
+                        minimum_words,
+                        budget_deficits,
+                        patch_only=patch_only,
+                    ),
+                    expansion_validator,
+                )
+                if patch_only:
+                    script = self._append_expansion(script, expansion, story_map)
+                    validate_script_quality_invariants(
+                        script,
+                        story_map,
+                        outline,
+                        self.config,
+                    )
+                else:
+                    script = expansion
+            else:
+                self.last_diagnostics["targeted_expansion_used"] = False
+                validate_script_quality_invariants(
+                    script,
+                    story_map,
+                    outline,
+                    self.config,
+                )
             critique = self._run_stage(
                 "quality_critique",
                 self._critique_prompt(story_map, outline, script),
@@ -856,15 +2151,40 @@ class RecapWriter:
             while not critique["passes"] and revision < self.config.max_revision_attempts:
                 revision += 1
                 self.last_diagnostics["revision_attempt_count"] = revision
-                script = self._run_stage(
-                    f"narration_revision_{revision}",
-                    self._draft_prompt(
+                target_ids = self._revision_target_ids(critique)
+                if not target_ids:
+                    target_ids = [
+                        segment["segment_id"] for segment in script["segments"]
+                    ]
+                for part, start in enumerate(range(0, len(target_ids)), start=1):
+                    chunk_ids = target_ids[start : start + 1]
+                    current_script = script
+                    revision_patch = self._run_stage(
+                        f"narration_revision_{revision}_part_{part}",
+                        self._revision_prompt(
+                            story_map,
+                            current_script,
+                            critique,
+                            chunk_ids,
+                        ),
+                        lambda raw, expected=chunk_ids, base=current_script: self._validate_revision_patch(
+                            raw,
+                            story_map,
+                            base,
+                            critique,
+                            expected,
+                        ),
+                    )
+                    script = self._merge_revision_patch(
+                        current_script,
+                        revision_patch,
                         story_map,
-                        outline,
-                        prior_script=script,
-                        critique=critique,
-                    ),
-                    lambda raw: self._validated_script(raw, story_map, outline),
+                    )
+                validate_script_quality_invariants(
+                    script,
+                    story_map,
+                    outline,
+                    self.config,
                 )
                 critique = self._run_stage(
                     f"quality_critique_{revision + 1}",
@@ -889,6 +2209,7 @@ class RecapWriter:
                     "status": "success",
                     "word_count": script["actual_word_count"],
                     "segment_count": len(script["segments"]),
+                    "model_call_count": len(self.last_diagnostics["attempts"]),
                     "final_critique": critique,
                 }
             )

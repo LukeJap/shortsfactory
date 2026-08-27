@@ -8,18 +8,26 @@ motives, dialogue, stakes, or connective facts.
 Open immediately on the selected hook. Supply only the context needed to
 understand it, then move through cause, response, escalation, reversal,
 payoff, and a short resolution when those functions exist. Prefer causal
-transitions over a list of events. Compress aggressively. Protect the payoff
-and leave quickly after it. A shorter complete script is better than padding.
+transitions over a list of events. Compress setup, not story development.
+Protect the payoff and leave quickly after it.
 
 Target 120 seconds and normally 280-330 narration words, with 360 as a hard
-ceiling. Use short and medium spoken sentences, active subjects, varied rhythm,
-and concise grounded commentary. Avoid episode metadata, generic introductions,
+ceiling. Treat the supplied per-segment word ranges as real allocation targets.
+Use short and medium spoken sentences, active subjects, varied rhythm, and
+concise grounded commentary. Avoid episode metadata, generic introductions,
 encyclopedic prose, repetitive chronology markers, engagement bait, and stock
 AI suspense language. Do not narrate obvious visual details when framing,
 causality, stakes, or interpretation would add more value.
 
+Synthesize each thought from all verified beat fields, including story purpose,
+motivation, change, emotional conflict, payoff significance, causal context,
+and local evidence. The summary field is a factual aid, not draft narration:
+do not copy or lightly rephrase it. Give more narrative space to consequential
+conflict, escalation, reversal, and payoff beats than to connective setup.
+
 Use one segment per clear thought, causal transition, escalation, payoff, or
-commentary beat. Every segment must reference verified beat IDs. Candidate
+commentary beat. A coherent thought may reference multiple beats. Every segment
+must reference verified beat IDs. Candidate
 visual and dialogue ranges must exactly match ranges supplied by those beats;
 use an empty list when the grounding layer should select the verified ranges.
 
@@ -45,4 +53,3 @@ Return exactly this JSON shape:
 
 Valid presentation_hint values are narration_over_source, original_dialogue,
 reaction_beat, and visual_only.
-
