@@ -399,6 +399,24 @@ def rich_draft(source):
     }
 
 
+def single_story_beat_response():
+    return {
+        "beat_id": "B001",
+        "summary": "This is a story beat object, not recap narration.",
+    }
+
+
+def beats_response():
+    return {
+        "beats": [
+            {
+                "beat_id": "B001",
+                "summary": "This is a story beat collection, not narration.",
+            }
+        ]
+    }
+
+
 def test_rich_writer_uses_one_generation_without_critic_or_revision():
     source = rich_story_map()
     model = SequenceModel([rich_draft(source)])
@@ -415,11 +433,13 @@ def test_rich_writer_uses_one_generation_without_critic_or_revision():
     assert writer.last_diagnostics["critic_bypassed"] is True
     assert writer.last_diagnostics["targeted_repair_used"] is False
     assert writer.last_diagnostics["revision_attempt_count"] == 0
+    assert '"segments"' in model.prompts[0]
+    assert "Do not return story beats" in model.prompts[0]
 
 
 def test_rich_writer_allows_only_one_targeted_repair_call():
     source = rich_story_map()
-    model = SequenceModel([{"segments": []}, rich_draft(source)])
+    model = SequenceModel([single_story_beat_response(), rich_draft(source)])
     writer = RecapWriter(
         model,
         config=small_config(max_repair_attempts=5, max_revision_attempts=5),
@@ -439,11 +459,46 @@ def test_rich_writer_allows_only_one_targeted_repair_call():
     )
     assert writer.last_diagnostics["repair_attempt_count"] == 1
     assert writer.last_diagnostics["targeted_repair_used"] is True
+    assert "RICH NARRATION SCHEMA CORRECTION" in model.prompts[1]
+    assert '{"beats": [...]}' in model.prompts[1]
     assert not any(
         item["stage"].startswith("quality_critique")
         or item["stage"].startswith("narration_revision_")
         for item in writer.last_diagnostics["attempts"]
     )
+
+
+def test_rich_writer_repairs_a_beats_envelope_to_segments_only():
+    source = rich_story_map()
+    model = SequenceModel([beats_response(), rich_draft(source)])
+    writer = RecapWriter(model, config=small_config())
+
+    script = writer.write(source)
+
+    assert script["segments"]
+    assert len(model.prompts) == 2
+    assert writer.last_diagnostics["attempts"][0]["validation_errors"] == [
+        "Recap writer returned no segments"
+    ]
+    assert "Never return a beat object" in model.prompts[1]
+
+
+def test_rich_writer_schema_repair_never_exceeds_two_calls():
+    source = rich_story_map()
+    model = SequenceModel([single_story_beat_response(), beats_response()])
+    writer = RecapWriter(
+        model,
+        config=small_config(max_repair_attempts=5),
+    )
+
+    with pytest.raises(
+        RecapWritingError,
+        match="rich_main_narration remained invalid after 2 attempts",
+    ):
+        writer.write(source)
+
+    assert len(model.prompts) == 2
+    assert len(writer.last_diagnostics["attempts"]) == 2
 
 
 def test_narration_plan_chooses_conflict_hook_instead_of_chronological_setup():

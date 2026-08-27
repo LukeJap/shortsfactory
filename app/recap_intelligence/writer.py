@@ -1156,6 +1156,35 @@ class RecapWriter:
         )
         return prompt + "\n\nReturn JSON only."
 
+    def _rich_main_narration_prompt(
+        self,
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+    ) -> str:
+        return (
+            self._draft_prompt(story_map, outline)
+            + "\n\nRICH NARRATION RESPONSE CONTRACT:\n"
+            + "Return ONLY one JSON object with this top-level shape:\n"
+            + json.dumps(
+                {
+                    "segments": [
+                        {
+                            "segment_id": "VO_001",
+                            "text": "Original grounded narration.",
+                            "beat_ids": ["B001"],
+                            "presentation_hint": "narration_over_source",
+                            "importance": 0.9,
+                        }
+                    ]
+                },
+                indent=2,
+            )
+            + "\nThe top-level key must be segments. Do not return story beats, "
+            "beat objects, an outline, a story map, or an object with a beats key. "
+            "Do not return a single beat object. Each segment needs narration text "
+            "and valid beat_ids from the selected narrative outline."
+        )
+
     def _section_prompt(
         self,
         story_map: dict[str, Any],
@@ -1963,6 +1992,30 @@ class RecapWriter:
             + "\n\nReturn the repaired JSON object only."
         )
 
+    def _rich_repair_prompt(
+        self,
+        *,
+        stage: str,
+        original_prompt: str,
+        generation: ModelGeneration,
+        errors: list[str],
+    ) -> str:
+        return (
+            self._repair_prompt(
+                stage=stage,
+                original_prompt=original_prompt,
+                generation=generation,
+                errors=errors,
+            )
+            + "\n\nRICH NARRATION SCHEMA CORRECTION:\n"
+            + "The prior response used the wrong schema. Return ONLY a JSON object "
+            "with a non-empty segments array. Never return a beat object, story "
+            "map, outline, or {\"beats\": [...]}. The required top-level shape is:\n"
+            + '{"segments":[{"segment_id":"VO_001","text":"...",'
+            + '"beat_ids":["B001"],"presentation_hint":"narration_over_source",'
+            + '"importance":0.9}]}'
+        )
+
     def _generate(self, prompt: str) -> ModelGeneration:
         generate = getattr(self.model, "generate", None)
         if callable(generate):
@@ -1990,6 +2043,7 @@ class RecapWriter:
         validator: Callable[[dict[str, Any]], dict[str, Any]],
         *,
         max_model_calls: int | None = None,
+        repair_prompt_builder: Callable[[ModelGeneration, list[str]], str] | None = None,
     ) -> dict[str, Any]:
         current_prompt = prompt
         last_errors: list[str] = []
@@ -2043,11 +2097,15 @@ class RecapWriter:
             if attempt >= attempts:
                 break
             self.last_diagnostics["repair_attempt_count"] += 1
-            current_prompt = self._repair_prompt(
-                stage=stage,
-                original_prompt=prompt,
-                generation=generation,
-                errors=errors,
+            current_prompt = (
+                repair_prompt_builder(generation, errors)
+                if repair_prompt_builder is not None
+                else self._repair_prompt(
+                    stage=stage,
+                    original_prompt=prompt,
+                    generation=generation,
+                    errors=errors,
+                )
             )
         raise RecapWritingError(
             f"{stage} remained invalid after {attempts} attempts: "
@@ -2078,9 +2136,15 @@ class RecapWriter:
         )
         script = self._run_stage(
             "rich_main_narration",
-            self._draft_prompt(story_map, outline),
+            self._rich_main_narration_prompt(story_map, outline),
             lambda raw: self._validated_script(raw, story_map, outline),
             max_model_calls=2,
+            repair_prompt_builder=lambda generation, errors: self._rich_repair_prompt(
+                stage="rich_main_narration",
+                original_prompt=self._rich_main_narration_prompt(story_map, outline),
+                generation=generation,
+                errors=errors,
+            ),
         )
         self.last_diagnostics.update(
             {
