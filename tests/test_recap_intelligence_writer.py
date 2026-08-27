@@ -372,6 +372,80 @@ def richer_story_map():
     return {"beats": beats}
 
 
+def rich_story_map():
+    source = richer_story_map()
+    source["research_depth"] = {
+        "level": "RICH",
+        "route": "fandom_first_verified_story",
+    }
+    return source
+
+
+def rich_draft(source):
+    plan = build_narration_plan(source, small_config())
+    return {
+        "segments": [
+            {
+                "segment_id": f"VO_{index:03d}",
+                "text": (
+                    "An original grounded narration thought advances the "
+                    f"verified story movement {index}."
+                ),
+                "beat_ids": item["beat_ids"],
+                "presentation_hint": "narration_over_source",
+            }
+            for index, item in enumerate(plan["planned_segments"], start=1)
+        ]
+    }
+
+
+def test_rich_writer_uses_one_generation_without_critic_or_revision():
+    source = rich_story_map()
+    model = SequenceModel([rich_draft(source)])
+    writer = RecapWriter(model, config=small_config())
+
+    script = writer.write(source)
+
+    assert script["segments"]
+    assert len(model.prompts) == 1
+    assert [item["stage"] for item in writer.last_diagnostics["attempts"]] == [
+        "rich_main_narration"
+    ]
+    assert writer.last_diagnostics["control_flow"] == "rich_fast_path"
+    assert writer.last_diagnostics["critic_bypassed"] is True
+    assert writer.last_diagnostics["targeted_repair_used"] is False
+    assert writer.last_diagnostics["revision_attempt_count"] == 0
+
+
+def test_rich_writer_allows_only_one_targeted_repair_call():
+    source = rich_story_map()
+    model = SequenceModel([{"segments": []}, rich_draft(source)])
+    writer = RecapWriter(
+        model,
+        config=small_config(max_repair_attempts=5, max_revision_attempts=5),
+    )
+
+    script = writer.write(source)
+
+    assert script["segments"]
+    assert len(model.prompts) == 2
+    assert [item["kind"] for item in writer.last_diagnostics["attempts"]] == [
+        "initial",
+        "repair",
+    ]
+    assert all(
+        item["stage"] == "rich_main_narration"
+        for item in writer.last_diagnostics["attempts"]
+    )
+    assert writer.last_diagnostics["repair_attempt_count"] == 1
+    assert writer.last_diagnostics["targeted_repair_used"] is True
+    assert not any(
+        item["stage"].startswith("quality_critique")
+        or item["stage"].startswith("narration_revision_")
+        for item in writer.last_diagnostics["attempts"]
+    )
+
+
 def test_narration_plan_chooses_conflict_hook_instead_of_chronological_setup():
     plan = build_narration_plan(richer_story_map(), RecapWritingConfig())
 

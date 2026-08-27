@@ -25,7 +25,7 @@ DEFAULT_OUTLINE_PROMPT_PATH = ROOT / "prompts" / "recap_outline.md"
 DEFAULT_PROMPT_PATH = ROOT / "prompts" / "recap_writer.md"
 DEFAULT_CRITIC_PROMPT_PATH = ROOT / "prompts" / "recap_critic.md"
 DEFAULT_REPAIR_PROMPT_PATH = ROOT / "prompts" / "recap_repair.md"
-WRITER_PROMPT_VERSION = "recap-writer-creative-budget-v3"
+WRITER_PROMPT_VERSION = "recap-writer-rich-fast-path-v4"
 
 
 class RecapWritingError(RuntimeError):
@@ -1052,6 +1052,14 @@ class RecapWriter:
         self.debug_dir = path
 
     @staticmethod
+    def _uses_rich_fast_path(story_map: dict[str, Any]) -> bool:
+        research_depth = story_map.get("research_depth", {})
+        return (
+            isinstance(research_depth, dict)
+            and str(research_depth.get("level", "")).upper() == "RICH"
+        )
+
+    @staticmethod
     def _read_prompt(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip()
 
@@ -1980,10 +1988,16 @@ class RecapWriter:
         stage: str,
         prompt: str,
         validator: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        max_model_calls: int | None = None,
     ) -> dict[str, Any]:
         current_prompt = prompt
         last_errors: list[str] = []
-        attempts = 1 + max(0, self.config.max_repair_attempts)
+        attempts = (
+            max(1, max_model_calls)
+            if max_model_calls is not None
+            else 1 + max(0, self.config.max_repair_attempts)
+        )
         for attempt in range(1, attempts + 1):
             try:
                 generation = self._generate(current_prompt)
@@ -2048,6 +2062,37 @@ class RecapWriter:
             self.last_diagnostics,
         )
 
+    def _write_rich_fast_path(
+        self,
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Write a rich researched story in one draft plus one bounded repair."""
+        self.last_diagnostics.update(
+            {
+                "control_flow": "rich_fast_path",
+                "critic_bypassed": True,
+                "revision_attempt_count": 0,
+                "targeted_expansion_used": False,
+            }
+        )
+        script = self._run_stage(
+            "rich_main_narration",
+            self._draft_prompt(story_map, outline),
+            lambda raw: self._validated_script(raw, story_map, outline),
+            max_model_calls=2,
+        )
+        self.last_diagnostics.update(
+            {
+                "status": "success",
+                "word_count": script["actual_word_count"],
+                "segment_count": len(script["segments"]),
+                "model_call_count": len(self.last_diagnostics["attempts"]),
+                "targeted_repair_used": len(self.last_diagnostics["attempts"]) > 1,
+            }
+        )
+        return script
+
     def write(self, story_map: dict[str, Any]) -> dict[str, Any]:
         self.last_diagnostics = {
             "schema_version": 1,
@@ -2066,6 +2111,10 @@ class RecapWriter:
                 )
             outline = build_narration_plan(story_map, self.config)
             self.last_diagnostics["narration_plan"] = outline
+            if self._uses_rich_fast_path(story_map):
+                script = self._write_rich_fast_path(story_map, outline)
+                self._persist_diagnostics()
+                return script
             section_scripts: list[dict[str, Any]] = []
             for section in outline["sections"]:
                 section_scripts.append(
