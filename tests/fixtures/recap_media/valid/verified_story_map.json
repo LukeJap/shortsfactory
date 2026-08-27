@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "beats": [
+    {
+      "beat_id": "B001",
+      "order": 1,
+      "summary": "The protagonist discovers a mysterious letter under the door.",
+      "importance": 0.8,
+      "source_evidence": [
+        {
+          "start": 12.0,
+          "end": 18.4,
+          "type": "dialogue",
+          "confidence": 0.9
+        }
+      ]
+    },
+    {
+      "beat_id": "B002",
+      "order": 2,
+      "summary": "The protagonist confronts their rival about the letter.",
+      "importance": 0.95,
+      "source_evidence": [
+        {
+          "start": 120.5,
+          "end": 128.2,
+          "type": "dialogue",
+          "confidence": 0.85
+        }
+      ]
+    }
+  ]
+}

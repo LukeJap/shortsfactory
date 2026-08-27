@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "title": "Example Show",
+  "media_type": "tv_episode",
+  "season": 2,
+  "episode": 9,
+  "episode_title": "The Letter",
+  "confidence": 0.92,
+  "identification_method": "transcript_dialogue_match"
+}
