@@ -1134,7 +1134,12 @@ def _fandom_plot_points(synopsis: str, source_url: str) -> list[dict[str, Any]]:
             purpose = "reversal"
         elif index == len(sentences):
             purpose = "resolution"
-        elif any(token in lower for token in ("attempts", "tries", "first,", "next,")):
+        elif any(
+            token in lower
+            for token in (
+                "attempts", "tries", "first,", "next,", "begs", "pleads", "offers"
+            )
+        ):
             purpose = "attempt_failure"
         elif any(token in lower for token in ("returns to", "reunites", "comes back")):
             purpose = "payoff_climax"

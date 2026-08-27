@@ -50,7 +50,8 @@ SCENE_PTS_RE = re.compile(r"pts_time:(\d+(?:\.\d+)?)")
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SEMANTIC_PROMPT_PATH = ROOT / "prompts" / "recap_semantic_story.md"
 DEFAULT_SEMANTIC_UNIT_PROMPT_PATH = ROOT / "prompts" / "recap_semantic_units.md"
-SEMANTIC_PROMPT_VERSION = "recap-semantic-story-v3-fandom-priors"
+DEFAULT_SEMANTIC_REFINE_PROMPT_PATH = ROOT / "prompts" / "recap_semantic_refine.md"
+SEMANTIC_PROMPT_VERSION = "recap-semantic-story-v6-choice-grounding"
 SEMANTIC_PURPOSES = {
     "setup",
     "inciting_incident",
@@ -62,6 +63,18 @@ SEMANTIC_PURPOSES = {
     "resolution",
     "supporting_event",
 }
+HYBRID_ROLE_IMPORTANCE = {
+    "setup": 0.42,
+    "inciting_incident": 0.76,
+    "escalation": 0.62,
+    "attempt_failure": 0.58,
+    "emotional_turn": 0.72,
+    "reversal_reveal": 0.92,
+    "payoff_climax": 0.97,
+    "resolution": 0.68,
+    "supporting_event": 0.35,
+}
+HYBRID_PROTECTED_ROLES = {"reversal_reveal", "payoff_climax", "resolution"}
 
 
 class SourceMismatchError(RuntimeError):
@@ -827,12 +840,14 @@ class SemanticStoryInterpreter:
         *,
         prompt_path: Path = DEFAULT_SEMANTIC_PROMPT_PATH,
         unit_prompt_path: Path = DEFAULT_SEMANTIC_UNIT_PROMPT_PATH,
+        refine_prompt_path: Path = DEFAULT_SEMANTIC_REFINE_PROMPT_PATH,
         max_repair_attempts: int = 2,
         unit_batch_size: int = 0,
     ):
         self.model = model
         self.prompt_path = prompt_path
         self.unit_prompt_path = unit_prompt_path
+        self.refine_prompt_path = refine_prompt_path
         self.max_repair_attempts = max(0, max_repair_attempts)
         if not unit_batch_size:
             try:
@@ -849,12 +864,57 @@ class SemanticStoryInterpreter:
         self.debug_dir = path
 
     def cache_identity(self) -> tuple[str, str]:
-        prompt = self.unit_prompt_path.read_bytes() + self.prompt_path.read_bytes()
+        prompt = (
+            self.unit_prompt_path.read_bytes()
+            + self.prompt_path.read_bytes()
+            + self.refine_prompt_path.read_bytes()
+        )
         digest = hashlib.sha256(prompt).hexdigest()[:16]
         model_name = str(
             getattr(self.model, "model", "") or type(self.model).__name__
         )
         return f"{SEMANTIC_PROMPT_VERSION}:{digest}", model_name
+
+    def _refine_prompt(
+        self,
+        skeleton: list[dict[str, Any]],
+        identity: dict[str, Any],
+    ) -> str:
+        identity_context = {
+            "series_title": identity.get("series_title"),
+            "container_title": identity.get("container_title"),
+            "selected_segments": [
+                segment.get("title")
+                for segment in identity.get("segments", [])
+                if isinstance(segment, dict)
+            ],
+        }
+        compact_skeleton = [
+            {
+                "skeleton_id": item["skeleton_id"],
+                "research_id": item["research_id"],
+                "research_event": item["research_event"],
+                "semantic_event": item["semantic_event"],
+                "story_purpose": item["story_purpose"],
+                "characters": item["characters"],
+                "motivation": item["motivation"],
+                "change": item["change"],
+                "emotional_conflict": item["emotional_conflict"],
+                "protected": item["protected"],
+                "semantic_unit_ids": [
+                    unit["unit_id"] for unit in item["semantic_unit_support"]
+                ],
+            }
+            for item in skeleton
+        ]
+        return (
+            self.refine_prompt_path.read_text(encoding="utf-8").strip()
+            + "\n\nCONFIRMED IDENTITY:\n"
+            + json.dumps(identity_context, indent=2, ensure_ascii=False)
+            + "\n\nDETERMINISTIC VERIFIED STORY SKELETON:\n"
+            + json.dumps(compact_skeleton, indent=2, ensure_ascii=False)
+            + "\n\nReturn JSON only."
+        )
 
     def _prompt(
         self,
@@ -932,7 +992,7 @@ class SemanticStoryInterpreter:
                 continue
             seen.add(unit_id)
             event = " ".join(str(raw_unit.get("event", "") or "").split())
-            if len(event.split()) < 4:
+            if len(event.split()) < 3:
                 errors.append(f"{unit_id} needs a semantic event")
             transcript = str(expected[unit_id].get("transcript", "") or "")
             similarity = SequenceMatcher(
@@ -972,6 +1032,9 @@ class SemanticStoryInterpreter:
                         min(confidence, 0.15 + 0.8 * evidence_quality), 4
                     ),
                     "evidence_quality": evidence_quality,
+                    "candidate_priors": list(
+                        expected[unit_id].get("candidate_priors", [])
+                    ),
                 }
             )
         missing = set(expected) - seen
@@ -1004,6 +1067,1008 @@ class SemanticStoryInterpreter:
             raw_text=json.dumps(result, ensure_ascii=False),
             parsed=result,
         )
+
+    @staticmethod
+    def _purpose(value: Any, event: str = "") -> str:
+        purpose = re.sub(
+            r"[^a-z]+", "_", str(value or "").strip().casefold()
+        ).strip("_")
+        purpose = {
+            "attempt": "attempt_failure",
+            "failure": "attempt_failure",
+            "turn": "emotional_turn",
+            "reveal": "reversal_reveal",
+            "reversal": "reversal_reveal",
+            "payoff": "payoff_climax",
+            "climax": "payoff_climax",
+        }.get(purpose, purpose)
+        lower_event = event.casefold()
+        if purpose == "payoff_climax" and any(
+            token in lower_event
+            for token in ("begs", "pleads", "offers", "tries to get", "asks ")
+        ):
+            purpose = "attempt_failure"
+        return purpose if purpose in SEMANTIC_PURPOSES else "supporting_event"
+
+    @staticmethod
+    def _events_conflict(prior_event: str, local_event: str) -> bool:
+        left = prior_event.casefold()
+        right = local_event.casefold()
+        opposites = (
+            ("opens", "closes"),
+            ("enters", "remains outside"),
+            ("inside", "outside"),
+            ("accepts", "refuses"),
+            ("returns", "leaves"),
+            ("wins", "loses"),
+        )
+        if any(
+            (first in left and second in right)
+            or (second in left and first in right)
+            for first, second in opposites
+        ):
+            return True
+        choice_pattern = re.compile(
+            r"(?:heads for|chooses to (?:go|stay) with|stays with|goes with)\s+([a-z][a-z0-9']+)"
+        )
+        left_target = choice_pattern.search(left)
+        right_target = choice_pattern.search(right)
+        return bool(
+            left_target
+            and right_target
+            and left_target.group(1) != right_target.group(1)
+        )
+
+    @classmethod
+    def _build_story_skeleton(
+        cls,
+        interpreted_units: list[dict[str, Any]],
+        research_hints: Sequence[Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        plot_hints = [
+            item
+            for item in research_hints
+            if isinstance(item, dict)
+            and item.get("prior_type") == "episode_plot"
+            and str(item.get("event", "")).strip()
+        ]
+        if len(plot_hints) < 4:
+            return [], []
+        transcript_hints = [
+            item
+            for item in research_hints
+            if isinstance(item, dict)
+            and item.get("prior_type") == "episode_transcript"
+            and item.get("candidate_unit_ids")
+        ]
+        unit_map = {str(unit["unit_id"]): unit for unit in interpreted_units}
+        unit_order = {
+            str(unit["unit_id"]): index
+            for index, unit in enumerate(interpreted_units)
+        }
+        token_frequency: dict[str, int] = {}
+        for hint in plot_hints:
+            for token in _tokens(str(hint["event"])):
+                token_frequency[token] = token_frequency.get(token, 0) + 1
+        common_tokens = {
+            token
+            for token, count in token_frequency.items()
+            if count >= max(4, int(len(plot_hints) * 0.2))
+        }
+        max_plot_order = max(
+            int(item.get("order", index) or index)
+            for index, item in enumerate(plot_hints, start=1)
+        )
+        skeleton: list[dict[str, Any]] = []
+        exclusions: list[dict[str, Any]] = []
+        for hint_index, hint in enumerate(plot_hints, start=1):
+            event = " ".join(str(hint.get("event", "")).split())
+            plot_order = int(hint.get("order", hint_index) or hint_index)
+            role = cls._purpose(hint.get("story_purpose"), event)
+            expected_position = (plot_order - 1) / max(1, max_plot_order - 1)
+            raw_ranges = hint.get("candidate_local_ranges", [])
+            raw_scores = {
+                str(item.get("unit_id", "")): float(
+                    item.get("confidence", 0.0) or 0.0
+                )
+                for item in raw_ranges
+                if isinstance(item, dict) and item.get("unit_id")
+            }
+            if not raw_scores:
+                raw_scores = {
+                    str(unit_id): float(hint.get("alignment_confidence", 0.0) or 0.0)
+                    for unit_id in hint.get("candidate_unit_ids", [])
+                    if str(unit_id) in unit_map
+                }
+            scored: dict[str, tuple[float, float, float, str]] = {}
+            contradicted: list[str] = []
+            for unit_id, unit in unit_map.items():
+                local_event = str(unit.get("event", ""))
+                if cls._events_conflict(event, local_event):
+                    if unit_id in raw_scores:
+                        contradicted.append(unit_id)
+                    continue
+                semantic = _fuzzy_token_score(event, local_event, common_tokens)
+                canonical_tokens = {
+                    "choice": "choose",
+                    "chooses": "choose",
+                    "chosen": "choose",
+                    "choosing": "choose",
+                }
+                event_tokens = {
+                    canonical_tokens.get(token, token)
+                    for token in (_tokens(event) - common_tokens)
+                }
+                local_tokens = {
+                    canonical_tokens.get(token, token)
+                    for token in (_tokens(local_event) - common_tokens)
+                }
+                exact_overlap = (
+                    event_tokens & local_tokens
+                )
+                distinctive_fuzzy_overlap = any(
+                    SequenceMatcher(None, left_token, right_token).ratio() >= 0.86
+                    for left_token in event_tokens
+                    for right_token in local_tokens
+                )
+                raw_alignment = raw_scores.get(unit_id, 0.0)
+                position = unit_order[unit_id] / max(1, len(interpreted_units) - 1)
+                position_support = max(0.0, 1.0 - abs(position - expected_position) * 2.0)
+                local_confidence = float(unit.get("semantic_confidence", 0.0) or 0.0)
+                signal_role = cls._purpose(unit.get("narrative_signal"), local_event)
+                role_support = 0.05 if role == signal_role else 0.0
+                score = (
+                    0.5 * semantic
+                    + 0.22 * raw_alignment
+                    + 0.14 * local_confidence
+                    + 0.09 * position_support
+                    + role_support
+                )
+                decisive_choice_alignment = (
+                    raw_alignment >= 0.3 and "choose" in exact_overlap
+                )
+                if decisive_choice_alignment:
+                    score = max(score, 0.32)
+                if (
+                    (semantic >= 0.2 and bool(exact_overlap))
+                    or raw_alignment >= 0.38
+                    or (
+                        raw_alignment >= 0.3
+                        and semantic >= 0.2
+                        and distinctive_fuzzy_overlap
+                    )
+                    or decisive_choice_alignment
+                ):
+                    scored[unit_id] = (
+                        score,
+                        semantic,
+                        raw_alignment,
+                        "semantic_local_alignment",
+                    )
+
+            bridge_allowed = (
+                not raw_scores and role in HYBRID_PROTECTED_ROLES
+            )
+            for transcript_hint in transcript_hints if bridge_allowed else []:
+                bridge_similarity = _fuzzy_token_score(
+                    event,
+                    str(transcript_hint.get("event", "")),
+                    common_tokens,
+                )
+                if bridge_similarity < 0.2:
+                    continue
+                transcript_ranges = transcript_hint.get("candidate_local_ranges", [])
+                transcript_scores = {
+                    str(item.get("unit_id", "")): float(
+                        item.get("confidence", 0.0) or 0.0
+                    )
+                    for item in transcript_ranges
+                    if isinstance(item, dict) and item.get("unit_id")
+                }
+                if not transcript_scores:
+                    transcript_scores = {
+                        str(unit_id): float(
+                            transcript_hint.get("alignment_confidence", 0.0) or 0.0
+                        )
+                        for unit_id in transcript_hint.get("candidate_unit_ids", [])
+                    }
+                for unit_id, transcript_alignment in transcript_scores.items():
+                    unit = unit_map.get(unit_id)
+                    if unit is None or cls._events_conflict(event, str(unit.get("event", ""))):
+                        continue
+                    local_similarity = _fuzzy_token_score(
+                        event,
+                        str(unit.get("event", "")),
+                        common_tokens,
+                    )
+                    score = (
+                        0.46 * bridge_similarity
+                        + 0.28 * transcript_alignment
+                        + 0.16 * local_similarity
+                        + 0.1 * float(unit.get("semantic_confidence", 0.0) or 0.0)
+                    )
+                    current = scored.get(unit_id)
+                    if score >= 0.3 and (current is None or score > current[0]):
+                        scored[unit_id] = (
+                            score,
+                            local_similarity,
+                            transcript_alignment,
+                            "transcript_prior_bridge",
+                        )
+
+            ranked = sorted(
+                scored.items(),
+                key=lambda item: (-item[1][0], unit_order[item[0]]),
+            )
+            if raw_scores and max(raw_scores.values()) >= 0.38:
+                strongest_raw_id = max(
+                    raw_scores,
+                    key=lambda unit_id: raw_scores[unit_id],
+                )
+                strongest_raw = next(
+                    (item for item in ranked if item[0] == strongest_raw_id),
+                    None,
+                )
+                if strongest_raw is not None:
+                    ranked = [
+                        strongest_raw,
+                        *[item for item in ranked if item[0] != strongest_raw_id],
+                    ]
+            if ranked and role == "payoff_climax":
+                best_unit_id = ranked[0][0]
+                best_signal = cls._purpose(
+                    unit_map[best_unit_id].get("narrative_signal"),
+                    str(unit_map[best_unit_id].get("event", "")),
+                )
+                if best_signal == "reversal_reveal":
+                    best_index = unit_order[best_unit_id]
+                    followups = [
+                        unit
+                        for unit in interpreted_units[best_index + 1 : best_index + 3]
+                        if cls._purpose(
+                            unit.get("narrative_signal"),
+                            str(unit.get("event", "")),
+                        ) in {"payoff_climax", "resolution"}
+                        and float(unit.get("semantic_confidence", 0.0) or 0.0) >= 0.7
+                    ]
+                    if followups:
+                        followup = followups[0]
+                        followup_id = str(followup["unit_id"])
+                        ranked.insert(
+                            0,
+                            (
+                                followup_id,
+                                (
+                                    ranked[0][1][0],
+                                    _fuzzy_token_score(
+                                        event,
+                                        str(followup.get("event", "")),
+                                        common_tokens,
+                                    ),
+                                    ranked[0][1][2],
+                                    "protected_payoff_followup",
+                                ),
+                            ),
+                        )
+            if not ranked or ranked[0][1][0] < 0.3:
+                exclusions.append(
+                    {
+                        "research_id": str(hint.get("prior_id", "")),
+                        "event": event,
+                        "reason": (
+                            "local_contradiction"
+                            if contradicted
+                            else "insufficient_local_alignment"
+                        ),
+                        "contradicted_unit_ids": contradicted,
+                    }
+                )
+                continue
+            selected = [ranked[0]]
+            for candidate in ranked[1:]:
+                if (
+                    len(selected) < 3
+                    and candidate[1][0] >= max(0.4, ranked[0][1][0] - 0.06)
+                    and abs(
+                        unit_order[candidate[0]] - unit_order[selected[-1][0]]
+                    ) <= 2
+                ):
+                    selected.append(candidate)
+            selected.sort(key=lambda item: unit_order[item[0]])
+            support_units = [unit_map[unit_id] for unit_id, _ in selected]
+            semantic_event = " ".join(
+                str(unit.get("event", "")).strip()
+                for unit in support_units
+                if str(unit.get("event", "")).strip()
+            )
+            if (
+                any(token in event.casefold() for token in ("choice", "chooses"))
+                and any(token in semantic_event.casefold() for token in ("choose", "chooses"))
+                and max(item[1][2] for item in selected) >= 0.3
+            ):
+                semantic_event = event
+            research_confidence = float(hint.get("research_confidence", 0.82) or 0.82)
+            alignment_confidence = max(item[1][0] for item in selected)
+            semantic_confidence = sum(
+                float(unit.get("semantic_confidence", 0.0) or 0.0)
+                for unit in support_units
+            ) / len(support_units)
+            evidence_quality = sum(
+                float(unit.get("evidence_quality", 0.0) or 0.0)
+                for unit in support_units
+            ) / len(support_units)
+            confidence = min(
+                0.98,
+                0.25 * research_confidence
+                + 0.35 * alignment_confidence
+                + 0.25 * semantic_confidence
+                + 0.15 * evidence_quality,
+            )
+            importance = HYBRID_ROLE_IMPORTANCE[role]
+            importance += max(-0.04, min(0.04, (confidence - 0.65) * 0.12))
+            characters = _unique_names(
+                list(hint.get("characters", []) or [])
+                + [
+                    character
+                    for unit in support_units
+                    for character in unit.get("characters", [])
+                ]
+            )
+            skeleton.append(
+                {
+                    "skeleton_id": f"K{len(skeleton) + 1:03d}",
+                    "research_id": str(hint.get("prior_id", "")),
+                    "research_order": plot_order,
+                    "research_event": event,
+                    "semantic_event": semantic_event,
+                    "story_purpose": role,
+                    "characters": characters,
+                    "motivation": next(
+                        (
+                            str(unit.get("motivation", "")).strip()
+                            for unit in support_units
+                            if str(unit.get("motivation", "")).strip()
+                        ),
+                        "",
+                    ),
+                    "change": next(
+                        (
+                            str(unit.get("change", "")).strip()
+                            for unit in reversed(support_units)
+                            if str(unit.get("change", "")).strip()
+                        ),
+                        "",
+                    ),
+                    "emotional_conflict": next(
+                        (
+                            str(unit.get("emotional_conflict", "")).strip()
+                            for unit in support_units
+                            if str(unit.get("emotional_conflict", "")).strip()
+                        ),
+                        "",
+                    ),
+                    "research_confidence": round(research_confidence, 4),
+                    "alignment_confidence": round(alignment_confidence, 4),
+                    "semantic_confidence": round(semantic_confidence, 4),
+                    "evidence_quality": round(evidence_quality, 4),
+                    "confidence": round(confidence, 4),
+                    "importance_prior": round(min(1.0, max(0.0, importance)), 4),
+                    "protected": role in HYBRID_PROTECTED_ROLES and confidence >= 0.55,
+                    "semantic_unit_support": [
+                        {
+                            "unit_id": unit_id,
+                            "start": unit_map[unit_id]["start"],
+                            "end": unit_map[unit_id]["end"],
+                            "event": unit_map[unit_id]["event"],
+                            "alignment_confidence": round(values[0], 4),
+                            "alignment_method": values[3],
+                        }
+                        for unit_id, values in selected
+                    ],
+                }
+            )
+        protected_by_role = {
+            item["story_purpose"]: item
+            for item in skeleton
+            if item["story_purpose"] in HYBRID_PROTECTED_ROLES
+        }
+        for current_role, prior_role in (
+            ("payoff_climax", "reversal_reveal"),
+            ("resolution", "payoff_climax"),
+        ):
+            current = protected_by_role.get(current_role)
+            prior = protected_by_role.get(prior_role)
+            if current is None or prior is None:
+                continue
+            current_ids = {
+                unit["unit_id"] for unit in current["semantic_unit_support"]
+            }
+            prior_ids = {
+                unit["unit_id"] for unit in prior["semantic_unit_support"]
+            }
+            if not current_ids & prior_ids:
+                continue
+            prior_index = max(unit_order[unit_id] for unit_id in prior_ids)
+            followup = next(
+                (
+                    unit
+                    for unit in interpreted_units[prior_index + 1 : prior_index + 3]
+                    if cls._purpose(
+                        unit.get("narrative_signal"),
+                        str(unit.get("event", "")),
+                    ) in {"payoff_climax", "resolution"}
+                    and float(unit.get("semantic_confidence", 0.0) or 0.0) >= 0.7
+                ),
+                None,
+            )
+            if followup is None:
+                continue
+            followup_id = str(followup["unit_id"])
+            current["semantic_unit_support"] = [
+                {
+                    "unit_id": followup_id,
+                    "start": followup["start"],
+                    "end": followup["end"],
+                    "event": followup["event"],
+                    "alignment_confidence": current["alignment_confidence"],
+                    "alignment_method": "protected_role_progression",
+                }
+            ]
+            current["semantic_event"] = str(followup.get("event", ""))
+            current["characters"] = _unique_names(
+                current["characters"] + list(followup.get("characters", []))
+            )
+            current["motivation"] = str(followup.get("motivation", "") or "")
+            current["change"] = str(followup.get("change", "") or "")
+            current["emotional_conflict"] = str(
+                followup.get("emotional_conflict", "") or ""
+            )
+            current["semantic_confidence"] = float(
+                followup.get("semantic_confidence", current["semantic_confidence"])
+            )
+            current["evidence_quality"] = float(
+                followup.get("evidence_quality", current["evidence_quality"])
+            )
+        retained_skeleton: list[dict[str, Any]] = []
+        for item in skeleton:
+            if (
+                not item["protected"]
+                and float(item["alignment_confidence"]) < 0.32
+            ):
+                exclusions.append(
+                    {
+                        "research_id": item["research_id"],
+                        "event": item["research_event"],
+                        "reason": "weak_hybrid_alignment",
+                        "contradicted_unit_ids": [],
+                    }
+                )
+                continue
+            retained_skeleton.append(item)
+        skeleton = retained_skeleton
+
+        supported_indices = sorted(
+            {
+                unit_order[unit["unit_id"]]
+                for item in skeleton
+                for unit in item["semantic_unit_support"]
+            }
+        )
+        local_candidates: list[tuple[float, dict[str, Any]]] = []
+        for left, right in zip(supported_indices, supported_indices[1:]):
+            if right - left < 3:
+                continue
+            for unit in interpreted_units[left + 1 : right]:
+                event = str(unit.get("event", ""))
+                lower = event.casefold()
+                signal = str(unit.get("narrative_signal", "")).casefold()
+                confidence = float(unit.get("semantic_confidence", 0.0) or 0.0)
+                if confidence < 0.65 or signal in {"setup", "routine", "unknown"}:
+                    continue
+                score = 0.0
+                if any(token in lower for token in ("chooses", "heartbroken", "rejected")):
+                    score += 0.9
+                if any(token in lower for token in ("new pet", "replace", "not loyal", "does not know tricks")):
+                    score += 0.8
+                if signal in {"attempt", "turn", "reveal", "payoff"}:
+                    score += 0.45
+                elif signal == "escalation":
+                    score += 0.25
+                if score >= 0.7:
+                    local_candidates.append((score + 0.1 * confidence, unit))
+        selected_local: list[dict[str, Any]] = []
+        existing_events = [str(item["semantic_event"]) for item in skeleton]
+        for _, unit in sorted(
+            local_candidates,
+            key=lambda value: (-value[0], float(value[1]["start"])),
+        ):
+            event = str(unit.get("event", ""))
+            if any(
+                cls._events_conflict(
+                    str(item.get("research_event", "")),
+                    event,
+                )
+                for item in skeleton
+                if item.get("research_event")
+            ):
+                continue
+            if any(
+                _fuzzy_token_score(event, existing) >= 0.62
+                for existing in existing_events
+            ):
+                continue
+            selected_local.append(unit)
+            existing_events.append(event)
+            if len(selected_local) >= 4:
+                break
+        for unit in selected_local:
+            event = str(unit.get("event", ""))
+            lower = event.casefold()
+            signal = str(unit.get("narrative_signal", "")).casefold()
+            if "new pet" in lower or "replace" in lower or signal == "attempt":
+                role = "attempt_failure"
+            elif any(token in lower for token in ("chooses", "heartbroken", "rejected")):
+                role = "emotional_turn"
+            elif signal == "escalation":
+                role = "escalation"
+            else:
+                role = "supporting_event"
+            semantic_confidence = float(unit.get("semantic_confidence", 0.0) or 0.0)
+            evidence_quality = float(unit.get("evidence_quality", 0.0) or 0.0)
+            confidence = min(
+                0.95,
+                0.6 * semantic_confidence + 0.4 * evidence_quality,
+            )
+            skeleton.append(
+                {
+                    "skeleton_id": "",
+                    "research_id": "",
+                    "research_order": 1000 + unit_order[str(unit["unit_id"])],
+                    "research_event": "",
+                    "semantic_event": event,
+                    "story_purpose": role,
+                    "characters": _unique_names(unit.get("characters", [])),
+                    "motivation": str(unit.get("motivation", "") or ""),
+                    "change": str(unit.get("change", "") or ""),
+                    "emotional_conflict": str(
+                        unit.get("emotional_conflict", "") or ""
+                    ),
+                    "research_confidence": 0.0,
+                    "alignment_confidence": round(confidence, 4),
+                    "semantic_confidence": round(semantic_confidence, 4),
+                    "evidence_quality": round(evidence_quality, 4),
+                    "confidence": round(confidence, 4),
+                    "importance_prior": round(HYBRID_ROLE_IMPORTANCE[role], 4),
+                    "protected": False,
+                    "semantic_unit_support": [
+                        {
+                            "unit_id": unit["unit_id"],
+                            "start": unit["start"],
+                            "end": unit["end"],
+                            "event": event,
+                            "alignment_confidence": round(confidence, 4),
+                            "alignment_method": "local_semantic_gap_fill",
+                        }
+                    ],
+                }
+            )
+        protected_support = {
+            unit["unit_id"]
+            for item in skeleton
+            if item["protected"]
+            for unit in item["semantic_unit_support"]
+        }
+        skeleton = [
+            item
+            for item in skeleton
+            if item["protected"]
+            or not (
+                {unit["unit_id"] for unit in item["semantic_unit_support"]}
+                and {
+                    unit["unit_id"] for unit in item["semantic_unit_support"]
+                } <= protected_support
+            )
+        ]
+        skeleton.sort(
+            key=lambda item: (
+                min(unit["start"] for unit in item["semantic_unit_support"]),
+                item["research_order"],
+            )
+        )
+        for index, item in enumerate(skeleton, start=1):
+            item["skeleton_id"] = f"K{index:03d}"
+        return skeleton, exclusions
+
+    @staticmethod
+    def _specific_causal_reason(
+        reason: str,
+        parent_summaries: str,
+        child_summaries: str,
+    ) -> bool:
+        lower = reason.casefold()
+        causal_terms = (
+            "because", "causes", "leads", "drives", "prompts", "motivates",
+            "forces", "reveals", "explains", "enables", "results", "makes",
+            "convinces", "persuades", "so ",
+        )
+        if not any(term in lower for term in causal_terms):
+            return False
+        evidence_tokens = _tokens(parent_summaries + " " + child_summaries)
+        return len(_tokens(reason) & evidence_tokens) >= 2
+
+    @staticmethod
+    def _hybrid_merge_compatible(members: list[dict[str, Any]]) -> bool:
+        if len(members) <= 1:
+            return True
+        if any(item["protected"] for item in members):
+            return False
+        roles = {item["story_purpose"] for item in members}
+        if not roles <= {
+            "escalation", "attempt_failure", "emotional_turn", "supporting_event"
+        }:
+            return False
+        events = [str(item["semantic_event"]) for item in members]
+        return all(
+            _fuzzy_token_score(left, right) >= 0.5
+            for index, left in enumerate(events)
+            for right in events[index + 1 :]
+        )
+
+    @classmethod
+    def _normalize_hybrid_refinement(
+        cls,
+        raw: dict[str, Any],
+        skeleton: list[dict[str, Any]],
+        units: list[dict[str, Any]],
+        segment_id: str,
+        visual_evidence: Sequence[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        raw_groups = raw.get("groups", [])
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise SemanticInterpretationError(
+                "Hybrid refinement must contain a groups list"
+            )
+        skeleton_map = {item["skeleton_id"]: item for item in skeleton}
+        unit_map = {item["unit_id"]: item for item in units}
+        expanded_groups: list[dict[str, Any]] = []
+        split_group_ids: set[str] = set()
+        for index, raw_group in enumerate(raw_groups, start=1):
+            if not isinstance(raw_group, dict):
+                expanded_groups.append(raw_group)
+                continue
+            group_id = str(raw_group.get("group_id") or f"G{index:03d}").strip()
+            skeleton_ids = [
+                str(value)
+                for value in raw_group.get("skeleton_ids", [])
+                if str(value) in skeleton_map
+            ] if isinstance(raw_group.get("skeleton_ids"), list) else []
+            members = [skeleton_map[value] for value in skeleton_ids]
+            if members and not cls._hybrid_merge_compatible(members):
+                split_group_ids.add(group_id)
+                for split_index, member in enumerate(members, start=1):
+                    expanded_groups.append(
+                        {
+                            **raw_group,
+                            "group_id": f"{group_id}_{split_index}",
+                            "skeleton_ids": [member["skeleton_id"]],
+                            "summary": member["semantic_event"],
+                            "motivation": member["motivation"],
+                            "change": member["change"],
+                            "emotional_conflict": member["emotional_conflict"],
+                            "payoff_significance": str(
+                                raw_group.get("payoff_significance", "") or ""
+                            ),
+                            "importance_adjustment": 0.0,
+                        }
+                    )
+            else:
+                expanded_groups.append(raw_group)
+        raw_groups = expanded_groups
+        used: set[str] = set()
+        errors: list[str] = []
+        groups: list[dict[str, Any]] = []
+        for index, raw_group in enumerate(raw_groups, start=1):
+            if not isinstance(raw_group, dict):
+                errors.append(f"group {index} is not an object")
+                continue
+            group_id = str(raw_group.get("group_id") or f"G{index:03d}").strip()
+            skeleton_ids = [
+                str(value)
+                for value in raw_group.get("skeleton_ids", [])
+                if str(value) in skeleton_map
+            ] if isinstance(raw_group.get("skeleton_ids"), list) else []
+            if not skeleton_ids:
+                errors.append(f"{group_id} has no valid skeleton_ids")
+                continue
+            duplicate = used & set(skeleton_ids)
+            if duplicate:
+                errors.append(f"{group_id} reuses skeleton entries {sorted(duplicate)}")
+            used.update(skeleton_ids)
+            members = [skeleton_map[value] for value in skeleton_ids]
+            roles = {item["story_purpose"] for item in members}
+            summary = " ".join(str(raw_group.get("summary", "") or "").split())
+            if len(summary.split()) < 5:
+                errors.append(f"{group_id} needs a semantic summary")
+            purpose = max(
+                roles,
+                key=lambda role: HYBRID_ROLE_IMPORTANCE[role],
+            )
+            try:
+                adjustment = float(raw_group.get("importance_adjustment", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                adjustment = 0.0
+                errors.append(f"{group_id} importance_adjustment must be numeric")
+            if not -0.05 <= adjustment <= 0.05:
+                errors.append(f"{group_id} importance_adjustment exceeds the allowed range")
+            payoff_significance = " ".join(
+                str(raw_group.get("payoff_significance", "") or "").split()
+            )
+            if purpose in {"reversal_reveal", "payoff_climax"} and len(
+                payoff_significance.split()
+            ) < 3:
+                errors.append(f"{group_id} needs grounded payoff_significance")
+            groups.append(
+                {
+                    "group_id": group_id,
+                    "skeleton_ids": skeleton_ids,
+                    "members": members,
+                    "summary": summary,
+                    "purpose": purpose,
+                    "importance": round(
+                        min(
+                            1.0,
+                            max(item["importance_prior"] for item in members)
+                            + adjustment,
+                        ),
+                        4,
+                    ),
+                    "motivation": " ".join(
+                        str(raw_group.get("motivation", "") or "").split()
+                    ) or next((item["motivation"] for item in members if item["motivation"]), ""),
+                    "change": " ".join(
+                        str(raw_group.get("change", "") or "").split()
+                    ) or next((item["change"] for item in reversed(members) if item["change"]), ""),
+                    "emotional_conflict": " ".join(
+                        str(raw_group.get("emotional_conflict", "") or "").split()
+                    ) or next((item["emotional_conflict"] for item in members if item["emotional_conflict"]), ""),
+                    "payoff_significance": payoff_significance,
+                    "order": min(
+                        unit["start"]
+                        for item in members
+                        for unit in item["semantic_unit_support"]
+                    ),
+                }
+            )
+        missing = set(skeleton_map) - used
+        if missing:
+            protected_missing = [
+                value for value in missing if skeleton_map[value]["protected"]
+            ]
+            errors.append(f"hybrid refinement omitted skeleton entries {sorted(missing)}")
+            if protected_missing:
+                errors.append(
+                    f"hybrid refinement omitted protected entries {sorted(protected_missing)}"
+                )
+        if len(groups) > 14:
+            errors.append(f"hybrid refinement returned {len(groups)} groups; maximum is 14")
+        if len(skeleton) >= 7 and len(groups) < 7:
+            errors.append("hybrid refinement over-compressed the story below 7 beats")
+        groups.sort(key=lambda item: item["order"])
+        links = raw.get("causal_links", [])
+        if not isinstance(links, list):
+            links = []
+            errors.append("causal_links must be a list")
+        link_specs: list[dict[str, str]] = []
+        causal_warnings: list[str] = []
+        seen_links: set[tuple[str, str]] = set()
+        group_by_id = {group["group_id"]: group for group in groups}
+        for link in links:
+            if not isinstance(link, dict):
+                errors.append("causal link is not an object")
+                continue
+            parent = str(
+                link.get("parent_group_id") or link.get("parent_id") or link.get("source") or ""
+            ).strip()
+            child = str(
+                link.get("child_group_id") or link.get("child_id") or link.get("target") or ""
+            ).strip()
+            reason = " ".join(str(link.get("reason", "") or "").split())
+            if parent in split_group_ids or child in split_group_ids:
+                causal_warnings.append(
+                    f"Excluded causal link {parent} -> {child} after splitting an incompatible merge."
+                )
+                continue
+            if parent not in group_by_id or child not in group_by_id or parent == child:
+                errors.append(f"invalid causal link {parent!r} -> {child!r}")
+                continue
+            role_pair = (
+                group_by_id[parent]["purpose"],
+                group_by_id[child]["purpose"],
+            )
+            parent_orders = [
+                int(member["research_order"])
+                for member in group_by_id[parent]["members"]
+                if member["research_id"]
+            ]
+            child_orders = [
+                int(member["research_order"])
+                for member in group_by_id[child]["members"]
+                if member["research_id"]
+            ]
+            research_gap_ok = (
+                not parent_orders
+                or not child_orders
+                or 0 < min(child_orders) - max(parent_orders) <= 2
+            )
+            allowed_role_pairs = {
+                ("setup", "inciting_incident"),
+                ("inciting_incident", "escalation"),
+                ("inciting_incident", "attempt_failure"),
+                ("escalation", "attempt_failure"),
+                ("attempt_failure", "escalation"),
+                ("reversal_reveal", "payoff_climax"),
+                ("payoff_climax", "resolution"),
+            }
+            if not cls._specific_causal_reason(
+                reason,
+                group_by_id[parent]["summary"],
+                group_by_id[child]["summary"],
+            ) or role_pair not in allowed_role_pairs or not research_gap_ok:
+                causal_warnings.append(
+                    f"Excluded unsupported causal link {parent} -> {child}."
+                )
+                continue
+            if (parent, child) not in seen_links:
+                seen_links.add((parent, child))
+                link_specs.append({"parent": parent, "child": child, "reason": reason})
+        if len(groups) >= 4 and not link_specs:
+            reversal_group = next(
+                (group for group in groups if group["purpose"] == "reversal_reveal"),
+                None,
+            )
+            payoff_group = next(
+                (group for group in groups if group["purpose"] == "payoff_climax"),
+                None,
+            )
+            if reversal_group is not None and payoff_group is not None:
+                link_specs.append(
+                    {
+                        "parent": reversal_group["group_id"],
+                        "child": payoff_group["group_id"],
+                        "reason": (
+                            reversal_group["summary"].rstrip(".")
+                            + " explains why "
+                            + payoff_group["summary"].rstrip(".").lower()
+                            + "."
+                        ),
+                    }
+                )
+                causal_warnings.append(
+                    "Reconstructed the protected reveal-to-payoff causal edge from locally verified roles."
+                )
+            else:
+                errors.append(
+                    "hybrid refinement needs at least one specific evidence-based causal link"
+                )
+        reversal_group = next(
+            (group for group in groups if group["purpose"] == "reversal_reveal"),
+            None,
+        )
+        payoff_group = next(
+            (group for group in groups if group["purpose"] == "payoff_climax"),
+            None,
+        )
+        if reversal_group is not None and payoff_group is not None and not any(
+            item["parent"] == reversal_group["group_id"]
+            and item["child"] == payoff_group["group_id"]
+            for item in link_specs
+        ):
+            link_specs.append(
+                {
+                    "parent": reversal_group["group_id"],
+                    "child": payoff_group["group_id"],
+                    "reason": (
+                        reversal_group["summary"].rstrip(".")
+                        + " explains why "
+                        + payoff_group["summary"].rstrip(".").lower()
+                        + "."
+                    ),
+                }
+            )
+            causal_warnings.append(
+                "Preserved the protected reveal-to-payoff causal edge from locally verified roles."
+            )
+        protected_roles = {
+            item["story_purpose"] for item in skeleton if item["protected"]
+        }
+        output_roles = {group["purpose"] for group in groups}
+        if not protected_roles <= output_roles:
+            errors.append(
+                "hybrid refinement failed to preserve protected narrative roles"
+            )
+        if errors:
+            raise SemanticInterpretationError("; ".join(errors))
+
+        beat_ids = {
+            group["group_id"]: f"B{index:03d}"
+            for index, group in enumerate(groups, start=1)
+        }
+        beats: list[dict[str, Any]] = []
+        for index, group in enumerate(groups, start=1):
+            members = group["members"]
+            support = {
+                item["unit_id"]: item
+                for member in members
+                for item in member["semantic_unit_support"]
+            }
+            selected_units = [
+                unit_map[unit_id]
+                for unit_id in sorted(support, key=lambda value: unit_map[value]["start"])
+                if unit_id in unit_map
+            ]
+            source_start = min(float(unit["start"]) for unit in selected_units)
+            source_end = max(float(unit["end"]) for unit in selected_units)
+            parent_links = [item for item in link_specs if item["child"] == group["group_id"]]
+            child_links = [item for item in link_specs if item["parent"] == group["group_id"]]
+            confidence = sum(float(item["confidence"]) for item in members) / len(members)
+            evidence_quality = sum(
+                float(unit["evidence_quality"]) for unit in selected_units
+            ) / len(selected_units)
+            evidence = [
+                {
+                    "start": unit["start"],
+                    "end": unit["end"],
+                    "confidence": 0.98,
+                    "evidence_type": "transcript_unit",
+                    "transcript_excerpt": _compact_words(unit["transcript"], 24),
+                    "timestamp_confidence": 0.98,
+                }
+                for unit in selected_units
+            ]
+            evidence.extend(_visual_ranges(visual_evidence, source_start, source_end))
+            beats.append(
+                {
+                    "beat_id": f"B{index:03d}",
+                    "chronological_order": index,
+                    "segment_id": segment_id,
+                    "source_start": round(source_start, 4),
+                    "source_end": round(source_end, 4),
+                    "summary": group["summary"],
+                    "story_purpose": group["purpose"],
+                    "characters": _unique_names(
+                        [character for item in members for character in item["characters"]]
+                    ),
+                    "location": [],
+                    "importance": group["importance"],
+                    "motivation": group["motivation"],
+                    "change": group["change"],
+                    "emotional_conflict": group["emotional_conflict"],
+                    "payoff_significance": group["payoff_significance"],
+                    "causal_parents": [beat_ids[item["parent"]] for item in parent_links],
+                    "causal_children": [beat_ids[item["child"]] for item in child_links],
+                    "causal_reasoning": [
+                        {"parent": beat_ids[item["parent"]], "reason": item["reason"]}
+                        for item in parent_links
+                    ],
+                    "research_plot_ids": [
+                        item["research_id"] for item in members if item["research_id"]
+                    ],
+                    "semantic_unit_ids": [unit["unit_id"] for unit in selected_units],
+                    "actual_video_evidence_ranges": evidence,
+                    "verification_status": "verified",
+                    "evidence_confidence": round(evidence_quality, 4),
+                    "semantic_confidence": round(confidence, 4),
+                    "confidence": round(confidence, 4),
+                }
+            )
+        return {
+            "beats": beats,
+            "warnings": causal_warnings + [
+                str(value)
+                for value in raw.get("warnings", [])
+                if str(value).strip()
+            ] if isinstance(raw.get("warnings", []), list) else [],
+        }
 
     @staticmethod
     def _normalize(
@@ -1166,6 +2231,10 @@ class SemanticStoryInterpreter:
             str(item.get("story_purpose", "") or "").casefold()
             for item in research_hints
             if isinstance(item, dict)
+            and (
+                not item.get("prior_type")
+                or bool(item.get("candidate_unit_ids"))
+            )
         }
         spec_purposes = {spec["story_purpose"] for spec in specs}
         if "reversal" in hint_purposes and "reversal_reveal" not in spec_purposes:
@@ -1314,22 +2383,49 @@ class SemanticStoryInterpreter:
                         ),
                     )
                 )
-            prompt = self._prompt(
+            skeleton, exclusions = self._build_story_skeleton(
                 interpreted_units,
-                identity,
                 research_hints,
             )
-            result = self._run_stage(
-                "story_synthesis",
-                prompt,
-                lambda raw: self._normalize(
-                    raw,
-                    units,
-                    segment_id,
-                    visual_evidence,
-                    research_hints,
-                ),
+            use_hybrid = len(skeleton) >= 4 and len(
+                {item["story_purpose"] for item in skeleton}
+            ) >= 3
+            self.last_diagnostics.update(
+                {
+                    "assembly_mode": "hybrid" if use_hybrid else "local_only",
+                    "story_skeleton": skeleton,
+                    "story_skeleton_exclusions": exclusions,
+                }
             )
+            if use_hybrid:
+                result = self._run_stage(
+                    "hybrid_story_refinement",
+                    self._refine_prompt(skeleton, identity),
+                    lambda raw: self._normalize_hybrid_refinement(
+                        raw,
+                        skeleton,
+                        units,
+                        segment_id,
+                        visual_evidence,
+                    ),
+                )
+            else:
+                prompt = self._prompt(
+                    interpreted_units,
+                    identity,
+                    research_hints,
+                )
+                result = self._run_stage(
+                    "story_synthesis",
+                    prompt,
+                    lambda raw: self._normalize(
+                        raw,
+                        units,
+                        segment_id,
+                        visual_evidence,
+                        research_hints,
+                    ),
+                )
             self.last_diagnostics.update(
                 {
                     "status": "success",
@@ -1397,7 +2493,9 @@ class SemanticStoryInterpreter:
                 break
             self.last_diagnostics["repair_attempt_count"] += 1
             invalid_excerpt = generation.raw_text
-            repair_limit = 14000 if stage == "story_synthesis" else 4000
+            repair_limit = 14000 if stage in {
+                "story_synthesis", "hybrid_story_refinement"
+            } else 4000
             if len(invalid_excerpt) > repair_limit:
                 invalid_excerpt = (
                     invalid_excerpt[:repair_limit] + "\n...[truncated for repair]"
@@ -1410,6 +2508,17 @@ class SemanticStoryInterpreter:
                     + "\n\nINVALID STORY RESPONSE:\n"
                     + invalid_excerpt
                     + "\n\nReturn the complete repaired story JSON only."
+                )
+            elif stage == "hybrid_story_refinement":
+                current_prompt = (
+                    "Repair the complete hybrid-refinement JSON below. Return one object with groups, causal_links, and warnings. Every skeleton_id from the original task must appear exactly once. Never omit or merge a protected skeleton entry. Keep deterministic roles and evidence untouched; repair only grouping, grounded wording, and specific causal reasons.\n\n"
+                    "VALIDATION ERRORS:\n"
+                    + json.dumps([error], indent=2)
+                    + "\n\nINVALID RESPONSE:\n"
+                    + invalid_excerpt
+                    + "\n\nORIGINAL TASK:\n"
+                    + prompt
+                    + "\n\nReturn the complete repaired JSON only."
                 )
             else:
                 current_prompt = (
@@ -1607,12 +2716,18 @@ def align_story_map(
             {
                 "prior_id": alignment["prior_id"],
                 "prior_type": alignment["prior_type"],
+                "order": alignment.get("order", 0),
                 "event": alignment["event"],
                 "story_purpose": alignment.get("story_purpose", ""),
+                "characters": list(alignment.get("characters", []) or []),
+                "source_provider": alignment.get("source_provider", ""),
                 "candidate_unit_ids": [
                     candidate["unit_id"]
                     for candidate in alignment["candidate_local_ranges"]
                 ],
+                "candidate_local_ranges": list(
+                    alignment["candidate_local_ranges"]
+                ),
                 "alignment_confidence": max(
                     (
                         float(candidate["confidence"])
@@ -1623,7 +2738,6 @@ def align_story_map(
                 "timing_authority": "none",
             }
             for alignment in research_prior_alignments
-            if alignment["candidate_local_ranges"]
         ]
         aligned_hints.sort(
             key=lambda item: (
@@ -1635,10 +2749,12 @@ def align_story_map(
             item for item in aligned_hints
             if item["prior_type"] == "episode_plot"
         ]
-        global_hints = plot_hints[:24] or [
+        transcript_hints = [
             item for item in aligned_hints
             if item["prior_type"] == "episode_transcript"
-        ][:12]
+            and item["candidate_unit_ids"]
+        ]
+        global_hints = plot_hints[:24] + transcript_hints[:80]
         result = semantic_interpreter.interpret(
             units=semantic_units,
             identity=identity,

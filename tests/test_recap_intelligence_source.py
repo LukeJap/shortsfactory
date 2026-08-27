@@ -4,6 +4,7 @@ import pytest
 
 from recap_intelligence.models import validate_story_map
 from recap_intelligence.source import (
+    SemanticInterpretationError,
     SemanticStoryInterpreter,
     SourceMismatchError,
     _align_research_priors,
@@ -520,6 +521,39 @@ def test_semantic_interpreter_repairs_copied_transcript(tmp_path):
     assert (tmp_path / "debug" / "semantic_story_diagnostics.json").exists()
 
 
+def test_local_semantic_interpretation_accepts_concise_complete_event():
+    units = [
+        {
+            "unit_id": "U001",
+            "start": 1.0,
+            "end": 3.0,
+            "transcript": "Tag, you're it, Patrick.",
+            "context_before": "",
+            "context_after": "",
+            "evidence_quality": 0.9,
+        }
+    ]
+    raw = {
+        "units": [
+            {
+                "unit_id": "U001",
+                "event": "Patrick is tagged.",
+                "characters": ["Patrick"],
+                "locations": [],
+                "motivation": "play",
+                "change": "Patrick becomes it.",
+                "emotional_conflict": "",
+                "narrative_signal": "turn",
+                "semantic_confidence": 0.8,
+            }
+        ]
+    }
+
+    normalized = SemanticStoryInterpreter._normalize_unit_interpretations(raw, units)
+
+    assert normalized[0]["event"] == "Patrick is tagged."
+
+
 def test_fandom_event_fuzzily_aligns_to_noisy_local_asr():
     priors = [
         {
@@ -770,3 +804,270 @@ def test_story_synthesis_repairs_uniform_roles_and_missing_causality():
         "payoff_climax",
     }
     assert result["beats"][2]["causal_children"] == ["B004"]
+
+
+def hybrid_units():
+    events = [
+        ("Maya receives a sealed letter from Noah.", "setup"),
+        ("Noah refuses the letter and leaves Maya behind.", "escalation"),
+        ("Maya asks Lena to help deliver the letter.", "attempt"),
+        ("Lena reveals that Noah's mother wrote the letter.", "reveal"),
+        ("Noah reads the letter and returns to Maya.", "payoff"),
+        ("Noah apologizes and reconciles with Maya.", "resolution"),
+    ]
+    return [
+        {
+            "unit_id": f"U{index:03d}",
+            "start": float(index * 10),
+            "end": float(index * 10 + 6),
+            "transcript": event,
+            "event": event,
+            "characters": ["Maya", "Noah"],
+            "locations": [],
+            "motivation": "Maya wants Noah to read the letter.",
+            "change": event,
+            "emotional_conflict": "Noah resists Maya.",
+            "narrative_signal": signal,
+            "semantic_confidence": 0.9,
+            "evidence_quality": 0.9,
+            "candidate_priors": [],
+        }
+        for index, (event, signal) in enumerate(events, start=1)
+    ]
+
+
+def hybrid_hints():
+    purposes = (
+        "setup",
+        "inciting_incident",
+        "attempt_failure",
+        "reversal",
+        "payoff_climax",
+        "resolution",
+    )
+    return [
+        {
+            "prior_id": f"P{index}",
+            "prior_type": "episode_plot",
+            "order": index,
+            "event": unit["event"],
+            "story_purpose": purpose,
+            "characters": unit["characters"],
+            "candidate_unit_ids": [unit["unit_id"]],
+            "candidate_local_ranges": [
+                {
+                    "unit_id": unit["unit_id"],
+                    "start": unit["start"],
+                    "end": unit["end"],
+                    "confidence": 0.88,
+                }
+            ],
+            "alignment_confidence": 0.88,
+        }
+        for index, (unit, purpose) in enumerate(
+            zip(hybrid_units(), purposes), start=1
+        )
+    ]
+
+
+def valid_hybrid_refinement(skeleton):
+    groups = []
+    for index, item in enumerate(skeleton, start=1):
+        groups.append(
+            {
+                "group_id": f"G{index:03d}",
+                "skeleton_ids": [item["skeleton_id"]],
+                "summary": (
+                    "A grounded story turn occurs as " + item["semantic_event"]
+                ),
+                "motivation": item["motivation"],
+                "change": item["change"],
+                "emotional_conflict": item["emotional_conflict"],
+                "payoff_significance": (
+                    "This grounded event changes the central conflict."
+                    if item["story_purpose"] in {"reversal_reveal", "payoff_climax"}
+                    else ""
+                ),
+                "importance_adjustment": 0.0,
+            }
+        )
+    return {
+        "groups": groups,
+        "causal_links": [
+            {
+                "parent_group_id": "G002",
+                "child_group_id": "G003",
+                "reason": "Noah's refusal causes Maya to seek help with the letter.",
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def test_hybrid_skeleton_preserves_supported_protected_roles_and_importance():
+    skeleton, exclusions = SemanticStoryInterpreter._build_story_skeleton(
+        hybrid_units(), hybrid_hints()
+    )
+
+    assert not exclusions
+    assert {item["story_purpose"] for item in skeleton if item["protected"]} >= {
+        "reversal_reveal",
+        "payoff_climax",
+        "resolution",
+    }
+    assert len({item["importance_prior"] for item in skeleton}) >= 4
+
+
+def test_hybrid_skeleton_does_not_promote_unaligned_or_contradicted_prior():
+    units = hybrid_units()
+    hints = hybrid_hints()
+    hints[0]["event"] = "Maya closes the red door and remains outside."
+    hints[0]["candidate_unit_ids"] = ["U001"]
+    hints[0]["candidate_local_ranges"] = [
+        {"unit_id": "U001", "start": 10.0, "end": 16.0, "confidence": 0.9}
+    ]
+    units[0]["event"] = "Maya opens the red door and enters the room."
+    hints.append(
+        {
+            "prior_id": "P_UNALIGNED",
+            "prior_type": "episode_plot",
+            "order": 7,
+            "event": "A dragon steals treasure from a distant castle.",
+            "story_purpose": "payoff_climax",
+            "candidate_unit_ids": [],
+            "candidate_local_ranges": [],
+        }
+    )
+
+    skeleton, exclusions = SemanticStoryInterpreter._build_story_skeleton(units, hints)
+
+    admitted = {item["research_id"] for item in skeleton}
+    assert "P1" not in admitted
+    assert "P_UNALIGNED" not in admitted
+    assert {item["research_id"] for item in exclusions} >= {"P1", "P_UNALIGNED"}
+
+
+def test_hybrid_skeleton_fills_large_gap_from_high_confidence_local_turn():
+    units = hybrid_units()
+    units[3]["event"] = "Noah chooses Lena, leaving Maya heartbroken and rejected."
+    units[3]["narrative_signal"] = "turn"
+    hints = [hybrid_hints()[index] for index in (0, 1, 4, 5)]
+
+    skeleton, _ = SemanticStoryInterpreter._build_story_skeleton(units, hints)
+
+    local_turn = next(
+        item for item in skeleton if item["semantic_event"] == units[3]["event"]
+    )
+    assert local_turn["research_id"] == ""
+    assert local_turn["story_purpose"] == "emotional_turn"
+    assert local_turn["semantic_unit_support"][0]["alignment_method"] == (
+        "local_semantic_gap_fill"
+    )
+
+
+def test_hybrid_choice_target_conflict_is_detected():
+    assert SemanticStoryInterpreter._events_conflict(
+        "Gary is given the choice and heads for Patrick.",
+        "Gary chooses to go with SpongeBob.",
+    )
+
+
+def test_hybrid_refinement_cannot_remove_protected_payoff():
+    units = hybrid_units()
+    skeleton, _ = SemanticStoryInterpreter._build_story_skeleton(
+        units, hybrid_hints()
+    )
+    raw = valid_hybrid_refinement(skeleton)
+    payoff_id = next(
+        item["skeleton_id"]
+        for item in skeleton
+        if item["story_purpose"] == "payoff_climax"
+    )
+    raw["groups"] = [
+        group for group in raw["groups"] if payoff_id not in group["skeleton_ids"]
+    ]
+
+    with pytest.raises(SemanticInterpretationError, match="protected"):
+        SemanticStoryInterpreter._normalize_hybrid_refinement(
+            raw, skeleton, units, "SEG_01", None
+        )
+
+
+def test_hybrid_merge_preserves_repeated_local_evidence_ranges():
+    units = hybrid_units()
+    skeleton, _ = SemanticStoryInterpreter._build_story_skeleton(
+        units, hybrid_hints()
+    )
+    first_attempt = next(
+        item for item in skeleton if item["story_purpose"] == "attempt_failure"
+    )
+    duplicate = dict(first_attempt)
+    duplicate["skeleton_id"] = "K999"
+    duplicate["research_id"] = "P_REPEAT"
+    duplicate["semantic_unit_support"] = [
+        {
+            "unit_id": "U002",
+            "start": units[1]["start"],
+            "end": units[1]["end"],
+            "event": units[1]["event"],
+            "alignment_confidence": 0.8,
+            "alignment_method": "semantic_local_alignment",
+        }
+    ]
+    skeleton.append(duplicate)
+    second_duplicate = dict(first_attempt)
+    second_duplicate["skeleton_id"] = "K998"
+    second_duplicate["research_id"] = "P_REPEAT_2"
+    second_duplicate["semantic_unit_support"] = [
+        {
+            "unit_id": "U004",
+            "start": units[3]["start"],
+            "end": units[3]["end"],
+            "event": units[3]["event"],
+            "alignment_confidence": 0.8,
+            "alignment_method": "semantic_local_alignment",
+        }
+    ]
+    skeleton.append(second_duplicate)
+    raw = valid_hybrid_refinement(skeleton)
+    attempt_group = next(
+        group for group in raw["groups"]
+        if first_attempt["skeleton_id"] in group["skeleton_ids"]
+    )
+    raw["groups"] = [
+        group for group in raw["groups"] if group["skeleton_ids"] != ["K999"]
+    ]
+    attempt_group["skeleton_ids"].append("K999")
+
+    result = SemanticStoryInterpreter._normalize_hybrid_refinement(
+        raw, skeleton, units, "SEG_01", None
+    )
+    merged = next(
+        beat for beat in result["beats"] if "P_REPEAT" in beat["research_plot_ids"]
+    )
+
+    assert merged["semantic_unit_ids"] == ["U002", "U003"]
+    assert len(merged["actual_video_evidence_ranges"]) == 2
+
+
+def test_hybrid_refinement_does_not_preserve_adjacency_as_causality():
+    units = hybrid_units()
+    skeleton, _ = SemanticStoryInterpreter._build_story_skeleton(
+        units, hybrid_hints()
+    )
+    raw = valid_hybrid_refinement(skeleton)
+    raw["causal_links"][0]["reason"] = "This happens next after the earlier event."
+
+    result = SemanticStoryInterpreter._normalize_hybrid_refinement(
+        raw, skeleton, units, "SEG_01", None
+    )
+
+    assert not any(
+        edge["reason"] == "This happens next after the earlier event."
+        for beat in result["beats"]
+        for edge in beat["causal_reasoning"]
+    )
+    assert any(
+        beat["story_purpose"] == "payoff_climax" and beat["causal_parents"]
+        for beat in result["beats"]
+    )
