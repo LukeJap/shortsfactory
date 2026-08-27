@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -19,6 +20,8 @@ from .models import SCHEMA_VERSION, utc_now, write_json
 
 
 STOP_WORDS = {
+    "and",
+    "are",
     "about",
     "after",
     "again",
@@ -28,9 +31,13 @@ STOP_WORDS = {
     "between",
     "could",
     "from",
+    "for",
     "have",
+    "her",
+    "his",
     "into",
     "that",
+    "the",
     "their",
     "there",
     "these",
@@ -42,6 +49,8 @@ STOP_WORDS = {
     "which",
     "with",
     "would",
+    "you",
+    "your",
 }
 TIMESTAMP_RE = re.compile(
     r"(?P<hours>\d{1,2}):(?P<minutes>\d{2}):(?P<seconds>\d{2}(?:[.,]\d{1,3})?)"
@@ -75,6 +84,18 @@ HYBRID_ROLE_IMPORTANCE = {
     "supporting_event": 0.35,
 }
 HYBRID_PROTECTED_ROLES = {"reversal_reveal", "payoff_climax", "resolution"}
+FANDOM_FAST_PATH_VERSION = "fandom-first-verified-story-v1"
+RICH_ROLE_IMPORTANCE = {
+    "setup": 0.38,
+    "inciting_incident": 0.82,
+    "escalation": 0.64,
+    "attempt_failure": 0.58,
+    "emotional_turn": 0.78,
+    "reversal_reveal": 0.94,
+    "payoff_climax": 0.98,
+    "resolution": 0.72,
+    "supporting_event": 0.44,
+}
 
 
 class SourceMismatchError(RuntimeError):
@@ -2572,7 +2593,793 @@ def _visual_ranges(
     return output
 
 
-def align_story_map(
+def _selected_research_records(
+    dossier: dict[str, Any],
+    selected_window: dict[str, Any],
+    field: str,
+) -> list[dict[str, Any]]:
+    selected_titles = {
+        normalize_title(str(value))
+        for value in selected_window.get("selected_titles", [])
+        if str(value).strip()
+    }
+    allowed_segment_ids = {
+        str(segment.get("segment_id", "") or "")
+        for segment in dossier.get("segments", [])
+        if isinstance(segment, dict)
+        and (
+            not selected_titles
+            or normalize_title(str(segment.get("title", "") or ""))
+            in selected_titles
+        )
+    }
+    return [
+        dict(item)
+        for item in dossier.get(field, [])
+        if isinstance(item, dict)
+        and (
+            not allowed_segment_ids
+            or not str(item.get("segment_id", "") or "")
+            or str(item.get("segment_id", "") or "") in allowed_segment_ids
+        )
+    ]
+
+
+def _fandom_event_text(event: dict[str, Any]) -> str:
+    return " ".join(
+        value
+        for value in (
+            str(event.get("dialogue", "") or "").strip(),
+            " ".join(str(value) for value in event.get("actions", []) or []),
+        )
+        if value
+    )
+
+
+def _rich_characters(
+    text: str,
+    explicit: Any,
+    known_characters: Sequence[str],
+) -> list[str]:
+    output = _unique_names(explicit)
+    normalized = f" {normalize_title(text)} "
+    for character in known_characters:
+        name = " ".join(str(character or "").split()).strip()
+        if not name or name in output:
+            continue
+        aliases = {normalize_title(name)}
+        first = normalize_title(name).split(" ", 1)[0]
+        if len(first) >= 4:
+            aliases.add(first)
+        if any(f" {alias} " in normalized for alias in aliases if alias):
+            output.append(name)
+    return output
+
+
+def _transcript_content_score(
+    research_text: str,
+    local_text: str,
+    ignored_tokens: set[str],
+) -> float | None:
+    research_tokens = _tokens(research_text) - ignored_tokens
+    local_tokens = _tokens(local_text) - ignored_tokens
+    exact_overlap = research_tokens & local_tokens
+    approximate_overlap = sum(
+        1
+        for token in research_tokens - exact_overlap
+        if len(token) >= 4
+        and any(
+            len(candidate) >= 4
+            and SequenceMatcher(None, token, candidate).ratio() >= 0.8
+            for candidate in local_tokens - exact_overlap
+        )
+    )
+    fuzzy = _fuzzy_token_score(research_text, local_text, ignored_tokens)
+    phrase = SequenceMatcher(
+        None,
+        " ".join(research_text.casefold().split()),
+        " ".join(local_text.casefold().split()),
+    ).ratio()
+    meaningful = bool(exact_overlap) and fuzzy >= 0.18
+    meaningful = meaningful or (
+        approximate_overlap >= 2 and fuzzy >= 0.35
+    ) or (
+        approximate_overlap >= 1 and fuzzy >= 0.5 and phrase >= 0.55
+    )
+    if not meaningful:
+        return None
+    distinctive = min(1.0, len(exact_overlap) / max(1, min(4, len(research_tokens))))
+    return round(min(0.99, 0.72 * fuzzy + 0.18 * distinctive + 0.1 * phrase), 4)
+
+
+def _align_fandom_transcript_to_local(
+    events: list[dict[str, Any]],
+    transcript: TranscriptData,
+    selected_window: dict[str, Any],
+    known_characters: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Align transcript events with a content-gated monotonic sequence pass."""
+    local_segments = [
+        segment
+        for segment in transcript.segments
+        if segment.end > float(selected_window["start"])
+        and segment.start < float(selected_window["end"])
+    ]
+    if not events or not local_segments:
+        return [
+            {
+                "event_id": str(event.get("event_id", "") or ""),
+                "order": int(event.get("order", index) or index),
+                "speaker": str(event.get("speaker", "") or ""),
+                "alignment_status": "unmatched",
+                "candidate_local_ranges": [],
+            }
+            for index, event in enumerate(events, start=1)
+        ]
+
+    token_frequency: dict[str, int] = {}
+    for event in events:
+        for token in _tokens(_fandom_event_text(event)):
+            token_frequency[token] = token_frequency.get(token, 0) + 1
+    character_tokens = {
+        token
+        for character in known_characters
+        for token in _tokens(str(character))
+    }
+    ignored_tokens = character_tokens | {
+        token
+        for token, count in token_frequency.items()
+        if count >= max(7, int(len(events) * 0.2))
+    }
+
+    candidates: list[list[float | None]] = []
+    for event_index, event in enumerate(events):
+        research_text = _fandom_event_text(event)
+        expected = event_index / max(1, len(events) - 1)
+        row: list[float | None] = []
+        for local_index, segment in enumerate(local_segments):
+            content_score = _transcript_content_score(
+                research_text,
+                segment.text,
+                ignored_tokens,
+            )
+            if content_score is None:
+                row.append(None)
+                continue
+            local_position = local_index / max(1, len(local_segments) - 1)
+            order_bonus = 0.08 * max(0.0, 1.0 - abs(expected - local_position))
+            row.append(round(content_score + order_bonus, 4))
+        candidates.append(row)
+
+    event_count = len(events)
+    local_count = len(local_segments)
+    scores = [[0.0] * (local_count + 1) for _ in range(event_count + 1)]
+    decisions = [[""] * (local_count + 1) for _ in range(event_count + 1)]
+    for event_index in range(1, event_count + 1):
+        for local_index in range(1, local_count + 1):
+            best = scores[event_index - 1][local_index]
+            decision = "skip_event"
+            if scores[event_index][local_index - 1] > best:
+                best = scores[event_index][local_index - 1]
+                decision = "skip_local"
+            candidate = candidates[event_index - 1][local_index - 1]
+            if candidate is not None:
+                matched = scores[event_index - 1][local_index - 1] + candidate
+                if matched > best:
+                    best = matched
+                    decision = "match"
+            scores[event_index][local_index] = best
+            decisions[event_index][local_index] = decision
+
+    matches: dict[int, tuple[int, float]] = {}
+    event_index = event_count
+    local_index = local_count
+    while event_index > 0 and local_index > 0:
+        decision = decisions[event_index][local_index]
+        if decision == "match":
+            score = candidates[event_index - 1][local_index - 1]
+            if score is not None:
+                matches[event_index - 1] = (local_index - 1, score)
+            event_index -= 1
+            local_index -= 1
+        elif decision == "skip_local":
+            local_index -= 1
+        else:
+            event_index -= 1
+
+    alignments: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        alignment = {
+            "event_id": str(event.get("event_id", "") or ""),
+            "order": int(event.get("order", index + 1) or index + 1),
+            "speaker": str(event.get("speaker", "") or ""),
+            "dialogue": str(event.get("dialogue", "") or ""),
+            "source_provider": str(event.get("source_provider", "") or ""),
+            "source_url": str(event.get("source_url", "") or ""),
+            "timing_authority": "local_source",
+            "alignment_method": "content_gated_monotonic_sequence",
+            "candidate_local_ranges": [],
+            "alignment_status": "unmatched",
+        }
+        if index in matches:
+            matched_index, score = matches[index]
+            segment = local_segments[matched_index]
+            alignment["alignment_status"] = "verified_candidate"
+            alignment["candidate_local_ranges"] = [
+                {
+                    "start": round(segment.start, 4),
+                    "end": round(segment.end, 4),
+                    "confidence": round(min(0.99, score), 4),
+                    "evidence_type": "fandom_transcript_bridge",
+                    "transcript_excerpt": segment.text,
+                    "fandom_event_id": alignment["event_id"],
+                    "speaker": alignment["speaker"],
+                }
+            ]
+        alignments.append(alignment)
+    return alignments
+
+
+def _plot_transcript_associations(
+    plot_points: list[dict[str, Any]],
+    transcript_events: list[dict[str, Any]],
+    transcript_alignments: list[dict[str, Any]],
+    known_characters: Sequence[str],
+) -> dict[str, list[dict[str, Any]]]:
+    aligned = {
+        str(item.get("event_id", "")): item
+        for item in transcript_alignments
+        if item.get("candidate_local_ranges")
+    }
+    character_tokens = {
+        token
+        for character in known_characters
+        for token in _tokens(str(character))
+    }
+    candidate_rows: list[list[dict[str, Any] | None]] = []
+    for plot_index, point in enumerate(plot_points):
+        summary = str(point.get("summary", "") or "")
+        point_characters = set(
+            _rich_characters(summary, point.get("characters", []), known_characters)
+        )
+        expected = plot_index / max(1, len(plot_points) - 1)
+        row: list[dict[str, Any] | None] = []
+        for event_index, event in enumerate(transcript_events):
+            event_id = str(event.get("event_id", "") or "")
+            alignment = aligned.get(event_id)
+            if alignment is None:
+                row.append(None)
+                continue
+            event_text = _fandom_event_text(event)
+            lexical = _fuzzy_token_score(summary, event_text, character_tokens)
+            summary_tokens = _tokens(summary) - character_tokens
+            event_tokens = _tokens(event_text) - character_tokens
+            overlap = summary_tokens & event_tokens
+            event_characters = set(
+                _rich_characters(
+                    event_text,
+                    [event.get("speaker", "")],
+                    known_characters,
+                )
+            )
+            character_overlap = bool(point_characters & event_characters)
+            meaningful = bool(overlap) and (
+                lexical >= 0.12 or len(overlap) >= 2
+            )
+            if not meaningful:
+                row.append(None)
+                continue
+            event_position = event_index / max(1, len(transcript_events) - 1)
+            proximity = max(0.0, 1.0 - abs(expected - event_position))
+            score = (
+                0.55 * lexical
+                + 0.2 * min(1.0, len(overlap) / 3)
+                + 0.1 * (1.0 if character_overlap else 0.0)
+                + 0.15 * proximity
+            )
+            row.append(
+                {
+                "event": dict(event),
+                "alignment": dict(alignment),
+                "association_confidence": round(min(0.99, score), 4),
+                }
+            )
+        candidate_rows.append(row)
+
+    plot_count = len(plot_points)
+    event_count = len(transcript_events)
+    scores = [[0.0] * (event_count + 1) for _ in range(plot_count + 1)]
+    decisions = [[""] * (event_count + 1) for _ in range(plot_count + 1)]
+    for plot_index in range(1, plot_count + 1):
+        for event_index in range(1, event_count + 1):
+            best = scores[plot_index - 1][event_index]
+            decision = "skip_plot"
+            if scores[plot_index][event_index - 1] > best:
+                best = scores[plot_index][event_index - 1]
+                decision = "skip_event"
+            candidate = candidate_rows[plot_index - 1][event_index - 1]
+            if candidate is not None:
+                candidate_score = float(candidate["association_confidence"])
+                advance_score = (
+                    scores[plot_index - 1][event_index - 1] + candidate_score
+                )
+                same_event_score = (
+                    scores[plot_index - 1][event_index] + candidate_score * 0.65
+                )
+                if advance_score > best:
+                    best = advance_score
+                    decision = "match_advance"
+                if same_event_score > best:
+                    best = same_event_score
+                    decision = "match_same"
+            scores[plot_index][event_index] = best
+            decisions[plot_index][event_index] = decision
+
+    selected: dict[int, dict[str, Any]] = {}
+    plot_index = plot_count
+    event_index = event_count
+    while plot_index > 0 and event_index > 0:
+        decision = decisions[plot_index][event_index]
+        if decision in {"match_advance", "match_same"}:
+            candidate = candidate_rows[plot_index - 1][event_index - 1]
+            if candidate is not None:
+                selected[plot_index - 1] = candidate
+            plot_index -= 1
+            if decision == "match_advance":
+                event_index -= 1
+        elif decision == "skip_event":
+            event_index -= 1
+        else:
+            plot_index -= 1
+
+    output: dict[str, list[dict[str, Any]]] = {}
+    for index, point in enumerate(plot_points):
+        plot_id = str(point.get("plot_id", "") or "")
+        output[plot_id] = [selected[index]] if index in selected else []
+    return output
+
+
+def _local_conflicts(research_text: str, local_text: str) -> list[str]:
+    research_tokens = _tokens(research_text)
+    local_tokens = _tokens(local_text)
+    opposites = (
+        ("open", "close"),
+        ("opens", "closes"),
+        ("inside", "outside"),
+        ("enter", "leave"),
+        ("enters", "leaves"),
+        ("return", "leave"),
+        ("returns", "leaves"),
+        ("accept", "refuse"),
+        ("accepts", "refuses"),
+        ("win", "lose"),
+        ("wins", "loses"),
+        ("stay", "leave"),
+        ("stays", "leaves"),
+    )
+    conflicts: list[str] = []
+    for left, right in opposites:
+        if left in research_tokens and right in local_tokens and right not in research_tokens:
+            conflicts.append(f"research says {left}; local evidence says {right}")
+        elif right in research_tokens and left in local_tokens and left not in research_tokens:
+            conflicts.append(f"research says {right}; local evidence says {left}")
+    return conflicts
+
+
+def _rich_story_purpose(value: Any) -> str:
+    purpose = str(value or "").strip().casefold()
+    aliases = {
+        "reversal": "reversal_reveal",
+        "reveal": "reversal_reveal",
+        "payoff": "payoff_climax",
+        "climax": "payoff_climax",
+        "complication": "escalation",
+        "synopsis": "supporting_event",
+    }
+    purpose = aliases.get(purpose, purpose)
+    return purpose if purpose in RICH_ROLE_IMPORTANCE else "supporting_event"
+
+
+def _supported_emotional_conflict(summary: str, explicit: Any) -> str:
+    value = " ".join(str(explicit or "").split()).strip()
+    if value:
+        return value
+    words = re.findall(
+        r"\b(?:heartbroken|jealous|jealousy|hurt|angry|devastated|forlorn|"
+        r"desperate|desperation|rejected|saddened|sad)\b",
+        summary,
+        flags=re.IGNORECASE,
+    )
+    return ", ".join(dict.fromkeys(word.casefold() for word in words))
+
+
+def _rich_importance(purpose: str, confidence: float, summary: str) -> float:
+    importance = RICH_ROLE_IMPORTANCE[purpose]
+    importance += 0.06 * (confidence - 0.5)
+    if any(
+        token in summary.casefold()
+        for token in ("choice", "realizes", "reveals", "returns", "all along")
+    ):
+        importance += 0.035
+    return round(max(0.2, min(0.99, importance)), 4)
+
+
+def _rich_story_map(
+    *,
+    identity: dict[str, Any],
+    dossier: dict[str, Any],
+    source_video: Path,
+    transcript_path: Path | None,
+    visual_evidence: Sequence[dict[str, Any]] | None,
+    scene_boundaries: Sequence[float] | None,
+    research_depth: dict[str, Any],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    transcript = (
+        load_transcript(transcript_path)
+        if transcript_path is not None and transcript_path.exists()
+        else TranscriptData(path="", segments=(), full_text="", duration=0.0)
+    )
+    try:
+        duration = probe_duration(source_video)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        duration = transcript.duration
+    duration = max(duration, transcript.duration)
+    selected_window = _selected_source_window(
+        identity, transcript, duration, scene_boundaries
+    )
+    plot_points = _selected_research_records(
+        dossier, selected_window, "ordered_plot_points"
+    )
+    transcript_events = _selected_research_records(
+        dossier, selected_window, "transcript_events"
+    )
+    known_characters = _unique_names(dossier.get("characters", []))
+
+    alignment_started = time.perf_counter()
+    transcript_alignments = _align_fandom_transcript_to_local(
+        transcript_events,
+        transcript,
+        selected_window,
+        known_characters,
+    )
+    associations = _plot_transcript_associations(
+        plot_points,
+        transcript_events,
+        transcript_alignments,
+        known_characters,
+    )
+    alignment_seconds = time.perf_counter() - alignment_started
+
+    construction_started = time.perf_counter()
+    beats: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    direct_matches = 0
+    bridge_matches = 0
+    for point in plot_points:
+        plot_id = str(point.get("plot_id", "") or "")
+        summary = " ".join(str(point.get("summary", "") or "").split())
+        if not plot_id or not summary:
+            continue
+        query = " ".join(
+            [
+                summary,
+                " ".join(str(value) for value in point.get("characters", []) or []),
+                " ".join(str(value) for value in point.get("locations", []) or []),
+            ]
+        )
+        evidence = _evidence_ranges(
+            query,
+            transcript,
+            window_start=float(selected_window["start"]),
+            window_end=float(selected_window["end"]),
+        )
+        accepted_direct_evidence: list[dict[str, Any]] = []
+        for local_range in evidence:
+            conflict_reasons = _local_conflicts(
+                summary, local_range.get("transcript_excerpt", "")
+            )
+            if conflict_reasons:
+                conflicts.append(
+                    {
+                        "research_plot_id": plot_id,
+                        "fandom_event_id": "",
+                        "local_range": {
+                            "start": local_range.get("start"),
+                            "end": local_range.get("end"),
+                        },
+                        "reasons": conflict_reasons,
+                        "resolution": "local_source_wins_range_excluded",
+                    }
+                )
+            else:
+                accepted_direct_evidence.append(local_range)
+        evidence = accepted_direct_evidence
+        if evidence:
+            direct_matches += 1
+        speakers: list[dict[str, Any]] = []
+        dialogue_candidates: list[dict[str, Any]] = []
+        bridge_used = False
+        for association in associations.get(plot_id, []):
+            event = association["event"]
+            alignment = association["alignment"]
+            for local_range in alignment.get("candidate_local_ranges", []):
+                conflict_reasons = _local_conflicts(summary, local_range.get("transcript_excerpt", ""))
+                if conflict_reasons:
+                    conflicts.append(
+                        {
+                            "research_plot_id": plot_id,
+                            "fandom_event_id": str(event.get("event_id", "") or ""),
+                            "local_range": {
+                                "start": local_range.get("start"),
+                                "end": local_range.get("end"),
+                            },
+                            "reasons": conflict_reasons,
+                            "resolution": "local_source_wins_range_excluded",
+                        }
+                    )
+                    continue
+                item = dict(local_range)
+                item["association_confidence"] = association["association_confidence"]
+                item["research_plot_id"] = plot_id
+                evidence.append(item)
+                bridge_used = True
+                speaker = " ".join(str(event.get("speaker", "") or "").split())
+                if speaker:
+                    speakers.append(
+                        {
+                            "speaker": speaker,
+                            "fandom_event_id": str(event.get("event_id", "") or ""),
+                            "start": item["start"],
+                            "end": item["end"],
+                            "confidence": item["confidence"],
+                        }
+                    )
+                dialogue = " ".join(str(event.get("dialogue", "") or "").split())
+                if dialogue and len(dialogue.split()) <= 32 and item["end"] - item["start"] <= 18:
+                    dialogue_candidates.append(
+                        {
+                            "start": item["start"],
+                            "end": item["end"],
+                            "score": item["confidence"],
+                            "speaker": speaker,
+                            "dialogue": dialogue,
+                            "reason": "Identity-locked speaker line aligned to local transcript evidence.",
+                        }
+                    )
+        if bridge_used:
+            bridge_matches += 1
+        deduped: list[dict[str, Any]] = []
+        seen_ranges: set[tuple[float, float, str]] = set()
+        for item in sorted(
+            evidence,
+            key=lambda value: (
+                float(value.get("start", 0.0)),
+                -float(value.get("confidence", 0.0)),
+            ),
+        ):
+            key = (
+                float(item.get("start", 0.0)),
+                float(item.get("end", 0.0)),
+                str(item.get("evidence_type", "")),
+            )
+            if key not in seen_ranges:
+                seen_ranges.add(key)
+                deduped.append(item)
+        if not deduped:
+            continue
+        source_start = min(float(item["start"]) for item in deduped)
+        source_end = max(float(item["end"]) for item in deduped)
+        confidence = max(float(item.get("confidence", 0.0)) for item in deduped)
+        deduped.extend(_visual_ranges(visual_evidence, source_start, source_end))
+        purpose = _rich_story_purpose(point.get("story_purpose"))
+        characters = _rich_characters(
+            summary,
+            point.get("characters", []),
+            known_characters,
+        )
+        beat = {
+            "beat_id": f"B{len(beats) + 1:03d}",
+            "chronological_order": len(beats) + 1,
+            "segment_id": str(point.get("segment_id", "") or ""),
+            "source_start": round(source_start, 4),
+            "source_end": round(source_end, 4),
+            "summary": summary,
+            "story_purpose": purpose,
+            "characters": characters,
+            "location": list(point.get("locations", []) or []),
+            "motivation": str(point.get("motivation", "") or ""),
+            "change": str(point.get("change", "") or ""),
+            "emotional_conflict": _supported_emotional_conflict(
+                summary, point.get("emotional_conflict")
+            ),
+            "payoff_significance": str(point.get("payoff_significance", "") or ""),
+            "importance": _rich_importance(purpose, confidence, summary),
+            "causal_parents": [],
+            "causal_children": [],
+            "causal_reasoning": [],
+            "research_plot_ids": [plot_id],
+            "research_provenance": [
+                dict(item)
+                for item in point.get("provenance", [])
+                if isinstance(item, dict)
+            ],
+            "speaker_attributions": speakers,
+            "original_dialogue_candidates": dialogue_candidates[:2],
+            "actual_video_evidence_ranges": deduped,
+            "verification_status": "verified",
+            "verification_method": (
+                "direct_local_and_fandom_transcript_bridge"
+                if bridge_used and any(
+                    item.get("evidence_type") == "transcript" for item in deduped
+                )
+                else "fandom_transcript_bridge"
+                if bridge_used
+                else "direct_local_alignment"
+            ),
+            "semantic_confidence": round(confidence, 4),
+            "confidence": round(confidence, 4),
+            "_research_parent_ids": list(point.get("causal_parents", []) or []),
+        }
+        beats.append(beat)
+
+    if transcript.segments and not beats:
+        raise SourceMismatchError(
+            "Rich episode research produced no plot events with meaningful local support."
+        )
+
+    plot_to_beat = {
+        plot_id: beat["beat_id"]
+        for beat in beats
+        for plot_id in beat.get("research_plot_ids", [])
+    }
+    by_id = {beat["beat_id"]: beat for beat in beats}
+    for index, beat in enumerate(beats):
+        parent_ids = [
+            plot_to_beat[parent]
+            for parent in beat.pop("_research_parent_ids", [])
+            if parent in plot_to_beat
+        ]
+        if index > 0:
+            previous = beats[index - 1]
+            pair = (previous["story_purpose"], beat["story_purpose"])
+            if pair in {
+                ("reversal_reveal", "payoff_climax"),
+                ("payoff_climax", "resolution"),
+            }:
+                parent_ids.append(previous["beat_id"])
+        beat["causal_parents"] = list(dict.fromkeys(parent_ids))
+        for parent in beat["causal_parents"]:
+            if parent in by_id:
+                by_id[parent]["causal_children"].append(beat["beat_id"])
+                beat["causal_reasoning"].append(
+                    {
+                        "parent": parent,
+                        "reason": "Explicit research relation or verified reveal-to-payoff sequence.",
+                    }
+                )
+
+    construction_seconds = time.perf_counter() - construction_started
+    confidences = [float(beat["confidence"]) for beat in beats]
+    segment_records: list[dict[str, Any]] = []
+    for segment_id in dict.fromkeys(
+        str(beat.get("segment_id", "") or "") for beat in beats
+    ):
+        if not segment_id:
+            continue
+        segment_records.append(
+            {
+                "segment_id": segment_id,
+                "title": next(
+                    (
+                        str(segment.get("title", "") or "")
+                        for segment in dossier.get("segments", [])
+                        if isinstance(segment, dict)
+                        and str(segment.get("segment_id", "") or "") == segment_id
+                    ),
+                    "",
+                ),
+                "beats": [
+                    beat for beat in beats if beat.get("segment_id") == segment_id
+                ],
+            }
+        )
+    total_seconds = time.perf_counter() - started
+    unmatched_plot_count = len(plot_points) - len(beats)
+    warnings = []
+    if not visual_evidence:
+        warnings.append(
+            "No visual observations supplied; timed local transcript is the verification authority."
+        )
+    if unmatched_plot_count:
+        warnings.append(
+            f"Excluded {unmatched_plot_count} research plot event(s) without meaningful local support."
+        )
+    if conflicts:
+        warnings.append(
+            f"Local evidence overruled {len(conflicts)} conflicting research alignment(s)."
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "canonical_identity": identity,
+        "source_video": str(source_video.expanduser().resolve()),
+        "source_identity": source_fingerprint(source_video),
+        "transcript": {
+            "path": transcript.path,
+            "segment_count": len(transcript.segments),
+            "duration": round(transcript.duration, 4),
+        },
+        "duration_seconds": round(duration, 4),
+        "selected_source_window": selected_window,
+        "scene_boundaries": [round(float(value), 4) for value in scene_boundaries or []],
+        "semantic_units": [],
+        "research_prior_alignments": transcript_alignments,
+        "plot_transcript_associations": {
+            plot_id: [
+                {
+                    "fandom_event_id": str(item["event"].get("event_id", "") or ""),
+                    "association_confidence": item["association_confidence"],
+                }
+                for item in items
+            ]
+            for plot_id, items in associations.items()
+        },
+        "research_conflicts": conflicts,
+        "keyframe_samples": [
+            {
+                "timestamp": round((beat["source_start"] + beat["source_end"]) / 2, 4),
+                "beat_id": beat["beat_id"],
+            }
+            for beat in beats
+        ],
+        "beats": beats,
+        "segments": segment_records,
+        "causal_graph": [
+            {
+                "parent": parent,
+                "child": beat["beat_id"],
+                "reason": next(
+                    (
+                        item["reason"]
+                        for item in beat.get("causal_reasoning", [])
+                        if item.get("parent") == parent
+                    ),
+                    "",
+                ),
+            }
+            for beat in beats
+            for parent in beat["causal_parents"]
+        ],
+        "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
+        "research_depth": research_depth,
+        "fast_path_diagnostics": {
+            "implementation_version": FANDOM_FAST_PATH_VERSION,
+            "research_depth": research_depth.get("level", "RICH"),
+            "selected_route": "fandom_first_verified_story",
+            "plot_event_count": len(plot_points),
+            "transcript_event_count": len(transcript_events),
+            "aligned_transcript_events": sum(
+                bool(item.get("candidate_local_ranges"))
+                for item in transcript_alignments
+            ),
+            "verified_plot_events": len(beats),
+            "verification_via_transcript_bridge": bridge_matches,
+            "direct_local_matches": direct_matches,
+            "conflict_count": len(conflicts),
+            "semantic_llm_call_count": 0,
+            "runtime_seconds": {
+                "alignment": round(alignment_seconds, 4),
+                "story_map_construction": round(construction_seconds, 4),
+                "optional_llm_refinement": 0.0,
+                "total_alignment_and_construction": round(total_seconds, 4),
+            },
+        },
+        "warnings": warnings,
+    }
+
+
+def _align_story_map_hybrid(
     *,
     identity: dict[str, Any],
     dossier: dict[str, Any],
@@ -2905,6 +3712,67 @@ def align_story_map(
         "confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
         "warnings": warnings,
     }
+
+
+def align_story_map(
+    *,
+    identity: dict[str, Any],
+    dossier: dict[str, Any],
+    source_video: Path,
+    transcript_path: Path | None = None,
+    visual_evidence: Sequence[dict[str, Any]] | None = None,
+    scene_boundaries: Sequence[float] | None = None,
+    semantic_interpreter: SemanticStoryInterpreter | None = None,
+    research_depth: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Route rich research to deterministic assembly and preserve hybrid fallback."""
+    if "source_evaluations" in dossier:
+        from .research import classify_research_depth, validate_research_grounding
+
+        validate_research_grounding(dossier)
+        depth = research_depth or classify_research_depth(dossier)
+    else:
+        depth = research_depth or {
+            "level": "POOR",
+            "route": "semantic_heavy_fallback",
+            "metrics": {},
+            "checks": {},
+            "reasons": ["Unclassified legacy dossier."],
+        }
+    if (
+        str(depth.get("level", "")).upper() == "RICH"
+        and str(depth.get("route", "")) == "fandom_first_verified_story"
+    ):
+        return _rich_story_map(
+            identity=identity,
+            dossier=dossier,
+            source_video=source_video,
+            transcript_path=transcript_path,
+            visual_evidence=visual_evidence,
+            scene_boundaries=scene_boundaries,
+            research_depth=depth,
+        )
+    story_map = _align_story_map_hybrid(
+        identity=identity,
+        dossier=dossier,
+        source_video=source_video,
+        transcript_path=transcript_path,
+        visual_evidence=visual_evidence,
+        scene_boundaries=scene_boundaries,
+        semantic_interpreter=semantic_interpreter,
+    )
+    story_map["research_depth"] = depth
+    story_map["fast_path_diagnostics"] = {
+        "implementation_version": FANDOM_FAST_PATH_VERSION,
+        "research_depth": depth.get("level", "POOR"),
+        "selected_route": depth.get("route", "semantic_heavy_fallback"),
+        "semantic_llm_call_count": (
+            getattr(getattr(semantic_interpreter, "model", None), "calls", None)
+            if semantic_interpreter is not None
+            else 0
+        ),
+    }
+    return story_map
 
 
 def validate_story_grounding(

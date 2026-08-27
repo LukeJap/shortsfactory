@@ -33,6 +33,12 @@ SOURCE_OUTCOMES = {
     "provider_error",
 }
 
+RESEARCH_DEPTH_ROUTES = {
+    "RICH": "fandom_first_verified_story",
+    "MEDIUM": "research_led_hybrid",
+    "POOR": "semantic_heavy_fallback",
+}
+
 
 def _tokens(value: str) -> set[str]:
     return {
@@ -84,7 +90,7 @@ def _normalize_plot_point(
         for item in raw.get("provenance", [])
         if isinstance(item, dict)
     ] if isinstance(raw.get("provenance", []), list) else []
-    return {
+    point = {
         "plot_id": plot_id,
         "order": order,
         "summary": summary,
@@ -99,6 +105,175 @@ def _normalize_plot_point(
         "source_providers": [provider],
         "provenance": provenance,
         "importance": float(raw.get("importance", 0.5) or 0.5),
+    }
+    for field in (
+        "motivation",
+        "emotional_conflict",
+        "change",
+        "payoff_significance",
+    ):
+        value = " ".join(str(raw.get(field, "") or "").split()).strip()
+        if value:
+            point[field] = value
+    return point
+
+
+def classify_research_depth(dossier: dict[str, Any]) -> dict[str, Any]:
+    """Classify identity-locked episode research for story-map routing."""
+    sources = [
+        item for item in dossier.get("sources", [])
+        if isinstance(item, dict)
+    ]
+    plot_points = [
+        item for item in dossier.get("ordered_plot_points", [])
+        if isinstance(item, dict) and str(item.get("summary", "")).strip()
+    ]
+    transcript_events = [
+        item for item in dossier.get("transcript_events", [])
+        if isinstance(item, dict)
+        and any(
+            (
+                str(item.get("speaker", "") or "").strip(),
+                str(item.get("dialogue", "") or "").strip(),
+                item.get("actions", []),
+            )
+        )
+    ]
+    fandom_episode_sources = [
+        item for item in sources
+        if str(item.get("provider", "")).casefold() == "fandom"
+        and str(item.get("source_type", "")).casefold() == "fandom_episode"
+        and str(item.get("assessment_status", "accepted")) == "accepted"
+    ]
+    fandom_transcript_sources = [
+        item for item in sources
+        if str(item.get("provider", "")).casefold() == "fandom"
+        and str(item.get("source_type", "")).casefold()
+        == "fandom_episode_transcript"
+        and str(item.get("assessment_status", "accepted")) == "accepted"
+    ]
+
+    identity = dossier.get("canonical_identity", {})
+    selected_titles = {
+        str(item.get("title", "") or "").strip().casefold()
+        for item in identity.get("segments", [])
+        if isinstance(item, dict) and item.get("title")
+    } if isinstance(identity, dict) else set()
+    selected_segment_ids = {
+        str(item.get("segment_id", "") or "")
+        for item in dossier.get("segments", [])
+        if isinstance(item, dict)
+        and (
+            not selected_titles
+            or str(item.get("title", "") or "").strip().casefold()
+            in selected_titles
+        )
+    }
+    evidence_segment_ids = {
+        str(item.get("segment_id", "") or "")
+        for item in plot_points + transcript_events
+        if str(item.get("segment_id", "") or "")
+    }
+    contaminated = bool(
+        selected_segment_ids
+        and evidence_segment_ids - selected_segment_ids
+    )
+
+    purposes = {
+        str(item.get("story_purpose", "") or "").strip().casefold()
+        for item in plot_points
+    }
+    distinct_events = {
+        " ".join(sorted(_tokens(str(item.get("summary", "") or ""))))
+        for item in plot_points
+        if _tokens(str(item.get("summary", "") or ""))
+    }
+    characters = _unique(
+        list(dossier.get("characters", []) or [])
+        + [
+            str(character)
+            for point in plot_points
+            for character in point.get("characters", []) or []
+        ]
+    )
+    has_conflict = bool(
+        purposes
+        & {
+            "inciting_incident",
+            "attempt_failure",
+            "emotional_turn",
+            "reversal",
+            "reversal_reveal",
+        }
+    )
+    has_ending = bool(
+        purposes
+        & {
+            "reversal",
+            "reversal_reveal",
+            "payoff",
+            "payoff_climax",
+            "climax",
+            "resolution",
+        }
+    )
+    synopsis_words = len(
+        str(dossier.get("detailed_synopsis", "") or "").split()
+    )
+    exact_fandom_episode = bool(fandom_episode_sources)
+    useful_transcript = bool(fandom_transcript_sources) and len(transcript_events) >= 8
+
+    rich_checks = {
+        "accepted_exact_fandom_episode": exact_fandom_episode,
+        "detailed_ordered_plot": len(plot_points) >= 8,
+        "distinct_plot_events": len(distinct_events) >= 7,
+        "central_conflict_represented": has_conflict,
+        "ending_or_payoff_represented": has_ending,
+        "named_characters": len(characters) >= 2,
+        "useful_transcript_or_deep_plot": useful_transcript
+        or (len(plot_points) >= 14 and synopsis_words >= 100),
+        "selected_segment_isolated": not contaminated,
+    }
+    if all(rich_checks.values()):
+        level = "RICH"
+    elif (
+        not contaminated
+        and bool(sources)
+        and (
+            len(plot_points) >= 2
+            or synopsis_words >= 35
+            or len(transcript_events) >= 4
+        )
+    ):
+        level = "MEDIUM"
+    else:
+        level = "POOR"
+
+    failed_checks = [name for name, passed in rich_checks.items() if not passed]
+    reasons = (
+        ["All rich episode-intelligence checks passed."]
+        if level == "RICH"
+        else [f"Rich check not met: {name}." for name in failed_checks]
+    )
+    if contaminated:
+        reasons.append("Research contains evidence from an unselected story segment.")
+    return {
+        "level": level,
+        "route": RESEARCH_DEPTH_ROUTES[level],
+        "metrics": {
+            "accepted_fandom_episode_sources": len(fandom_episode_sources),
+            "accepted_fandom_transcript_sources": len(fandom_transcript_sources),
+            "plot_event_count": len(plot_points),
+            "distinct_plot_event_count": len(distinct_events),
+            "transcript_event_count": len(transcript_events),
+            "named_character_count": len(characters),
+            "detailed_synopsis_word_count": synopsis_words,
+            "central_conflict_represented": has_conflict,
+            "ending_or_payoff_represented": has_ending,
+            "selected_segment_contamination": contaminated,
+        },
+        "checks": rich_checks,
+        "reasons": reasons,
     }
 
 

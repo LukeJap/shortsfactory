@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any, Sequence
 
 from .cache import ArtifactCache, cache_key, source_fingerprint
@@ -24,9 +25,11 @@ from .providers import FandomProvider, MediaWikiProvider, TMDBProvider, TVMazePr
 from .research import (
     ResearchProvider,
     ResearchService,
+    classify_research_depth,
     validate_research_grounding,
 )
 from .source import (
+    FANDOM_FAST_PATH_VERSION,
     SemanticStoryInterpreter,
     align_story_map,
     validate_story_grounding,
@@ -76,6 +79,7 @@ def run_recap_pipeline(
     semantic_model: JsonModel | None = None,
     use_cache: bool = True,
 ) -> dict[str, Path]:
+    intelligence_started = time.perf_counter()
     source_video = source_video.expanduser().resolve()
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
@@ -112,11 +116,13 @@ def run_recap_pipeline(
         prompt_version="recap-research-v3-fandom-identity-locked",
         model_version="deterministic-provider-synthesis-v4",
     )
+    research_started = time.perf_counter()
     dossier = (
         _cached_valid(cache, dossier_key, validate_research_dossier)
         if use_cache
         else None
     )
+    dossier_cache_hit = dossier is not None
     if dossier is None:
         result = ResearchService(
             research_providers or _default_research_providers()
@@ -127,7 +133,10 @@ def run_recap_pipeline(
     dossier_path = output_dir / "episode_research_dossier.json"
     validate_research_dossier(dossier)
     validate_research_grounding(dossier)
+    research_depth = classify_research_depth(dossier)
+    dossier["research_depth"] = research_depth
     write_json(dossier_path, dossier)
+    research_seconds = time.perf_counter() - research_started
 
     semantic_interpreter = None
     semantic_prompt_version = "no-semantic-model"
@@ -147,11 +156,12 @@ def run_recap_pipeline(
         },
         artifact="verified_story_map",
         prompt_version=(
-            "recap-source-align-v6-fandom-priors:"
+            f"recap-source-align-v7:{FANDOM_FAST_PATH_VERSION}:"
+            f"{research_depth['route']}:"
             f"{semantic_prompt_version}"
         ),
         model_version=(
-            "transcript-evidence-v6:"
+            "transcript-evidence-v7:"
             f"{semantic_model_version}"
         ),
     )
@@ -160,6 +170,7 @@ def run_recap_pipeline(
         if use_cache
         else None
     )
+    story_cache_hit = story_map is not None
     if story_map is None:
         story_map = align_story_map(
             identity=identity,
@@ -169,6 +180,7 @@ def run_recap_pipeline(
             visual_evidence=visual_evidence,
             scene_boundaries=scene_boundaries,
             semantic_interpreter=semantic_interpreter,
+            research_depth=research_depth,
         )
         if use_cache:
             cache.put(story_key, story_map)
@@ -176,6 +188,36 @@ def run_recap_pipeline(
     validate_story_map(story_map)
     validate_story_grounding(story_map, dossier)
     write_json(story_path, story_map)
+
+    a1_a4_seconds = time.perf_counter() - intelligence_started
+    runtime_path = output_dir / ".story_debug" / "intelligence_runtime.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        runtime_path,
+        {
+            "research_depth": research_depth,
+            "selected_route": research_depth["route"],
+            "cache": {
+                "dossier_hit": dossier_cache_hit,
+                "story_map_hit": story_cache_hit,
+            },
+            "runtime_seconds": {
+                "research": round(research_seconds, 4),
+                "alignment": story_map.get("fast_path_diagnostics", {})
+                .get("runtime_seconds", {})
+                .get("alignment", 0.0),
+                "story_map_construction": story_map.get(
+                    "fast_path_diagnostics", {}
+                )
+                .get("runtime_seconds", {})
+                .get("story_map_construction", 0.0),
+                "optional_llm_refinement": 0.0
+                if research_depth["level"] == "RICH"
+                else None,
+                "total_a1_a4": round(a1_a4_seconds, 4),
+            },
+        },
+    )
 
     recap_writer = writer or TemplateRecapWriter()
     set_debug_dir = getattr(recap_writer, "set_debug_dir", None)

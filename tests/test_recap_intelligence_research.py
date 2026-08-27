@@ -5,6 +5,7 @@ import pytest
 from recap_intelligence.research import (
     ResearchGroundingError,
     ResearchService,
+    classify_research_depth,
     validate_research_grounding,
 )
 
@@ -330,3 +331,106 @@ def test_fandom_provider_failure_is_nonfatal_when_other_research_exists():
 
     assert result.dossier["sources"][0]["provider"] == "tvmaze"
     assert any("temporary outage" in warning for warning in result.warnings)
+
+
+def test_rich_fandom_research_selects_fast_path():
+    dossier = ResearchService(
+        [
+            FandomProvider(
+                fetch_json=fandom_fetch(),
+                wiki_urls=["https://spongebob.fandom.test"],
+            )
+        ]
+    ).collect(fandom_identity()).dossier
+    base_points = list(dossier["ordered_plot_points"])
+    while len(dossier["ordered_plot_points"]) < 8:
+        source = dict(base_points[len(dossier["ordered_plot_points"]) % len(base_points)])
+        source["plot_id"] = f"EXTRA_{len(dossier['ordered_plot_points']):03d}"
+        source["summary"] += f" Distinct event {len(dossier['ordered_plot_points'])}."
+        dossier["ordered_plot_points"].append(source)
+    base_event = dict(dossier["transcript_events"][0])
+    while len(dossier["transcript_events"]) < 8:
+        event = dict(base_event)
+        event["event_id"] = f"EXTRA_T{len(dossier['transcript_events']):03d}"
+        event["dialogue"] = f"Distinct line {len(dossier['transcript_events'])}."
+        dossier["transcript_events"].append(event)
+    dossier["ordered_plot_points"][-2]["story_purpose"] = "reversal"
+    dossier["ordered_plot_points"][-1]["story_purpose"] = "resolution"
+
+    depth = classify_research_depth(dossier)
+
+    assert depth["level"] == "RICH"
+    assert depth["route"] == "fandom_first_verified_story"
+
+
+def test_medium_and_poor_research_keep_fallback_routes():
+    medium = {
+        "sources": [{"provider": "tvmaze", "source_type": "episode_database"}],
+        "ordered_plot_points": [
+            {"summary": "A conflict begins."},
+            {"summary": "The conflict ends."},
+        ],
+        "transcript_events": [],
+        "characters": ["A", "B"],
+    }
+    poor = {
+        "sources": [],
+        "ordered_plot_points": [],
+        "transcript_events": [],
+    }
+
+    assert classify_research_depth(medium)["route"] == "research_led_hybrid"
+    assert classify_research_depth(poor)["route"] == "semantic_heavy_fallback"
+
+
+def test_wrong_franchise_and_sister_contamination_never_classify_rich():
+    wrong_franchise = {
+        "canonical_identity": fandom_identity(),
+        "sources": [],
+        "source_evaluations": [
+            {"provider": "fandom", "status": "rejected_identity_mismatch"}
+        ],
+        "ordered_plot_points": [
+            {"summary": f"Distinct episode event {index}.", "story_purpose": "reversal"}
+            for index in range(10)
+        ],
+        "transcript_events": [],
+        "characters": ["One", "Two"],
+    }
+    contaminated = {
+        **wrong_franchise,
+        "sources": [
+            {
+                "provider": "fandom",
+                "source_type": "fandom_episode",
+                "assessment_status": "accepted",
+            },
+            {
+                "provider": "fandom",
+                "source_type": "fandom_episode_transcript",
+                "assessment_status": "accepted",
+            },
+        ],
+        "segments": [{"segment_id": "SEG_01", "title": "Dumped"}],
+        "ordered_plot_points": [
+            {
+                "summary": f"Distinct selected event {index}.",
+                "story_purpose": "resolution" if index == 9 else "attempt_failure",
+                "segment_id": "SEG_02" if index == 3 else "SEG_01",
+            }
+            for index in range(10)
+        ],
+        "transcript_events": [
+            {
+                "dialogue": f"Distinct line {index}.",
+                "segment_id": "SEG_01",
+            }
+            for index in range(10)
+        ],
+        "characters": ["One", "Two"],
+    }
+
+    assert classify_research_depth(wrong_franchise)["level"] != "RICH"
+    contaminated_depth = classify_research_depth(contaminated)
+    assert contaminated_depth["level"] != "RICH"
+    assert contaminated_depth["metrics"]["selected_segment_contamination"] is True

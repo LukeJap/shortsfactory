@@ -7,6 +7,9 @@ from recap_intelligence.source import (
     SemanticInterpretationError,
     SemanticStoryInterpreter,
     SourceMismatchError,
+    TranscriptData,
+    TranscriptSegment,
+    _align_fandom_transcript_to_local,
     _align_research_priors,
     _research_priors,
     align_story_map,
@@ -1071,3 +1074,254 @@ def test_hybrid_refinement_does_not_preserve_adjacency_as_causality():
         beat["story_purpose"] == "payoff_climax" and beat["causal_parents"]
         for beat in result["beats"]
     )
+
+
+def rich_depth():
+    return {
+        "level": "RICH",
+        "route": "fandom_first_verified_story",
+        "metrics": {},
+        "checks": {},
+        "reasons": ["fixture"],
+    }
+
+
+def test_fandom_transcript_alignment_is_monotonic_and_content_gated():
+    events = [
+        {
+            "event_id": "T1",
+            "order": 1,
+            "speaker": "Ari",
+            "dialogue": "Unlock the vault.",
+            "actions": [],
+        },
+        {
+            "event_id": "T2",
+            "order": 2,
+            "speaker": "Bea",
+            "dialogue": "Pull the red lever.",
+            "actions": [],
+        },
+        {
+            "event_id": "T3",
+            "order": 3,
+            "speaker": "Ari",
+            "dialogue": "The crown vanished.",
+            "actions": [],
+        },
+    ]
+    transcript = TranscriptData(
+        path="fixture.json",
+        segments=(
+            TranscriptSegment(1, 2, "The red lever is only decoration."),
+            TranscriptSegment(3, 4, "Unlock the vault now."),
+            TranscriptSegment(5, 6, "Pull the red lever."),
+            TranscriptSegment(7, 8, "The weather stays calm."),
+        ),
+        full_text="",
+        duration=8,
+    )
+
+    aligned = _align_fandom_transcript_to_local(
+        events,
+        transcript,
+        {"start": 0.0, "end": 8.0},
+        ["Ari", "Bea"],
+    )
+
+    assert aligned[0]["candidate_local_ranges"][0]["start"] == 3
+    assert aligned[1]["candidate_local_ranges"][0]["start"] == 5
+    assert aligned[2]["candidate_local_ranges"] == []
+
+
+def test_rich_path_verifies_plot_through_transcript_bridge_and_keeps_speakers(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "episode.mp4"
+    source.write_bytes(b"source")
+    transcript_path = tmp_path / "subtitles.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"start": 1, "end": 3, "text": "Ari loses the family treasure."},
+                    {"start": 4, "end": 6, "text": "It's under the blue cushion."},
+                    {"start": 7, "end": 9, "text": "Ari realizes the truth."},
+                    {"start": 10, "end": 12, "text": "The treasure is safely returned."},
+                    {"start": 13, "end": 15, "text": "Bea walks home relieved."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("recap_intelligence.source.probe_duration", lambda path: 16.0)
+    plot_points = [
+        {
+            "plot_id": "P1",
+            "order": 1,
+            "summary": "Ari loses the family treasure.",
+            "story_purpose": "inciting_incident",
+            "characters": ["Ari"],
+            "causal_parents": [],
+        },
+        {
+            "plot_id": "P2",
+            "order": 2,
+            "summary": "The hidden heirloom is discovered beneath the furniture.",
+            "story_purpose": "reversal",
+            "characters": ["Ari"],
+            "motivation": "recover the missing heirloom",
+            "causal_parents": [],
+        },
+        {
+            "plot_id": "P3",
+            "order": 3,
+            "summary": "Ari realizes the truth.",
+            "story_purpose": "payoff_climax",
+            "characters": ["Ari"],
+            "causal_parents": ["P2"],
+        },
+        {
+            "plot_id": "P4",
+            "order": 4,
+            "summary": "The treasure is safely returned.",
+            "story_purpose": "payoff_climax",
+            "characters": ["Ari"],
+            "causal_parents": ["P3"],
+        },
+        {
+            "plot_id": "P5",
+            "order": 5,
+            "summary": "Bea walks home relieved.",
+            "story_purpose": "resolution",
+            "characters": ["Bea"],
+            "causal_parents": ["P4"],
+        },
+    ]
+    transcript_events = [
+        {
+            "event_id": "T1",
+            "order": 1,
+            "speaker": "Ari",
+            "dialogue": "I lost the family treasure.",
+            "actions": [],
+        },
+        {
+            "event_id": "T2",
+            "order": 2,
+            "speaker": "Bea",
+            "dialogue": "The heirloom is under the blue cushion.",
+            "actions": [],
+        },
+        {
+            "event_id": "T3",
+            "order": 3,
+            "speaker": "Ari",
+            "dialogue": "I realize the truth.",
+            "actions": [],
+        },
+        {
+            "event_id": "T4",
+            "order": 4,
+            "speaker": "Ari",
+            "dialogue": "The treasure is safely returned.",
+            "actions": [],
+        },
+        {
+            "event_id": "T5",
+            "order": 5,
+            "speaker": "Bea",
+            "dialogue": "I walk home relieved.",
+            "actions": [],
+        },
+    ]
+    story_map = align_story_map(
+        identity={"canonical_id": "fixture", "series_title": "Fixture"},
+        dossier={
+            "ordered_plot_points": plot_points,
+            "transcript_events": transcript_events,
+            "characters": ["Ari", "Bea"],
+        },
+        source_video=source,
+        transcript_path=transcript_path,
+        research_depth=rich_depth(),
+    )
+
+    validate_story_map(story_map)
+    bridge = next(beat for beat in story_map["beats"] if "P2" in beat["research_plot_ids"])
+    assert bridge["verification_method"] == "fandom_transcript_bridge"
+    assert bridge["source_start"] == 4
+    assert bridge["speaker_attributions"][0]["speaker"] == "Bea"
+    assert bridge["motivation"] == "recover the missing heirloom"
+    assert "revenge" not in str(story_map).casefold()
+    assert {beat["story_purpose"] for beat in story_map["beats"]} >= {
+        "reversal_reveal",
+        "payoff_climax",
+        "resolution",
+    }
+    assert max(beat["importance"] for beat in story_map["beats"]) - min(
+        beat["importance"] for beat in story_map["beats"]
+    ) > 0.1
+    assert story_map["fast_path_diagnostics"]["semantic_llm_call_count"] == 0
+
+
+def test_rich_path_records_local_conflict_and_local_source_wins(tmp_path, monkeypatch):
+    source = tmp_path / "episode.mp4"
+    source.write_bytes(b"source")
+    transcript_path = tmp_path / "subtitles.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"start": 1, "end": 3, "text": "Maya opens the red door."},
+                    {"start": 4, "end": 6, "text": "Maya finds the key."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("recap_intelligence.source.probe_duration", lambda path: 7.0)
+    story_map = align_story_map(
+        identity={"canonical_id": "fixture"},
+        dossier={
+            "ordered_plot_points": [
+                {
+                    "plot_id": "P1",
+                    "summary": "Maya closes the red door.",
+                    "story_purpose": "setup",
+                    "characters": ["Maya"],
+                },
+                {
+                    "plot_id": "P2",
+                    "summary": "Maya finds the key.",
+                    "story_purpose": "resolution",
+                    "characters": ["Maya"],
+                },
+            ],
+            "transcript_events": [
+                {
+                    "event_id": "T1",
+                    "order": 1,
+                    "speaker": "Maya",
+                    "dialogue": "Maya closes the red door.",
+                    "actions": [],
+                },
+                {
+                    "event_id": "T2",
+                    "order": 2,
+                    "speaker": "Maya",
+                    "dialogue": "Maya finds the key.",
+                    "actions": [],
+                },
+            ],
+            "characters": ["Maya"],
+        },
+        source_video=source,
+        transcript_path=transcript_path,
+        research_depth=rich_depth(),
+    )
+
+    assert [beat["research_plot_ids"] for beat in story_map["beats"]] == [["P2"]]
+    assert story_map["research_conflicts"][0]["research_plot_id"] == "P1"
+    assert story_map["research_conflicts"][0]["resolution"] == "local_source_wins_range_excluded"
