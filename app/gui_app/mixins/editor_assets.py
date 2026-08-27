@@ -188,6 +188,7 @@ class EditorAssetsMixin:
                 "SFX",
                 "AI_VISUAL",
                 "EMOJI",
+                "VOICEOVER",
             }:
                 continue
 

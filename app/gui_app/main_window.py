@@ -58,12 +58,16 @@ from .settings_keys import (
     FX_INTENSITY,
     MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
+    RECAP_TARGET_DURATION_SECONDS,
+    RECAP_VOICE,
     SFX_MODE,
     TRANSCRIPTION_QUALITY,
 )
 from .style import STYLESHEET
 from .timeline_widget import SuggestionSlider
 from .widgets import DropZone, TimelineNavigator
+
+from recap_media.orpheus_provider import DEFAULT_VOICE as DEFAULT_ORPHEUS_VOICE
 
 from .mixins.ai_clip_hunter import AIClipHunterMixin
 from .mixins.ai_visual_pipeline import AIVisualPipelineMixin
@@ -75,6 +79,7 @@ from .mixins.emoji_preview import EmojiPreviewMixin
 from .mixins.image_ai import ImageAIMixin
 from .mixins.music import MusicMixin
 from .mixins.playback import PlaybackMixin
+from .mixins.recap import RecapMixin
 from .mixins.render_pipeline import RenderPipelineMixin
 from .mixins.settings import SettingsMixin
 from .mixins.transcript import TranscriptMixin
@@ -97,6 +102,7 @@ class ShortsFactoryWindow(
     AIVisualPreviewMixin,
     EmojiPreviewMixin,
     CaptionPreviewMixin,
+    RecapMixin,
 ):
 
     def __init__(self):
@@ -485,6 +491,27 @@ class ShortsFactoryWindow(
                 True,
             )
         ).strip().lower() not in ("false", "0", "")
+
+        self.recap_voice = str(
+            self.settings.value(
+                RECAP_VOICE,
+                DEFAULT_ORPHEUS_VOICE,
+            )
+            or DEFAULT_ORPHEUS_VOICE
+        )
+        try:
+            self.recap_target_duration_seconds = max(
+                10,
+                int(
+                    self.settings.value(
+                        RECAP_TARGET_DURATION_SECONDS,
+                        120,
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self.recap_target_duration_seconds = 120
+        self.recap_sequence = None
 
         try:
             self.min_emoji_events = max(
@@ -927,6 +954,166 @@ class ShortsFactoryWindow(
 
         edit_style_layout.addLayout(fx_intensity_row)
 
+        self.recap_button = QPushButton("✦ CREATE AI RECAP")
+        self.recap_button.setObjectName("QuietButton")
+        self.recap_button.setCheckable(True)
+        self.recap_button.setToolTip(
+            "AI Recap Mode: turn a full episode into a narrated recap "
+            "short. Requires Track A's research/story files under "
+            "output/recap/ (episode_identity.json, verified_story_map.json, "
+            "recap_script.json)."
+        )
+        self.recap_button.clicked.connect(self.toggle_recap_panel)
+
+        self.recap_frame = QFrame()
+        self.recap_frame.setObjectName("EditStylePanel")
+        self.recap_frame.setVisible(False)
+        recap_layout = QVBoxLayout(self.recap_frame)
+        recap_layout.setContentsMargins(10, 9, 10, 10)
+        recap_layout.setSpacing(7)
+
+        recap_title = QLabel("AI RECAP")
+        recap_title.setObjectName("TinyLabel")
+        recap_layout.addWidget(recap_title)
+
+        self.recap_status_label = QLabel("Recap Intelligence: not checked.")
+        self.recap_status_label.setObjectName("ImageAIStatus")
+        self.recap_status_label.setWordWrap(True)
+        recap_layout.addWidget(self.recap_status_label)
+
+        recap_duration_row = QHBoxLayout()
+        recap_duration_row.setSpacing(8)
+        recap_duration_label = QLabel("TARGET DURATION (s)")
+        recap_duration_label.setObjectName("TinyLabel")
+        self.recap_duration_spinbox = QSpinBox()
+        self.recap_duration_spinbox.setObjectName("CompactSpinBox")
+        self.recap_duration_spinbox.setRange(10, 600)
+        self.recap_duration_spinbox.setValue(self.recap_target_duration_seconds)
+        self.recap_duration_spinbox.setToolTip(
+            "Preferred recap length -- a stored preference. Track A's own "
+            "recap_script.json target is reported after generating the "
+            "sequence."
+        )
+        self.recap_duration_spinbox.valueChanged.connect(
+            self.recap_target_duration_changed
+        )
+        recap_duration_row.addWidget(recap_duration_label)
+        recap_duration_row.addWidget(self.recap_duration_spinbox)
+        recap_duration_row.addStretch()
+        recap_layout.addLayout(recap_duration_row)
+
+        recap_voice_row = QHBoxLayout()
+        recap_voice_row.setSpacing(8)
+        recap_voice_label = QLabel("VOICE")
+        recap_voice_label.setObjectName("TinyLabel")
+        self.recap_voice_combo = QComboBox()
+        self.recap_voice_combo.setObjectName("CompactCombo")
+        self.recap_voice_combo.addItem(self.recap_voice)
+        self.recap_voice_combo.setToolTip(
+            "Orpheus-FastAPI voice used for narration. Refresh to query "
+            "the local Orpheus server; falls back to the known default "
+            "voice set when it isn't reachable."
+        )
+        self.recap_voice_combo.currentTextChanged.connect(self.recap_voice_changed)
+        self.recap_refresh_voices_button = QPushButton("⟳")
+        self.recap_refresh_voices_button.setObjectName("TinyButton")
+        self.recap_refresh_voices_button.setToolTip(
+            "Refresh the voice list from Orpheus-FastAPI."
+        )
+        self.recap_refresh_voices_button.clicked.connect(self.refresh_recap_voices)
+        recap_voice_row.addWidget(recap_voice_label)
+        recap_voice_row.addWidget(self.recap_voice_combo, 1)
+        recap_voice_row.addWidget(self.recap_refresh_voices_button)
+        recap_layout.addLayout(recap_voice_row)
+
+        recap_actions_row = QHBoxLayout()
+        recap_actions_row.setSpacing(6)
+        self.generate_recap_sequence_button = QPushButton("Generate Sequence")
+        self.generate_recap_sequence_button.setObjectName("QuietButton")
+        self.generate_recap_sequence_button.setEnabled(False)
+        self.generate_recap_sequence_button.setToolTip(
+            "Load Track A's episode identity/story map/recap script and "
+            "assemble the exact shot sequence."
+        )
+        self.generate_recap_sequence_button.clicked.connect(
+            self.generate_recap_sequence
+        )
+
+        self.generate_recap_voiceover_button = QPushButton("Generate Voiceover")
+        self.generate_recap_voiceover_button.setObjectName("QuietButton")
+        self.generate_recap_voiceover_button.setEnabled(False)
+        self.generate_recap_voiceover_button.setToolTip(
+            "Synthesize narration for every segment via the local "
+            "Orpheus-FastAPI server and place them on the VOICEOVER "
+            "timeline lane."
+        )
+        self.generate_recap_voiceover_button.clicked.connect(
+            self.generate_recap_voiceover
+        )
+
+        recap_actions_row.addWidget(self.generate_recap_sequence_button)
+        recap_actions_row.addWidget(self.generate_recap_voiceover_button)
+        recap_layout.addLayout(recap_actions_row)
+
+        self.recap_voiceover_list = QListWidget()
+        self.recap_voiceover_list.setObjectName("TranscriptList")
+        self.recap_voiceover_list.setFixedHeight(110)
+        self.recap_voiceover_list.setToolTip(
+            "Narration segments placed on the VOICEOVER timeline lane."
+        )
+        self.recap_voiceover_list.currentRowChanged.connect(
+            self.update_recap_voiceover_context
+        )
+        recap_layout.addWidget(self.recap_voiceover_list)
+
+        recap_context_row = QHBoxLayout()
+        recap_context_row.setSpacing(6)
+
+        self.recap_voiceover_volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.recap_voiceover_volume_slider.setObjectName("MusicVolumeSlider")
+        self.recap_voiceover_volume_slider.setRange(0, 100)
+        self.recap_voiceover_volume_slider.setValue(100)
+        self.recap_voiceover_volume_slider.setEnabled(False)
+        self.recap_voiceover_volume_slider.setToolTip(
+            "Selected narration segment's volume."
+        )
+        self.recap_voiceover_volume_slider.valueChanged.connect(
+            self.recap_voiceover_volume_changed
+        )
+
+        self.recap_voiceover_toggle_button = QPushButton("Disable")
+        self.recap_voiceover_toggle_button.setObjectName("QuietButton")
+        self.recap_voiceover_toggle_button.setEnabled(False)
+        self.recap_voiceover_toggle_button.clicked.connect(
+            self.toggle_selected_recap_voiceover_clip
+        )
+
+        self.recap_voiceover_regenerate_button = QPushButton("Regenerate")
+        self.recap_voiceover_regenerate_button.setObjectName("QuietButton")
+        self.recap_voiceover_regenerate_button.setEnabled(False)
+        self.recap_voiceover_regenerate_button.clicked.connect(
+            self.regenerate_selected_recap_voiceover_clip
+        )
+
+        self.recap_voiceover_delete_button = QPushButton("Delete")
+        self.recap_voiceover_delete_button.setObjectName("CutButton")
+        self.recap_voiceover_delete_button.setEnabled(False)
+        self.recap_voiceover_delete_button.clicked.connect(
+            self.delete_selected_recap_voiceover_clip
+        )
+
+        recap_context_row.addWidget(self.recap_voiceover_volume_slider)
+        recap_context_row.addWidget(self.recap_voiceover_toggle_button)
+        recap_context_row.addWidget(self.recap_voiceover_regenerate_button)
+        recap_context_row.addWidget(self.recap_voiceover_delete_button)
+        recap_layout.addLayout(recap_context_row)
+
+        self.recap_log = QTextEdit()
+        self.recap_log.setReadOnly(True)
+        self.recap_log.setFixedHeight(90)
+        self.recap_log.setPlaceholderText("Recap generation log will appear here...")
+        recap_layout.addWidget(self.recap_log)
+
         source_layout.addWidget(left_title)
         source_layout.addWidget(self.drop_zone, 1)
         source_layout.addWidget(self.file_label)
@@ -935,6 +1122,8 @@ class ShortsFactoryWindow(
         source_layout.addSpacing(6)
         source_layout.addWidget(self.find_clips_button)
         source_layout.addWidget(edit_style_frame)
+        source_layout.addWidget(self.recap_button)
+        source_layout.addWidget(self.recap_frame)
 
         workspace.addWidget(source_frame)
 
