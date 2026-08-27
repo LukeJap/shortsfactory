@@ -572,9 +572,197 @@ def test_narration_plan_chooses_conflict_hook_instead_of_chronological_setup():
 
     assert plan["hook"]["beat_ids"] == ["B004"]
     assert plan["minimum_setup"]["beat_ids"] == ["B002"]
+    assert plan["planned_segments"][:2] == [
+        {
+            "plan_id": "P01",
+            "function": "hook",
+            "beat_ids": ["B004"],
+            "target_words": 39,
+            "word_range": [31, 47],
+        },
+        {
+            "plan_id": "P02",
+            "function": "setup",
+            "beat_ids": ["B002"],
+            "target_words": 38,
+            "word_range": [30, 46],
+        },
+    ]
     assert plan["payoff_climax"]["beat_ids"] == ["B006"]
     assert plan["planned_segments"][-2]["function"] == "reversal_payoff"
     assert plan["planned_segments"][-2]["target_words"] > plan["planned_segments"][0]["target_words"]
+
+
+def causal_attempt_story_map():
+    purposes = [
+        "setup",
+        "inciting_incident",
+        "conflict_escalation",
+        "attempt_failure",
+        "attempt_failure",
+        "escalation",
+        "attempt_failure",
+        "escalation",
+        "escalation",
+        "escalation",
+        "attempt_failure",
+        "escalation",
+        "reversal_reveal",
+        "climax_payoff",
+        "resolution",
+    ]
+    summaries = [
+        "The relationship starts in a stable place.",
+        "A new arrangement creates pressure.",
+        "The lead must choose between two relationships.",
+        "Hurt by that choice, the lead tries to cope.",
+        "The lead tries a first replacement.",
+        "That replacement fails in a new way.",
+        "The lead tries another replacement.",
+        "That attempt becomes even worse.",
+        "A final replacement still cannot solve the loss.",
+        "The other person returns while the conflict is unresolved.",
+        "The lead makes one last desperate response.",
+        "That response puts the hidden explanation in motion.",
+        "A hidden fact explains the apparent rejection.",
+        "The relationship is restored after the reveal.",
+        "The other person reacts to the restored relationship.",
+    ]
+    beats = []
+    for index, (purpose, summary) in enumerate(zip(purposes, summaries), start=1):
+        beats.append(
+            {
+                "beat_id": f"B{index:03d}",
+                "chronological_order": index,
+                "summary": summary,
+                "story_purpose": purpose,
+                "verification_status": "verified",
+                "importance": 0.65,
+                "emotional_conflict": "hurt" if index == 4 else "",
+                "causal_parents": [f"B{index - 1:03d}"] if index > 1 else [],
+                "causal_children": [f"B{index + 1:03d}"] if index < len(purposes) else [],
+                "actual_video_evidence_ranges": [
+                    {
+                        "start": float(index * 10),
+                        "end": float(index * 10 + 4),
+                        "confidence": 0.9,
+                        "evidence_type": "transcript",
+                    }
+                ],
+                "original_dialogue_candidates": [],
+            }
+        )
+    return {"beats": beats}
+
+
+def test_plan_retains_central_choice_before_downstream_coping():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+
+    assert plan["hook"]["beat_ids"] == ["B003"]
+    selected = [
+        beat_id
+        for segment in plan["planned_segments"]
+        for beat_id in segment["beat_ids"]
+    ]
+    assert selected.index("B003") < selected.index("B004")
+
+
+def test_downstream_attempt_consequence_cannot_become_hook_without_conflict():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+
+    assert plan["hook"]["beat_ids"] == ["B003"]
+    assert "B004" not in plan["hook"]["beat_ids"]
+
+
+def test_plan_compresses_repeated_attempts_without_dropping_their_beats():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+
+    compressed = next(
+        segment
+        for segment in plan["planned_segments"]
+        if segment["beat_ids"] == [
+            "B004",
+            "B005",
+            "B006",
+            "B007",
+            "B008",
+            "B009",
+            "B010",
+        ]
+    )
+    assert compressed["function"] == "escalation"
+    assert compressed["target_words"] >= 64
+
+
+def test_plan_keeps_reveal_payoff_and_resolution_protected():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+
+    assert plan["reversal"]["beat_ids"] == ["B013"]
+    assert plan["payoff_climax"]["beat_ids"] == ["B014"]
+    assert plan["resolution_button"]["beat_ids"] == ["B015"]
+
+
+def test_plan_role_budgets_are_normalized_to_preferred_total():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+
+    assert 280 <= plan["planned_word_count"] <= 320
+    assert sum(item["target_words"] for item in plan["planned_segments"]) == plan[
+        "planned_word_count"
+    ]
+
+
+def test_plan_budget_normalization_preserves_relative_story_weighting():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+    budgets = {
+        item["plan_id"]: item["target_words"]
+        for item in plan["planned_segments"]
+    }
+
+    assert budgets["P06"] >= budgets["P03"] > budgets["P04"]
+    assert budgets["P03"] > budgets["P01"] > budgets["P02"]
+
+
+def test_plan_budget_normalization_keeps_opening_and_button_compact():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+    budgets = {
+        item["function"]: item["target_words"]
+        for item in plan["planned_segments"]
+        if item["function"] in {"hook", "setup", "resolution"}
+    }
+
+    assert budgets["hook"] <= 40
+    assert budgets["setup"] <= 40
+    assert budgets["resolution"] <= 25
+
+
+def test_plan_budget_normalization_keeps_payoff_protected():
+    plan = build_narration_plan(causal_attempt_story_map(), RecapWritingConfig())
+    payoff = next(
+        item for item in plan["planned_segments"] if item["function"] == "reversal_payoff"
+    )
+
+    assert payoff["target_words"] >= 52
+    assert payoff["target_words"] > next(
+        item["target_words"]
+        for item in plan["planned_segments"]
+        if item["function"] == "hook"
+    )
+
+
+def test_sparse_plan_is_not_padded_to_the_preferred_total():
+    plan = build_narration_plan(story_map(), RecapWritingConfig())
+
+    assert plan["planned_word_count"] == 39
+    assert plan["planned_segments"][0]["target_words"] == 39
+
+
+def test_plan_budget_never_exceeds_configured_hard_ceiling():
+    plan = build_narration_plan(
+        causal_attempt_story_map(),
+        RecapWritingConfig(maximum_word_count=280),
+    )
+
+    assert plan["planned_word_count"] == 280
 
 
 def test_underbudget_draft_gets_one_targeted_grounded_expansion():

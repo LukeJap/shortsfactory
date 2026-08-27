@@ -285,6 +285,110 @@ def _hook_score(beat: dict[str, Any]) -> float:
     return score
 
 
+def _is_attempt_or_consequence(beat: dict[str, Any]) -> bool:
+    purpose = _purpose(beat)
+    return any(token in purpose for token in ("attempt", "failure", "consequence"))
+
+
+def _is_downstream_reaction(beat: dict[str, Any]) -> bool:
+    if _is_attempt_or_consequence(beat):
+        return True
+    purpose = _purpose(beat)
+    return _meaningful_text(beat.get("emotional_conflict")) and any(
+        token in purpose for token in ("reaction", "response", "coping")
+    )
+
+
+def _central_conflict_prerequisite(
+    beats: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Find the available choice or conflict that makes a later response legible."""
+    downstream = next((beat for beat in beats if _is_downstream_reaction(beat)), None)
+    if downstream is None:
+        return None
+    order = int(downstream.get("chronological_order", 0) or 0)
+    candidates = [
+        beat
+        for beat in beats
+        if int(beat.get("chronological_order", 0) or 0) < order
+        and not _is_attempt_or_consequence(beat)
+        and "setup" not in _purpose(beat)
+    ]
+    if not candidates:
+        return None
+
+    choice_terms = ("choice", "choose", "chooses", "chose", "reject", "refuse", "leave", "lose", "abandon")
+
+    def score(beat: dict[str, Any]) -> tuple[int, int, float]:
+        summary = str(beat.get("summary", "") or "").casefold()
+        purpose = _purpose(beat)
+        semantic_priority = int(any(term in summary for term in choice_terms))
+        semantic_priority += int(
+            any(term in purpose for term in ("inciting", "conflict", "escalation"))
+        )
+        return (
+            semantic_priority,
+            int(beat.get("chronological_order", 0) or 0),
+            float(beat.get("importance", 0.5) or 0.5),
+        )
+
+    return max(candidates, key=score)
+
+
+def _middle_story_groups(middle: list[dict[str, Any]]) -> list[tuple[list[str], bool]]:
+    """Compress dense repeated attempts without discarding their evidence IDs."""
+    groups: list[tuple[list[str], bool]] = []
+    index = 0
+    while index < len(middle):
+        attempt_indexes = [
+            position
+            for position in range(index, len(middle))
+            if _is_attempt_or_consequence(middle[position])
+        ]
+        if attempt_indexes:
+            cluster = [attempt_indexes[0]]
+            for position in attempt_indexes[1:]:
+                if position - cluster[-1] <= 3:
+                    cluster.append(position)
+                else:
+                    break
+            if len(cluster) >= 2:
+                end = min(len(middle), cluster[-1] + 4)
+                groups.append(
+                    (
+                        [
+                            str(beat["beat_id"])
+                            for beat in middle[index:end]
+                        ],
+                        True,
+                    )
+                )
+                index = end
+                continue
+
+        # Keep an isolated later response with the event immediately before and
+        # after it, so a new response does not become a detached consequence.
+        if (
+            index + 2 < len(middle)
+            and _is_attempt_or_consequence(middle[index + 1])
+        ):
+            groups.append(
+                (
+                    [
+                        str(beat["beat_id"])
+                        for beat in middle[index : index + 3]
+                    ],
+                    False,
+                )
+            )
+            index += 3
+            continue
+
+        groups.append(([str(middle[index]["beat_id"])], False))
+        index += 1
+    return groups
+
+
 def _choice_payload(beat_ids: list[str], intent: str) -> dict[str, Any]:
     return {"beat_ids": beat_ids, "intent": intent}
 
@@ -298,6 +402,80 @@ def _segment_budget(function: str, beat_count: int) -> int:
         "resolution": 25,
     }.get(function, 42)
     return base + max(0, beat_count - 1) * 6
+
+
+def _normalize_plan_budgets(
+    planned_segments: list[dict[str, Any]],
+    config: RecapWritingConfig,
+) -> None:
+    """Scale only over-budget plans while retaining their story-role weighting."""
+    current_total = sum(
+        int(segment.get("target_words", 0) or 0) for segment in planned_segments
+    )
+    if not planned_segments or current_total <= 0:
+        return
+
+    hard_ceiling = min(340, max(1, config.maximum_word_count))
+    complexity_allowance = min(10, max(0, len(planned_segments) - 6) * 2)
+    preferred_ceiling = min(hard_ceiling, 310 + complexity_allowance)
+    target_total = min(current_total, preferred_ceiling)
+    if current_total <= target_total:
+        return
+
+    role_floors = {
+        "hook": 24,
+        "setup": 22,
+        "escalation": 32,
+        "reversal_payoff": 52,
+        "resolution": 14,
+    }
+    floors = [
+        role_floors.get(str(segment.get("function", "")), 18)
+        for segment in planned_segments
+    ]
+    floor_total = sum(floors)
+    if floor_total > target_total:
+        scale = target_total / floor_total
+        floors = [max(1, int(floor * scale)) for floor in floors]
+        while sum(floors) > target_total:
+            largest = max(range(len(floors)), key=lambda index: floors[index])
+            floors[largest] -= 1
+
+    raw_allocations = [
+        int(segment["target_words"]) * target_total / current_total
+        for segment in planned_segments
+    ]
+    allocations = [
+        max(floor, int(allocation))
+        for floor, allocation in zip(floors, raw_allocations)
+    ]
+    while sum(allocations) < target_total:
+        index = max(
+            range(len(allocations)),
+            key=lambda position: (
+                raw_allocations[position] - allocations[position],
+                raw_allocations[position],
+                -position,
+            ),
+        )
+        allocations[index] += 1
+    while sum(allocations) > target_total:
+        candidates = [
+            index
+            for index, allocation in enumerate(allocations)
+            if allocation > floors[index]
+        ]
+        if not candidates:
+            break
+        index = max(
+            candidates,
+            key=lambda position: (allocations[position], -position),
+        )
+        allocations[index] -= 1
+
+    for segment, target_words in zip(planned_segments, allocations):
+        segment["target_words"] = target_words
+        segment["word_range"] = [max(12, target_words - 8), target_words + 8]
 
 
 def build_narration_plan(
@@ -318,8 +496,9 @@ def build_narration_plan(
         )
     ]
     signaled = [beat for beat in non_terminal if _has_story_signal(beat)]
+    central_conflict = _central_conflict_prerequisite(beats)
     hook_pool = signaled or non_terminal or beats
-    hook = max(hook_pool, key=_hook_score)
+    hook = central_conflict or max(hook_pool, key=_hook_score)
     hook_id = str(hook["beat_id"])
     hook_order = int(hook.get("chronological_order", 0) or 0)
 
@@ -376,11 +555,18 @@ def build_narration_plan(
 
     planned_segments: list[dict[str, Any]] = []
 
-    def add_segment(function: str, beat_ids: list[str]) -> None:
+    def add_segment(
+        function: str,
+        beat_ids: list[str],
+        *,
+        compressed_attempts: bool = False,
+    ) -> None:
         ids = list(dict.fromkeys(value for value in beat_ids if value))
         if not ids:
             return
         target = _segment_budget(function, len(ids))
+        if compressed_attempts:
+            target = min(88, target)
         planned_segments.append(
             {
                 "plan_id": f"P{len(planned_segments) + 1:02d}",
@@ -392,7 +578,8 @@ def build_narration_plan(
         )
 
     setup_id = str(setup["beat_id"]) if setup is not None else ""
-    add_segment("hook", [hook_id, setup_id])
+    add_segment("hook", [hook_id])
+    add_segment("setup", [setup_id])
     used = {hook_id, setup_id} - {""}
 
     terminal_ids = {str(beat["beat_id"]) for beat in terminal}
@@ -402,8 +589,17 @@ def build_narration_plan(
         for beat_id in selected_ids
         if beat_id not in used | terminal_ids | resolution_ids
     ]
-    for index in range(0, len(middle), 2):
-        add_segment("escalation", middle[index : index + 2])
+    middle_beats = [
+        _beat_map(story_map, verified_only=True)[beat_id]
+        for beat_id in middle
+        if beat_id in _beat_map(story_map, verified_only=True)
+    ]
+    for beat_ids, compressed_attempts in _middle_story_groups(middle_beats):
+        add_segment(
+            "escalation",
+            beat_ids,
+            compressed_attempts=compressed_attempts,
+        )
     add_segment(
         "reversal_payoff",
         [str(beat["beat_id"]) for beat in terminal],
@@ -416,6 +612,8 @@ def build_narration_plan(
     # Tiny fixtures and genuinely tiny stories still need a useful plan.
     if not planned_segments:
         add_segment("hook", [hook_id])
+
+    _normalize_plan_budgets(planned_segments, config)
 
     sections: list[dict[str, Any]] = []
     if len(planned_segments) <= 2:
