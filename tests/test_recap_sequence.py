@@ -18,10 +18,19 @@ from recap_media.sequence import (
 )
 
 
-def _candidate(start, end, score=0.9, reason="test", visual_function=None):
+def _candidate(
+    start,
+    end,
+    score=0.9,
+    reason="test",
+    visual_function=None,
+    beat_id=None,
+):
     candidate = {"start": start, "end": end, "score": score, "reason": reason}
     if visual_function is not None:
         candidate["visual_function"] = visual_function
+    if beat_id is not None:
+        candidate["beat_id"] = beat_id
     return candidate
 
 
@@ -195,6 +204,93 @@ def test_legacy_sequence_assembly_is_unchanged_without_a_story_map():
     shot = result["segments"][0]["shots"][0]
     assert shot["start"] == 10.0
     assert shot["candidate_origin"] == "recap_script"
+
+
+def test_multi_beat_default_candidates_cover_distinct_beats():
+    segment = _segment(beat_ids=["B001", "B002", "B003"])
+    candidates = [
+        _candidate(10.0, 13.0, score=0.5, beat_id="B001"),
+        _candidate(20.0, 23.0, score=0.5, beat_id="B002"),
+        _candidate(30.0, 33.0, score=0.5, beat_id="B003"),
+    ]
+
+    result = assemble_sequence(
+        _script([_segment(beat_ids=["B001", "B002", "B003"], candidate_visuals=candidates)]),
+        {"VO_001": 7.0},
+    )
+
+    assert {shot["beat_id"] for shot in result["segments"][0]["shots"]} == {
+        "B001",
+        "B002",
+        "B003",
+    }
+
+
+def test_new_beat_coverage_beats_redundant_same_beat_when_quality_is_comparable():
+    segment = _segment(
+        beat_ids=["B001", "B002"],
+        candidate_visuals=[
+            _candidate(10.0, 13.0, score=0.8, beat_id="B001"),
+            _candidate(20.0, 23.0, score=0.75, beat_id="B001"),
+            _candidate(30.0, 33.0, score=0.7, beat_id="B002"),
+        ],
+    )
+
+    result = assemble_sequence(_script([segment]), {"VO_001": 4.0})
+
+    shots = result["segments"][0]["shots"]
+    assert shots[0]["beat_id"] == "B001"
+    assert shots[1]["beat_id"] == "B002"
+
+
+def test_weak_new_beat_evidence_does_not_flood_a_sequence():
+    segment = _segment(
+        beat_ids=["B001", "B002", "B003"],
+        candidate_visuals=[
+            _candidate(10.0, 13.0, score=0.1, beat_id="B001"),
+            _candidate(20.0, 23.0, score=0.1, beat_id="B002"),
+            _candidate(30.0, 33.0, score=0.1, beat_id="B003"),
+        ],
+    )
+
+    result = assemble_sequence(_script([segment]), {"VO_001": 7.0})
+
+    assert len(result["segments"][0]["shots"]) == 1
+
+
+def test_multi_beat_shots_are_chronological_after_score_selection():
+    segment = _segment(
+        beat_ids=["B001", "B002", "B003"],
+        candidate_visuals=[
+            _candidate(20.0, 23.0, score=0.9, beat_id="B001"),
+            _candidate(10.0, 13.0, score=0.7, beat_id="B002"),
+            _candidate(30.0, 33.0, score=0.6, beat_id="B003"),
+        ],
+    )
+
+    result = assemble_sequence(_script([segment]), {"VO_001": 7.0})
+
+    assert [shot["start"] for shot in result["segments"][0]["shots"]] == [10.0, 20.0, 30.0]
+
+
+def test_sequence_keeps_segment_order_when_source_times_are_nonchronological():
+    first = _segment(
+        segment_id="VO_001",
+        order=1,
+        candidate_visuals=[_candidate(50.0, 53.0)],
+    )
+    second = _segment(
+        segment_id="VO_002",
+        order=2,
+        candidate_visuals=[_candidate(10.0, 13.0)],
+    )
+
+    result = assemble_sequence(
+        _script([first, second]), {"VO_001": 2.0, "VO_002": 2.0}
+    )
+
+    assert [segment["segment_id"] for segment in result["segments"]] == ["VO_001", "VO_002"]
+    assert [segment["shots"][0]["start"] for segment in result["segments"]] == [50.0, 10.0]
 
 
 # ============================================================

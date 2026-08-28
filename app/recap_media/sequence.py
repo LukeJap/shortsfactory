@@ -123,6 +123,9 @@ VISUAL_FUNCTION_PROGRESSION_ORDER = [
 DIVERSITY_BONUS = 0.15
 REUSE_PENALTY = 0.5
 ADJACENT_SAME_FUNCTION_PENALTY = 0.2
+# A verified source range from an assigned beat not yet represented in the
+# thought is editorially more useful than another generic illustrative range.
+BEAT_COVERAGE_BONUS = 0.18
 
 # Below this score, adding another shot isn't worth it -- stop selection
 # short of target_duration rather than pad with a low-value/reused shot
@@ -330,14 +333,12 @@ def _selection_score(
     used_ranges: set[tuple[float, float]],
     functions_used: set[str],
     last_function: str | None,
+    covered_beat_ids: set[str],
 ) -> float:
     """
-    B28's "internal score": Track A's own semantic relevance, plus a
-    diversity bonus (this visual function hasn't been used yet in this
-    segment), minus a reuse penalty (this exact range already appears
-    elsewhere in the sequence) and a same-function-as-immediately-
-    before penalty (B29 -- avoid two near-duplicate-feeling shots back
-    to back).
+    B28's internal score: semantic relevance, visual-function diversity,
+    and coverage of a not-yet-represented assigned beat, minus reuse and
+    redundant adjacent-function penalties.
     """
 
     score = float(candidate["score"])
@@ -345,10 +346,19 @@ def _selection_score(
     if visual_function not in functions_used:
         score += DIVERSITY_BONUS
 
+    beat_id = candidate.get("beat_id")
+    adds_beat_coverage = isinstance(beat_id, str) and beat_id not in covered_beat_ids
+    if adds_beat_coverage:
+        score += BEAT_COVERAGE_BONUS
+
     if _range_key(candidate) in used_ranges:
         score -= REUSE_PENALTY
 
-    if last_function is not None and visual_function == last_function:
+    if (
+        last_function is not None
+        and visual_function == last_function
+        and not (visual_function == DEFAULT_VISUAL_FUNCTION and adds_beat_coverage)
+    ):
         score -= ADJACENT_SAME_FUNCTION_PENALTY
 
     return score
@@ -364,6 +374,26 @@ def _reorder_for_progression(shots: list[dict[str, Any]]) -> list[dict[str, Any]
             return VISUAL_FUNCTION_PROGRESSION_ORDER.index(DEFAULT_VISUAL_FUNCTION)
 
     return sorted(shots, key=rank)
+
+
+def _order_selected_shots(
+    shots: list[dict[str, Any]],
+    segment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Keep a multi-beat narration thought in source/story chronology.
+
+    Score selection decides which ranges earn inclusion. For ordinary source
+    narration spanning several beats, their final playback order should still
+    follow the verified source timeline. Single-beat and special-presentation
+    segments retain the existing visual-function progression behavior.
+    """
+
+    if (
+        segment.get("presentation_hint") == "narration_over_source"
+        and len(set(segment.get("beat_ids", []))) > 1
+    ):
+        return sorted(shots, key=lambda shot: (shot["start"], shot["end"]))
+    return _reorder_for_progression(shots)
 
 
 def select_shots(
@@ -382,6 +412,7 @@ def select_shots(
     remaining_candidates = list(candidates)
     remaining = target_duration
     functions_used: set[str] = set()
+    covered_beat_ids: set[str] = set()
     last_function: str | None = None
 
     while (
@@ -398,6 +429,7 @@ def select_shots(
                     used_ranges,
                     functions_used,
                     last_function,
+                    covered_beat_ids,
                 ),
                 candidate,
             )
@@ -440,11 +472,14 @@ def select_shots(
 
         used_ranges.add(_range_key(best_candidate))
         remaining_candidates.remove(best_candidate)
+        beat_id = best_candidate.get("beat_id")
+        if isinstance(beat_id, str):
+            covered_beat_ids.add(beat_id)
         functions_used.add(visual_function)
         last_function = visual_function
         remaining -= shot_duration
 
-    return _reorder_for_progression(shots)
+    return _order_selected_shots(shots, segment)
 
 
 def assemble_sequence(
