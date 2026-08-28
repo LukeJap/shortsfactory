@@ -277,6 +277,58 @@ def load_verified_story_map(path: Path = VERIFIED_STORY_MAP_PATH) -> dict[str, A
     data = _read_json(path, label)
     _require_schema_version(data, label)
 
+    raw_beats = data.get("beats")
+    if isinstance(raw_beats, list) and any(
+        isinstance(beat, dict)
+        and "order" not in beat
+        and "chronological_order" in beat
+        for beat in raw_beats
+    ):
+        normalized_beats: list[dict[str, Any]] = []
+        seen_chronological_orders: set[int] = set()
+        for index, raw_beat in enumerate(raw_beats):
+            beat_label = f"{label} beats[{index}]"
+            if not isinstance(raw_beat, dict):
+                normalized_beats.append(raw_beat)
+                continue
+            beat = dict(raw_beat)
+            chronological_order = _require_int(
+                beat,
+                "chronological_order",
+                beat_label,
+                minimum=1,
+            )
+            if chronological_order in seen_chronological_orders:
+                raise RecapInputError(
+                    f"{label} has ambiguous chronological_order {chronological_order!r}"
+                )
+            seen_chronological_orders.add(chronological_order)
+            beat["order"] = chronological_order
+            if "source_evidence" not in beat:
+                source_ranges = beat.get("actual_video_evidence_ranges", [])
+                if not isinstance(source_ranges, list):
+                    raise RecapInputError(
+                        f"{beat_label} field 'actual_video_evidence_ranges' must be a list"
+                    )
+                normalized_ranges = []
+                for range_index, item in enumerate(source_ranges):
+                    if not isinstance(item, dict):
+                        raise RecapInputError(
+                            f"{beat_label}.actual_video_evidence_ranges[{range_index}] "
+                            "must be a JSON object"
+                        )
+                    normalized_ranges.append(
+                        {
+                            "start": item.get("start"),
+                            "end": item.get("end"),
+                            "type": item.get("evidence_type"),
+                            "confidence": item.get("confidence"),
+                        }
+                    )
+                beat["source_evidence"] = normalized_ranges
+            normalized_beats.append(beat)
+        data = {**data, "beats": normalized_beats}
+
     beats = _require_list(data, "beats", label, allow_empty=False)
     seen_beat_ids: set[str] = set()
 

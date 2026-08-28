@@ -31,6 +31,46 @@ def _valid_recap_script() -> dict:
     return copy.deepcopy(_load_fixture("recap_script.json"))
 
 
+def _track_a_story_map() -> dict:
+    return {
+        "schema_version": 1,
+        "beats": [
+            {
+                "beat_id": "B002",
+                "chronological_order": 2,
+                "summary": "The consequence changes the relationship.",
+                "importance": 0.9,
+                "story_purpose": "payoff_climax",
+                "research_provenance": [{"provider": "example"}],
+                "actual_video_evidence_ranges": [
+                    {
+                        "start": 20.0,
+                        "end": 24.0,
+                        "evidence_type": "transcript",
+                        "confidence": 0.9,
+                    }
+                ],
+            },
+            {
+                "beat_id": "B001",
+                "chronological_order": 1,
+                "summary": "The conflict starts the story.",
+                "importance": 0.8,
+                "story_purpose": "inciting_incident",
+                "research_provenance": [{"provider": "example"}],
+                "actual_video_evidence_ranges": [
+                    {
+                        "start": 10.0,
+                        "end": 14.0,
+                        "evidence_type": "transcript",
+                        "confidence": 0.8,
+                    }
+                ],
+            },
+        ],
+    }
+
+
 def _track_a_tv_identity() -> dict:
     return {
         "schema_version": 1,
@@ -118,6 +158,29 @@ def test_canonical_compound_selection_uses_selected_segment_not_sister(tmp_path)
 def test_load_verified_story_map_valid_fixture():
     data = load_verified_story_map(FIXTURES_DIR / "verified_story_map.json")
     assert [beat["beat_id"] for beat in data["beats"]] == ["B001", "B002"]
+
+
+def test_load_verified_story_map_accepts_track_a_chronological_order(tmp_path):
+    source = _track_a_story_map()
+    loaded = load_verified_story_map(
+        _write(tmp_path / "verified_story_map.json", source)
+    )
+
+    assert [beat["order"] for beat in loaded["beats"]] == [2, 1]
+    assert loaded["beats"][0]["story_purpose"] == "payoff_climax"
+    assert loaded["beats"][0]["research_provenance"] == [{"provider": "example"}]
+    assert loaded["beats"][0]["source_evidence"] == [
+        {"start": 20.0, "end": 24.0, "type": "transcript", "confidence": 0.9}
+    ]
+
+
+def test_track_a_explicit_chronology_is_not_redefined_by_array_order(tmp_path):
+    loaded = load_verified_story_map(
+        _write(tmp_path / "verified_story_map.json", _track_a_story_map())
+    )
+
+    assert [beat["beat_id"] for beat in loaded["beats"]] == ["B002", "B001"]
+    assert [beat["order"] for beat in loaded["beats"]] == [2, 1]
 
 
 def test_load_recap_script_valid_fixture():
@@ -239,6 +302,14 @@ def test_story_map_empty_beats_raises(tmp_path):
     path = _write(tmp_path / "verified_story_map.json", data)
     with pytest.raises(RecapInputError, match="beats"):
         load_verified_story_map(path)
+
+
+def test_track_a_story_map_missing_chronological_order_fails(tmp_path):
+    data = _track_a_story_map()
+    del data["beats"][0]["chronological_order"]
+
+    with pytest.raises(RecapInputError, match="chronological_order"):
+        load_verified_story_map(_write(tmp_path / "verified_story_map.json", data))
 
 
 def test_story_map_allows_empty_source_evidence(tmp_path):
