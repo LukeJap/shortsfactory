@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QTimer, QUrl
+from PySide6.QtCore import QCoreApplication, Qt, QTimer, QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
 from ..helpers import format_precise_time, format_time
@@ -39,9 +39,17 @@ class PlaybackMixin:
         self.play_request_counter += 1
         self.video_path = path
 
-        self.file_label.setText(
-            path.name
+        # Word-wrap alone doesn't help a long underscore-separated filename
+        # (Qt only wraps at whitespace) -- elide it instead, keeping the
+        # full name available on hover.
+        available_width = max(self.file_label.width(), 200)
+        elided_name = self.file_label.fontMetrics().elidedText(
+            path.name,
+            Qt.TextElideMode.ElideMiddle,
+            available_width,
         )
+        self.file_label.setText(elided_name)
+        self.file_label.setToolTip(path.name)
 
         # Reset the Windows media backend completely when loading a source.
         # Leaving an old/native media surface attached can produce a black
