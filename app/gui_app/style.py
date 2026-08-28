@@ -524,6 +524,7 @@ STYLESHEET =            """
                 border: 1px solid #30292D;
                 border-radius: 4px;
                 padding: 8px 10px;
+                min-height: 16px;
                 font-size: 10px;
                 font-weight: 900;
                 letter-spacing: 1px;

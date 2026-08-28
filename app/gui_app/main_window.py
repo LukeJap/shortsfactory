@@ -772,7 +772,7 @@ class ShortsFactoryWindow(
 
         source_frame = QFrame()
         source_frame.setObjectName("Panel")
-        source_frame.setMinimumWidth(220)
+        source_frame.setMinimumWidth(260)
         source_frame.setMaximumWidth(440)
 
         source_layout = QVBoxLayout(source_frame)
@@ -1680,7 +1680,7 @@ class ShortsFactoryWindow(
         right_column = QSplitter(Qt.Orientation.Vertical)
         right_column.setObjectName("RightSplitter")
         right_column.setChildrenCollapsible(False)
-        right_column.setMinimumWidth(320)
+        right_column.setMinimumWidth(360)
         self.right_splitter = right_column
 
         ai_frame = QFrame()
@@ -1748,6 +1748,24 @@ class ShortsFactoryWindow(
             "SectionTitle"
         )
 
+        visual_header.addWidget(
+            visual_title
+        )
+        visual_header.addStretch()
+
+        # Title's own row -- three action buttons get their own row each
+        # below (visual_action_row_top/middle/bottom) instead of sharing
+        # this header, which overflowed a narrow right column before any
+        # of them could shrink below their own minimum width. Even two
+        # per row overflowed at the right column's minimum width, so
+        # each gets a full row to itself.
+        visual_action_row_top = QHBoxLayout()
+        visual_action_row_top.setSpacing(8)
+        visual_action_row_middle = QHBoxLayout()
+        visual_action_row_middle.setSpacing(8)
+        visual_action_row_bottom = QHBoxLayout()
+        visual_action_row_bottom.setSpacing(8)
+
         self.plan_visuals_button = QPushButton(
             "✦ PLAN VISUALS"
         )
@@ -1765,13 +1783,10 @@ class ShortsFactoryWindow(
             self.plan_ai_visuals
         )
 
-        visual_header.addWidget(
-            visual_title
-        )
-        visual_header.addStretch()
-        visual_header.addWidget(
+        visual_action_row_top.addWidget(
             self.plan_visuals_button
         )
+        visual_action_row_top.addStretch(1)
 
         self.generate_visual_assets_button = QPushButton(
             "⬡ GENERATE ASSETS"
@@ -1791,9 +1806,10 @@ class ShortsFactoryWindow(
             self.generate_visual_assets
         )
 
-        visual_header.addWidget(
+        visual_action_row_middle.addWidget(
             self.generate_visual_assets_button
         )
+        visual_action_row_middle.addStretch(1)
 
         self.generate_emoji_button = QPushButton(
             "😀 GENERATE EMOJI"
@@ -1813,9 +1829,10 @@ class ShortsFactoryWindow(
             self.generate_emoji
         )
 
-        visual_header.addWidget(
+        visual_action_row_bottom.addWidget(
             self.generate_emoji_button
         )
+        visual_action_row_bottom.addStretch(1)
 
         emoji_min_label = QLabel(
             "MIN EMOJI"
@@ -2431,6 +2448,15 @@ class ShortsFactoryWindow(
             visual_header
         )
         visual_layout.addLayout(
+            visual_action_row_top
+        )
+        visual_layout.addLayout(
+            visual_action_row_middle
+        )
+        visual_layout.addLayout(
+            visual_action_row_bottom
+        )
+        visual_layout.addLayout(
             emoji_min_row
         )
         visual_layout.addWidget(
@@ -2470,13 +2496,19 @@ class ShortsFactoryWindow(
 
         self.transcript_status_label = QLabel("Run Find Best Clips to load the source transcript.")
         self.transcript_status_label.setObjectName("TranscriptStatus")
+        self.transcript_status_label.setWordWrap(True)
 
         transcript_header.addWidget(transcript_title)
         transcript_header.addSpacing(8)
         transcript_header.addWidget(self.transcript_status_label, 1)
 
-        transcript_actions = QHBoxLayout()
-        transcript_actions.setSpacing(8)
+        # Two rows, not one -- four buttons packed into a single row
+        # overflow a narrow right column before they can shrink below
+        # their own minimum width, silently clipping the last button(s).
+        transcript_actions_top = QHBoxLayout()
+        transcript_actions_top.setSpacing(8)
+        transcript_actions_bottom = QHBoxLayout()
+        transcript_actions_bottom.setSpacing(8)
 
         self.edit_transcript_button = QPushButton("✎ EDIT TEXT")
         self.edit_transcript_button.setObjectName("QuietButton")
@@ -2514,22 +2546,27 @@ class ShortsFactoryWindow(
             self.restore_selected_transcript_segment
         )
 
-        transcript_actions.addWidget(self.edit_transcript_button)
-        transcript_actions.addWidget(self.reset_transcript_text_button)
-        transcript_actions.addStretch()
-        transcript_actions.addWidget(self.cut_transcript_button)
-        transcript_actions.addWidget(self.restore_transcript_button)
+        transcript_actions_top.addWidget(self.edit_transcript_button, 1)
+        transcript_actions_top.addWidget(self.reset_transcript_text_button, 1)
+        transcript_actions_bottom.addWidget(self.cut_transcript_button, 1)
+        transcript_actions_bottom.addWidget(self.restore_transcript_button, 1)
 
         self.transcript_list = QListWidget()
         self.transcript_list.setObjectName("TranscriptList")
+        self.transcript_list.setMinimumHeight(160)
         self.transcript_list.setAlternatingRowColors(False)
+        self.transcript_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.transcript_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.transcript_list.itemClicked.connect(self.transcript_item_clicked)
         self.transcript_list.itemDoubleClicked.connect(
             self.edit_transcript_item
         )
 
         transcript_layout.addLayout(transcript_header)
-        transcript_layout.addLayout(transcript_actions)
+        transcript_layout.addLayout(transcript_actions_top)
+        transcript_layout.addLayout(transcript_actions_bottom)
         transcript_layout.addWidget(self.transcript_list, 1)
 
         ai_scroll = QScrollArea()
@@ -2554,6 +2591,7 @@ class ShortsFactoryWindow(
         workspace.setStretchFactor(1, 1)
         workspace.setStretchFactor(2, 0)
         workspace.setSizes([280, 760, 440])
+        self._default_main_splitter_sizes = [280, 760, 440]
 
         main_layout.addWidget(workspace, 1)
 
@@ -3233,6 +3271,17 @@ class ShortsFactoryWindow(
                 splitter.restoreState(
                     state
                 )
+
+        # A previously-saved layout can leave the source/AI-hunter panels
+        # narrower than what their own content needs to render legibly
+        # (nothing in a splitter's saved state re-validates against the
+        # panel's actual minimum content width). Fall back to the sane
+        # hardcoded defaults if a restored size is below that floor.
+        default_main_sizes = getattr(self, "_default_main_splitter_sizes", None)
+        if self.main_splitter is not None and default_main_sizes:
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 3 and (sizes[0] < 260 or sizes[2] < 360):
+                self.main_splitter.setSizes(default_main_sizes)
 
     def save_layout_settings(self):
 

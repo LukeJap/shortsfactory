@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont, QPainter
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -604,6 +604,7 @@ class DropZone(QFrame):
         self.load_callback = load_callback
 
         self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.setObjectName("DropZone")
 
@@ -673,6 +674,17 @@ class DropZone(QFrame):
             self.load_callback(
                 Path(filename)
             )
+
+    def mousePressEvent(
+        self,
+        event: QMouseEvent,
+    ):
+        # The Browse Files button already opens the dialog on its own
+        # click; this only fires for clicks elsewhere in the zone (the
+        # "+" icon, title, subtitle) which users naturally click too.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.browse_file()
+        super().mousePressEvent(event)
 
     def dragEnterEvent(
         self,
