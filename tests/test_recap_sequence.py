@@ -59,6 +59,29 @@ def _script(segments, target_duration_seconds=120):
     }
 
 
+def _story_map(*beats):
+    return {"schema_version": 1, "beats": list(beats)}
+
+
+def _beat(beat_id, order, *evidence):
+    return {
+        "beat_id": beat_id,
+        "order": order,
+        "summary": f"Verified event for {beat_id}",
+        "importance": 0.7,
+        "source_evidence": list(evidence),
+    }
+
+
+def _evidence(start, end, confidence=0.9, evidence_type="local_video"):
+    return {
+        "start": start,
+        "end": end,
+        "confidence": confidence,
+        "type": evidence_type,
+    }
+
+
 # ============================================================
 # Basic shot coverage
 # ============================================================
@@ -101,6 +124,77 @@ def test_shots_never_exceed_their_own_candidate_bounds():
     for shot in result["segments"][0]["shots"]:
         assert shot["start"] >= 100.0
         assert shot["end"] <= 101.0 + 1e-6
+
+
+def test_multi_beat_segment_supplements_script_candidates_from_assigned_beats():
+    segment = _segment(
+        beat_ids=["B001", "B002", "B003"],
+        candidate_visuals=[_candidate(10.0, 13.0, score=0.95)],
+    )
+    story_map = _story_map(
+        _beat("B001", 1, _evidence(10.0, 13.0)),
+        _beat("B002", 2, _evidence(30.0, 33.0)),
+        _beat("B003", 3, _evidence(50.0, 53.0)),
+    )
+
+    result = assemble_sequence(
+        _script([segment]), {"VO_001": 7.0}, verified_story_map=story_map
+    )
+
+    shots = result["segments"][0]["shots"]
+    assert len(shots) == 3
+    assert {shot["start"] for shot in shots} == {10.0, 30.0, 50.0}
+    assert {shot["beat_id"] for shot in shots if shot["candidate_origin"] == "verified_story_map"} == {
+        "B002",
+        "B003",
+    }
+
+
+def test_supplemental_evidence_is_limited_to_the_segment_assigned_beats():
+    segment = _segment(beat_ids=["B001"], candidate_visuals=[])
+    story_map = _story_map(
+        _beat("B001", 1, _evidence(10.0, 13.0)),
+        _beat("B999", 2, _evidence(90.0, 93.0, confidence=1.0)),
+    )
+
+    result = assemble_sequence(
+        _script([segment]), {"VO_001": 5.0}, verified_story_map=story_map
+    )
+
+    shots = result["segments"][0]["shots"]
+    assert [shot["start"] for shot in shots] == [10.0]
+    assert shots[0]["beat_id"] == "B001"
+
+
+def test_verified_evidence_deduplicates_script_ranges_and_never_creates_giant_filler():
+    segment = _segment(
+        beat_ids=["B001", "B002"],
+        candidate_visuals=[_candidate(10.0, 30.0, score=0.95)],
+    )
+    story_map = _story_map(
+        _beat("B001", 1, _evidence(10.0, 30.0)),
+        _beat("B002", 2, _evidence(40.0, 60.0)),
+    )
+
+    result = assemble_sequence(
+        _script([segment]), {"VO_001": 20.0}, verified_story_map=story_map
+    )
+
+    shots = result["segments"][0]["shots"]
+    assert len(shots) == 2
+    assert len({(shot["start"], shot["end"]) for shot in shots}) == 2
+    assert all(shot["reused"] is False for shot in shots)
+    assert all(shot["duration"] <= CADENCE_ILLUSTRATIVE[1] for shot in shots)
+
+
+def test_legacy_sequence_assembly_is_unchanged_without_a_story_map():
+    segment = _segment(candidate_visuals=[_candidate(10.0, 13.0)])
+
+    result = assemble_sequence(_script([segment]), {"VO_001": 2.0})
+
+    shot = result["segments"][0]["shots"][0]
+    assert shot["start"] == 10.0
+    assert shot["candidate_origin"] == "recap_script"
 
 
 # ============================================================

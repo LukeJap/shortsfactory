@@ -12,6 +12,7 @@ from recap_intelligence.source import (
     _align_fandom_transcript_to_local,
     _align_research_priors,
     _research_priors,
+    _specific_local_evidence_ranges,
     align_story_map,
     load_transcript,
     validate_story_grounding,
@@ -1132,6 +1133,65 @@ def test_fandom_transcript_alignment_is_monotonic_and_content_gated():
     assert aligned[0]["candidate_local_ranges"][0]["start"] == 3
     assert aligned[1]["candidate_local_ranges"][0]["start"] == 5
     assert aligned[2]["candidate_local_ranges"] == []
+
+
+def test_specific_local_evidence_keeps_distinct_named_plot_beats_separate():
+    transcript = TranscriptData(
+        path="fixture.json",
+        segments=(
+            TranscriptSegment(10, 12, "Meet Rex, my new pet."),
+            TranscriptSegment(20, 22, "Rex ignores every command except stay."),
+            TranscriptSegment(30, 32, "Larry refuses his dinner."),
+        ),
+        full_text="",
+        duration=32,
+    )
+
+    intro = _specific_local_evidence_ranges(
+        "The hero introduces Rex as a replacement pet.", transcript, ["Rex", "Larry"]
+    )
+    behavior = _specific_local_evidence_ranges(
+        "Rex ignores commands but stays put.", transcript, ["Rex", "Larry"]
+    )
+
+    assert intro[0]["start"] == 10
+    assert behavior[0]["start"] == 20
+    assert intro[0]["evidence_type"] == "transcript_character_anchor"
+    assert behavior[0]["local_anchor_tokens"] == ["rex"]
+
+
+def test_specific_local_evidence_never_creates_timing_without_a_local_anchor():
+    transcript = TranscriptData(
+        path="fixture.json",
+        segments=(TranscriptSegment(10, 12, "Rex runs away."),),
+        full_text="",
+        duration=12,
+    )
+
+    ranges = _specific_local_evidence_ranges(
+        "Jerry cannot replace the missing pet.", transcript, ["Rex", "Jerry"]
+    )
+
+    assert ranges == []
+
+
+def test_specific_local_evidence_remains_shared_when_the_local_support_is_shared():
+    transcript = TranscriptData(
+        path="fixture.json",
+        segments=(TranscriptSegment(10, 12, "Rex stays beside the hero."),),
+        full_text="",
+        duration=12,
+    )
+
+    first = _specific_local_evidence_ranges(
+        "Rex stays with the hero.", transcript, ["Rex"]
+    )
+    second = _specific_local_evidence_ranges(
+        "The hero sees Rex stay beside them.", transcript, ["Rex"]
+    )
+
+    assert [(item["start"], item["end"]) for item in first] == [(10, 12)]
+    assert [(item["start"], item["end"]) for item in second] == [(10, 12)]
 
 
 def test_rich_path_verifies_plot_through_transcript_bridge_and_keeps_speakers(

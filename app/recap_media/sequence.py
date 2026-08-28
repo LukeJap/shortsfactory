@@ -149,6 +149,87 @@ NONSEQUENTIAL_JUMP_TOLERANCE_SECONDS = 5.0
 MAX_SHOTS_PER_SEGMENT = 20
 
 
+def _candidate_key(candidate: dict[str, Any]) -> tuple[float, float]:
+    """Use source timing, not incidental metadata, to identify one source range."""
+
+    return _range_key(candidate)
+
+
+def verified_candidates_for_segment(
+    segment: dict[str, Any],
+    verified_story_map: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Return locally verified evidence for only this segment's assigned beats.
+
+    Track A's recap candidates remain the editorial preference.  These
+    candidates are Track B's supplemental inventory when a multi-beat thought
+    needs more source coverage than the frozen recap_script handoff contains.
+    """
+
+    if not verified_story_map:
+        return []
+
+    beats_by_id = {
+        beat.get("beat_id"): beat
+        for beat in verified_story_map.get("beats", [])
+        if isinstance(beat, dict) and isinstance(beat.get("beat_id"), str)
+    }
+    supplemental: list[dict[str, Any]] = []
+    seen_ranges: set[tuple[float, float]] = set()
+
+    for beat_id in segment.get("beat_ids", []):
+        beat = beats_by_id.get(beat_id)
+        if beat is None:
+            continue
+        for evidence in beat.get("source_evidence", []):
+            if not isinstance(evidence, dict):
+                continue
+            try:
+                candidate = {
+                    "start": float(evidence["start"]),
+                    "end": float(evidence["end"]),
+                    "score": float(evidence["confidence"]),
+                    "reason": (
+                        f"Verified story evidence for {beat_id}: "
+                        f"{beat.get('summary', '')}"
+                    ),
+                    "beat_id": beat_id,
+                    "evidence_type": evidence.get("type", ""),
+                    "candidate_origin": "verified_story_map",
+                }
+            except (KeyError, TypeError, ValueError):
+                # The loader validates this input. Keep the builder resilient
+                # when callers provide a partially constructed in-memory map.
+                continue
+            if candidate["end"] <= candidate["start"]:
+                continue
+            key = _candidate_key(candidate)
+            if key not in seen_ranges:
+                supplemental.append(candidate)
+                seen_ranges.add(key)
+
+    return supplemental
+
+
+def visual_candidates_for_segment(
+    segment: dict[str, Any],
+    verified_story_map: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Merge preferred script candidates with unique assigned-beat evidence."""
+
+    preferred = [dict(candidate) for candidate in segment.get("candidate_visuals", [])]
+    for candidate in preferred:
+        candidate.setdefault("candidate_origin", "recap_script")
+
+    seen_ranges = {_candidate_key(candidate) for candidate in preferred}
+    supplemental = [
+        candidate
+        for candidate in verified_candidates_for_segment(segment, verified_story_map)
+        if _candidate_key(candidate) not in seen_ranges
+    ]
+    return preferred + supplemental
+
+
 def infer_visual_function(candidate: dict[str, Any]) -> str:
     """See the module docstring's note on visual-function inference."""
 
@@ -298,11 +379,16 @@ def select_shots(
         return []
 
     shots: list[dict[str, Any]] = []
+    remaining_candidates = list(candidates)
     remaining = target_duration
     functions_used: set[str] = set()
     last_function: str | None = None
 
-    while (not shots or remaining > MIN_SHOT_DURATION_SECONDS) and len(shots) < MAX_SHOTS_PER_SEGMENT:
+    while (
+        remaining_candidates
+        and (not shots or remaining > MIN_SHOT_DURATION_SECONDS)
+        and len(shots) < MAX_SHOTS_PER_SEGMENT
+    ):
 
         scored = [
             (
@@ -315,7 +401,7 @@ def select_shots(
                 ),
                 candidate,
             )
-            for candidate in candidates
+            for candidate in remaining_candidates
         ]
         best_score, best_candidate = max(
             scored,
@@ -347,10 +433,13 @@ def select_shots(
                 "reason": best_candidate.get("reason", ""),
                 "visual_function": visual_function,
                 "reused": reused,
+                "beat_id": best_candidate.get("beat_id"),
+                "candidate_origin": best_candidate.get("candidate_origin", source_list_name),
             }
         )
 
         used_ranges.add(_range_key(best_candidate))
+        remaining_candidates.remove(best_candidate)
         functions_used.add(visual_function)
         last_function = visual_function
         remaining -= shot_duration
@@ -361,6 +450,7 @@ def select_shots(
 def assemble_sequence(
     recap_script: dict[str, Any],
     narration_durations: dict[str, float] | None = None,
+    verified_story_map: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build the full recap_sequence.json structure from an already-loaded
@@ -369,7 +459,9 @@ def assemble_sequence(
     map of real Orpheus measurements (recap_media.voiceover.
     synthesize_segments() results). Segments missing from that map fall
     back to a word-count duration estimate (or a fixed default for
-    visual_only segments, which never have narration).
+    visual_only segments, which never have narration). A provided normalized
+    verified story map contributes additional source evidence for a segment's
+    assigned beat_ids when its recap-script candidates are not enough.
     """
 
     narration_durations = narration_durations or {}
@@ -391,12 +483,20 @@ def assemble_sequence(
             "candidate_visuals" if use_dialogue_band else "original_dialogue_candidates"
         )
 
-        candidates = segment.get(primary_list) or []
+        candidates = (
+            visual_candidates_for_segment(segment, verified_story_map)
+            if primary_list == "candidate_visuals"
+            else segment.get(primary_list) or []
+        )
         source_list_name = primary_list
         if not candidates:
             # Nothing in this segment's preferred list -- better to show
             # something from the other list than nothing at all.
-            candidates = segment.get(fallback_list) or []
+            candidates = (
+                visual_candidates_for_segment(segment, verified_story_map)
+                if fallback_list == "candidate_visuals"
+                else segment.get(fallback_list) or []
+            )
             source_list_name = fallback_list
 
         shots = select_shots(

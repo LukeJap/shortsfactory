@@ -84,7 +84,7 @@ HYBRID_ROLE_IMPORTANCE = {
     "supporting_event": 0.35,
 }
 HYBRID_PROTECTED_ROLES = {"reversal_reveal", "payoff_climax", "resolution"}
-FANDOM_FAST_PATH_VERSION = "fandom-first-verified-story-v1"
+FANDOM_FAST_PATH_VERSION = "fandom-first-verified-story-v2"
 RICH_ROLE_IMPORTANCE = {
     "setup": 0.38,
     "inciting_incident": 0.82,
@@ -420,6 +420,85 @@ def _evidence_ranges(
                 "confidence": round(min(0.99, max(0.05, score)), 4),
                 "evidence_type": "transcript",
                 "transcript_excerpt": segment.text,
+            }
+        )
+    return ranges
+
+
+def _specific_local_evidence_ranges(
+    query: str,
+    transcript: TranscriptData,
+    known_characters: Sequence[str],
+    *,
+    allowed_anchor_tokens: set[str] | None = None,
+    limit: int = 3,
+    window_start: float = 0.0,
+    window_end: float | None = None,
+) -> list[dict[str, Any]]:
+    """Find locally timed support for a plot point with a rare named anchor.
+
+    The ordinary lexical matcher intentionally rejects a long plot summary
+    when a Whisper line contains only its named subject. That is useful for
+    broad research grounding, but it loses legitimate, specific evidence for
+    adjacent plot beats such as a named secondary character's introduction or
+    response. This pass only accepts a character token that is both present in
+    the plot point and rare in the selected local transcript; it never turns a
+    Fandom timestamp or stage direction into source timing.
+    """
+
+    query_tokens = _tokens(query)
+    if not query_tokens:
+        return []
+    local_segments = [
+        segment
+        for segment in transcript.segments
+        if segment.end > window_start
+        and (window_end is None or segment.start < window_end)
+    ]
+    if not local_segments:
+        return []
+
+    local_token_counts: dict[str, int] = {}
+    for segment in local_segments:
+        for token in _tokens(segment.text):
+            local_token_counts[token] = local_token_counts.get(token, 0) + 1
+    rarity_ceiling = max(3, min(12, int(len(local_segments) * 0.08)))
+    character_tokens = {
+        token
+        for character in known_characters
+        for token in _tokens(str(character))
+        if token in query_tokens
+        and local_token_counts.get(token, 0) <= rarity_ceiling
+        and (allowed_anchor_tokens is None or token in allowed_anchor_tokens)
+    }
+    if not character_tokens:
+        return []
+
+    scored: list[tuple[float, TranscriptSegment, list[str]]] = []
+    for segment in local_segments:
+        segment_tokens = _tokens(segment.text)
+        matched_anchors = sorted(character_tokens & segment_tokens)
+        if not matched_anchors:
+            continue
+        non_anchor_query = query_tokens - character_tokens
+        non_anchor_overlap = non_anchor_query & segment_tokens
+        anchor_coverage = len(matched_anchors) / len(character_tokens)
+        content_coverage = len(non_anchor_overlap) / max(1, len(non_anchor_query))
+        precision = len(non_anchor_overlap) / max(1, len(segment_tokens))
+        score = 0.5 * anchor_coverage + 0.35 * content_coverage + 0.15 * precision
+        scored.append((score, segment, matched_anchors))
+
+    scored.sort(key=lambda item: (-item[0], item[1].start))
+    ranges: list[dict[str, Any]] = []
+    for score, segment, anchors in scored[:limit]:
+        ranges.append(
+            {
+                "start": round(segment.start, 4),
+                "end": round(segment.end, 4),
+                "confidence": round(min(0.8, max(0.45, score)), 4),
+                "evidence_type": "transcript_character_anchor",
+                "transcript_excerpt": segment.text,
+                "local_anchor_tokens": anchors,
             }
         )
     return ranges
@@ -3035,6 +3114,16 @@ def _rich_story_map(
         dossier, selected_window, "transcript_events"
     )
     known_characters = _unique_names(dossier.get("characters", []))
+    plot_token_counts: dict[str, int] = {}
+    for point in plot_points:
+        for token in _tokens(str(point.get("summary", "") or "")):
+            plot_token_counts[token] = plot_token_counts.get(token, 0) + 1
+    specific_plot_anchor_tokens = {
+        token
+        for character in known_characters
+        for token in _tokens(str(character))
+        if plot_token_counts.get(token, 0) <= max(3, int(len(plot_points) * 0.25))
+    }
 
     alignment_started = time.perf_counter()
     transcript_alignments = _align_fandom_transcript_to_local(
@@ -3095,6 +3184,17 @@ def _rich_story_map(
             else:
                 accepted_direct_evidence.append(local_range)
         evidence = accepted_direct_evidence
+        if not evidence:
+            evidence = _specific_local_evidence_ranges(
+                query,
+                transcript,
+                known_characters,
+                allowed_anchor_tokens=(
+                    specific_plot_anchor_tokens & _tokens(summary)
+                ),
+                window_start=float(selected_window["start"]),
+                window_end=float(selected_window["end"]),
+            )
         if evidence:
             direct_matches += 1
         speakers: list[dict[str, Any]] = []

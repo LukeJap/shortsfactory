@@ -56,7 +56,11 @@ def test_full_chain_against_real_fixtures(tmp_path):
         result.segment_id: result.duration_seconds for result in voiceover_results
     }
 
-    sequence = assemble_sequence(inputs.recap_script, narration_durations)
+    sequence = assemble_sequence(
+        inputs.recap_script,
+        narration_durations,
+        verified_story_map=inputs.verified_story_map,
+    )
 
     # Real fixture segments are short enough (1-2 shots each) that no
     # segment ends up eligible for an insert -- this still proves B4
