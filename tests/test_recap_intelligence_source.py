@@ -1194,6 +1194,78 @@ def test_specific_local_evidence_remains_shared_when_the_local_support_is_shared
     assert [(item["start"], item["end"]) for item in second] == [(10, 12)]
 
 
+def test_specific_local_evidence_uses_entity_identifiers_not_name_descriptors():
+    transcript = TranscriptData(
+        path="fixture.json",
+        segments=(
+            TranscriptSegment(10, 12, "The snail hides under the table."),
+            TranscriptSegment(20, 22, "Rex waits by the door."),
+        ),
+        full_text="",
+        duration=22,
+    )
+    characters = ["Gary the Snail", "Larry the Snail", "Rex"]
+
+    generic = _specific_local_evidence_ranges(
+        "A snail causes trouble.", transcript, characters
+    )
+    named = _specific_local_evidence_ranges(
+        "Rex waits for the hero.", transcript, characters
+    )
+
+    assert generic == []
+    assert named[0]["start"] == 20
+
+
+def test_rich_anchor_localization_cannot_admit_or_shift_unverified_plot_points(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "episode.mp4"
+    source.write_bytes(b"source")
+    transcript_path = tmp_path / "subtitles.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"start": 1, "end": 3, "text": "Rex waits by the door."},
+                    {"start": 4, "end": 6, "text": "The hero returns home."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("recap_intelligence.source.probe_duration", lambda path: 7.0)
+
+    story_map = align_story_map(
+        identity={"canonical_id": "fixture"},
+        dossier={
+            "ordered_plot_points": [
+                {
+                    "plot_id": "P1",
+                    "summary": "The hero returns home.",
+                    "story_purpose": "setup",
+                    "characters": [],
+                },
+                {
+                    "plot_id": "P2",
+                    "summary": "Rex considers the distant moon.",
+                    "story_purpose": "escalation",
+                    "characters": ["Rex"],
+                },
+            ],
+            "transcript_events": [],
+            "characters": ["Rex"],
+        },
+        source_video=source,
+        transcript_path=transcript_path,
+        research_depth=rich_depth(),
+    )
+
+    assert [beat["research_plot_ids"] for beat in story_map["beats"]] == [["P1"]]
+    assert [beat["beat_id"] for beat in story_map["beats"]] == ["B001"]
+
+
 def test_rich_path_verifies_plot_through_transcript_bridge_and_keeps_speakers(
     tmp_path,
     monkeypatch,

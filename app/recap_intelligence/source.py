@@ -84,7 +84,7 @@ HYBRID_ROLE_IMPORTANCE = {
     "supporting_event": 0.35,
 }
 HYBRID_PROTECTED_ROLES = {"reversal_reveal", "payoff_climax", "resolution"}
-FANDOM_FAST_PATH_VERSION = "fandom-first-verified-story-v2"
+FANDOM_FAST_PATH_VERSION = "fandom-first-verified-story-v3"
 RICH_ROLE_IMPORTANCE = {
     "setup": 0.38,
     "inciting_incident": 0.82,
@@ -463,10 +463,10 @@ def _specific_local_evidence_ranges(
         for token in _tokens(segment.text):
             local_token_counts[token] = local_token_counts.get(token, 0) + 1
     rarity_ceiling = max(3, min(12, int(len(local_segments) * 0.08)))
+    named_entity_tokens = _named_entity_anchor_tokens(known_characters)
     character_tokens = {
         token
-        for character in known_characters
-        for token in _tokens(str(character))
+        for token in named_entity_tokens
         if token in query_tokens
         and local_token_counts.get(token, 0) <= rarity_ceiling
         and (allowed_anchor_tokens is None or token in allowed_anchor_tokens)
@@ -502,6 +502,41 @@ def _specific_local_evidence_ranges(
             }
         )
     return ranges
+
+
+def _named_entity_anchor_tokens(known_characters: Sequence[str]) -> set[str]:
+    """Return individual-name tokens, excluding descriptive name suffixes.
+
+    Character lists commonly contain labels such as "Name the Species". The
+    leading identifier can localize a specific entity; trailing descriptors
+    are categories shared by several entities and must not become evidence
+    anchors on their own.
+    """
+
+    token_lists = [
+        [
+            token
+            for token in re.findall(r"[a-z0-9']+", str(character).casefold())
+            if len(token) > 2 and token not in STOP_WORDS
+        ]
+        for character in known_characters
+    ]
+    ignored_prefixes = {"the", "and", "mr", "mrs", "miss", "doctor"}
+    identifiers = [
+        next((token for token in tokens if token not in ignored_prefixes), "")
+        for tokens in token_lists
+    ]
+    descriptor_tokens: set[str] = set()
+    for tokens, identifier in zip(token_lists, identifiers):
+        if identifier:
+            descriptor_tokens.update(tokens[tokens.index(identifier) + 1:])
+    anchors: set[str] = set()
+    for identifier in identifiers:
+        if not identifier:
+            continue
+        if identifier not in descriptor_tokens:
+            anchors.add(identifier)
+    return anchors
 
 
 def _selected_source_window(
@@ -3120,8 +3155,7 @@ def _rich_story_map(
             plot_token_counts[token] = plot_token_counts.get(token, 0) + 1
     specific_plot_anchor_tokens = {
         token
-        for character in known_characters
-        for token in _tokens(str(character))
+        for token in _named_entity_anchor_tokens(known_characters)
         if plot_token_counts.get(token, 0) <= max(3, int(len(plot_points) * 0.25))
     }
 
@@ -3164,11 +3198,13 @@ def _rich_story_map(
             window_end=float(selected_window["end"]),
         )
         accepted_direct_evidence: list[dict[str, Any]] = []
+        direct_conflict_found = False
         for local_range in evidence:
             conflict_reasons = _local_conflicts(
                 summary, local_range.get("transcript_excerpt", "")
             )
             if conflict_reasons:
+                direct_conflict_found = True
                 conflicts.append(
                     {
                         "research_plot_id": plot_id,
@@ -3184,17 +3220,6 @@ def _rich_story_map(
             else:
                 accepted_direct_evidence.append(local_range)
         evidence = accepted_direct_evidence
-        if not evidence:
-            evidence = _specific_local_evidence_ranges(
-                query,
-                transcript,
-                known_characters,
-                allowed_anchor_tokens=(
-                    specific_plot_anchor_tokens & _tokens(summary)
-                ),
-                window_start=float(selected_window["start"]),
-                window_end=float(selected_window["end"]),
-            )
         if evidence:
             direct_matches += 1
         speakers: list[dict[str, Any]] = []
@@ -3249,6 +3274,22 @@ def _rich_story_map(
                     )
         if bridge_used:
             bridge_matches += 1
+        # Localization is enrichment only. The existing direct/bridge paths
+        # decide whether a plot point is a verified beat; named anchors may
+        # add precise local ranges only after that decision is already made.
+        if evidence and not direct_conflict_found:
+            evidence.extend(
+                _specific_local_evidence_ranges(
+                    query,
+                    transcript,
+                    known_characters,
+                    allowed_anchor_tokens=(
+                        specific_plot_anchor_tokens & _tokens(summary)
+                    ),
+                    window_start=float(selected_window["start"]),
+                    window_end=float(selected_window["end"]),
+                )
+            )
         deduped: list[dict[str, Any]] = []
         seen_ranges: set[tuple[float, float, str]] = set()
         for item in sorted(
