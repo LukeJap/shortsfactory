@@ -243,7 +243,7 @@ class SuggestionSlider(QSlider):
                 ),
             )
             remaining_height = max(
-                2,
+                3,
                 available_lane_height
                 - video_height
                 - edit_height
@@ -251,12 +251,17 @@ class SuggestionSlider(QSlider):
             )
             sfx_height = max(
                 1,
-                remaining_height // 2,
+                remaining_height // 3,
             )
             emoji_height = max(
                 1,
+                remaining_height // 3,
+            )
+            voiceover_height = max(
+                1,
                 remaining_height
-                - sfx_height,
+                - sfx_height
+                - emoji_height,
             )
         else:
             ruler_top = 14
@@ -314,23 +319,29 @@ class SuggestionSlider(QSlider):
 
         if height >= 218:
             remaining_height = max(
-                2,
+                3,
                 height
                 - sfx_top
-                - lane_gap
+                - lane_gap * 2
                 - bottom_margin,
             )
             sfx_height = max(
                 1,
-                remaining_height // 2,
+                remaining_height // 3,
             )
             emoji_height = max(
                 1,
+                remaining_height // 3,
+            )
+            voiceover_height = max(
+                1,
                 remaining_height
-                - sfx_height,
+                - sfx_height
+                - emoji_height,
             )
 
         emoji_top = sfx_top + sfx_height + lane_gap
+        voiceover_top = emoji_top + emoji_height + lane_gap
 
         return {
             "ruler_top": ruler_top,
@@ -345,8 +356,10 @@ class SuggestionSlider(QSlider):
             "sfx_height": sfx_height,
             "emoji_top": emoji_top,
             "emoji_height": emoji_height,
-            "lane_bottom": emoji_top
-            + emoji_height,
+            "voiceover_top": voiceover_top,
+            "voiceover_height": voiceover_height,
+            "lane_bottom": voiceover_top
+            + voiceover_height,
         }
 
     def edit_row_geometry(
@@ -1382,6 +1395,15 @@ class SuggestionSlider(QSlider):
                 lanes["visual_top"],
                 lanes["visual_height"],
                 max_rows=3,
+            )
+
+        if kind == "VOICEOVER":
+            return self._stacked_asset_lane(
+                clip,
+                kind,
+                lanes["voiceover_top"],
+                lanes["voiceover_height"],
+                max_rows=2,
             )
 
         return None
@@ -2675,6 +2697,19 @@ class SuggestionSlider(QSlider):
                 168,
                 245,
             )
+        elif kind == "VOICEOVER":
+            fill = QColor(
+                86,
+                156,
+                224,
+                238 if active else 88,
+            )
+            edge = QColor(
+                186,
+                219,
+                255,
+                245,
+            )
         else:
             fill = QColor(
                 72,
@@ -2842,6 +2877,8 @@ class SuggestionSlider(QSlider):
         sfx_height = lanes["sfx_height"]
         emoji_top = lanes["emoji_top"]
         emoji_height = lanes["emoji_height"]
+        voiceover_top = lanes["voiceover_top"]
+        voiceover_height = lanes["voiceover_height"]
         lane_bottom = min(
             height
             - 10,
@@ -2919,6 +2956,11 @@ class SuggestionSlider(QSlider):
                 "EMOJI",
                 emoji_top,
                 emoji_height,
+            ),
+            (
+                "VOICEOVER",
+                voiceover_top,
+                voiceover_height,
             ),
         ]
 

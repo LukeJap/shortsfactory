@@ -41,3 +41,19 @@ SHOT_TYPE_MOTION_PLAN_PATH = OUTPUT_DIR / "shot_type_motion_plan.json"
 SMART_MOTION_PLAN_PATH = OUTPUT_DIR / "smart_motion_plan.json"
 MANUAL_EDIT_PLAN_PATH = OUTPUT_DIR / "manual_edit_plan.json"
 TRANSCRIPT_CORRECTIONS_PATH = OUTPUT_DIR / "transcript_corrections.json"
+
+# AI Recap Mode (see SHORTSFACTORY_AI_RECAP_SHARED_CONTRACT.md) -- a
+# separate output/recap/ subtree, not the flat output/ layout above.
+# Track A (research/story-mapping, a separate workstream) produces the
+# first four; Track B (this codebase's app/recap_media/) produces
+# recap_sequence.json and reads the first four as authoritative input.
+RECAP_DIR = OUTPUT_DIR / "recap"
+EPISODE_IDENTITY_PATH = RECAP_DIR / "episode_identity.json"
+EPISODE_RESEARCH_DOSSIER_PATH = RECAP_DIR / "episode_research_dossier.json"
+VERIFIED_STORY_MAP_PATH = RECAP_DIR / "verified_story_map.json"
+RECAP_SCRIPT_PATH = RECAP_DIR / "recap_script.json"
+RECAP_SEQUENCE_PATH = RECAP_DIR / "recap_sequence.json"
+RECAP_AUDIO_DUCK_PLAN_PATH = RECAP_DIR / "audio_duck_plan.json"
+RECAP_NARRATION_CAPTIONS_PATH = RECAP_DIR / "narration_captions.json"
+RECAP_PORTRAIT_PLAN_PATH = RECAP_DIR / "portrait_framing_plan.json"
+RECAP_FINAL_OUTPUT_PATH = RECAP_DIR / "final_recap.mp4"

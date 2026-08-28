@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "target_duration_seconds": 120,
+  "target_word_count": 310,
+  "voice_style": "fast_story_recap",
+  "segments": [
+    {
+      "segment_id": "VO_001",
+      "order": 1,
+      "text": "It all starts when a mysterious letter shows up under the door.",
+      "beat_ids": ["B001"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.8,
+      "candidate_visuals": [
+        {
+          "start": 14.1,
+          "end": 18.9,
+          "score": 0.94,
+          "reason": "Directly illustrates the narration."
+        }
+      ],
+      "original_dialogue_candidates": [
+        {
+          "start": 12.0,
+          "end": 18.4,
+          "score": 0.88,
+          "reason": "Strong original line worth preserving."
+        }
+      ]
+    },
+    {
+      "segment_id": "VO_002",
+      "order": 2,
+      "text": "Which leads to a heated confrontation with an old rival.",
+      "beat_ids": ["B002"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.95,
+      "candidate_visuals": [
+        {
+          "start": 121.0,
+          "end": 126.5,
+          "score": 0.9,
+          "reason": "Shows the confrontation escalating."
+        }
+      ],
+      "original_dialogue_candidates": []
+    }
+  ]
+}
