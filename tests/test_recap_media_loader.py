@@ -31,6 +31,43 @@ def _valid_recap_script() -> dict:
     return copy.deepcopy(_load_fixture("recap_script.json"))
 
 
+def _track_a_tv_identity() -> dict:
+    return {
+        "schema_version": 1,
+        "status": "confirmed",
+        "query": {
+            "content_type": "tv",
+            "title": "Example Show",
+            "season": 2,
+            "container_episode": 9,
+            "container_title": "First Half & Selected Half",
+            "segment_titles": ["Selected Half"],
+        },
+        "selected": {
+            "canonical_id": "provider:container:example",
+            "content_type": "tv",
+            "series_title": "Example Show",
+            "container_title": "First Half & Selected Half",
+            "container_episode": 9,
+            "segments": [
+                {
+                    "title": "Selected Half",
+                    "provider_numbering": {
+                        "provider": {"season": 2, "episode": 14}
+                    },
+                }
+            ],
+            "confidence": 0.96,
+        },
+        "candidates": [
+            {
+                "canonical_id": "provider:episode:sister",
+                "segments": [{"title": "Sister Episode"}],
+            }
+        ],
+    }
+
+
 def _write(path: Path, data) -> Path:
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
@@ -45,6 +82,37 @@ def test_load_episode_identity_valid_fixture():
     assert data["title"] == "Example Show"
     assert data["season"] == 2
     assert data["episode"] == 9
+
+
+def test_load_episode_identity_accepts_canonical_track_a_tv_shape(tmp_path):
+    source = _track_a_tv_identity()
+    loaded = load_episode_identity(_write(tmp_path / "episode_identity.json", source))
+
+    assert loaded["title"] == "Example Show"
+    assert loaded["media_type"] == "tv_episode"
+    assert loaded["season"] == 2
+    assert loaded["episode"] == 14
+    assert loaded["episode_title"] == "Selected Half"
+    assert loaded["selected"] == source["selected"]
+
+
+def test_canonical_track_a_title_means_series_not_selected_episode(tmp_path):
+    loaded = load_episode_identity(
+        _write(tmp_path / "episode_identity.json", _track_a_tv_identity())
+    )
+
+    assert loaded["title"] == "Example Show"
+    assert loaded["title"] != loaded["episode_title"]
+
+
+def test_canonical_compound_selection_uses_selected_segment_not_sister(tmp_path):
+    loaded = load_episode_identity(
+        _write(tmp_path / "episode_identity.json", _track_a_tv_identity())
+    )
+
+    assert loaded["episode"] == 14
+    assert loaded["episode_title"] == "Selected Half"
+    assert loaded["episode_title"] != loaded["candidates"][0]["segments"][0]["title"]
 
 
 def test_load_verified_story_map_valid_fixture():
@@ -134,6 +202,14 @@ def test_episode_identity_confidence_out_of_range_raises(tmp_path):
     path = _write(tmp_path / "episode_identity.json", data)
     with pytest.raises(RecapInputError, match="confidence"):
         load_episode_identity(path)
+
+
+def test_canonical_track_a_identity_missing_equivalent_title_fails(tmp_path):
+    data = _track_a_tv_identity()
+    del data["selected"]["series_title"]
+
+    with pytest.raises(RecapInputError, match="series_title"):
+        load_episode_identity(_write(tmp_path / "episode_identity.json", data))
 
 
 # ============================================================

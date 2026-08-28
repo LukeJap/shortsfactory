@@ -161,6 +161,74 @@ def _require_time_range(item: dict[str, Any], label: str) -> None:
 # Per-file loaders
 # ============================================================
 
+def _normalize_track_a_identity(data: dict[str, Any], label: str) -> dict[str, Any]:
+    """Adapt Track A's confirmed canonical identity without altering its provenance."""
+    if isinstance(data.get("title"), str) and data["title"].strip():
+        return data
+
+    selected = data.get("selected")
+    if not isinstance(selected, dict):
+        return data
+
+    content_type = _require_str(selected, "content_type", f"{label}.selected")
+    confidence = _require_number(selected, "confidence", f"{label}.selected", low=0.0, high=1.0)
+    normalized = dict(data)
+    normalized["confidence"] = confidence
+
+    if content_type == "movie":
+        normalized["title"] = _require_str(selected, "title", f"{label}.selected")
+        normalized["media_type"] = "movie"
+        return normalized
+    if content_type != "tv":
+        raise RecapInputError(
+            f"{label}.selected field 'content_type'={content_type!r} must be 'tv' or 'movie'"
+        )
+
+    normalized["title"] = _require_str(
+        selected, "series_title", f"{label}.selected"
+    )
+    normalized["media_type"] = "tv_episode"
+    segments = _require_list(selected, "segments", f"{label}.selected", allow_empty=False)
+    if len(segments) != 1 or not isinstance(segments[0], dict):
+        raise RecapInputError(
+            f"{label}.selected must contain exactly one selected segment for Track B"
+        )
+    segment = segments[0]
+    normalized["episode_title"] = _require_str(
+        segment, "title", f"{label}.selected.segments[0]"
+    )
+    provider_numbering = segment.get("provider_numbering")
+    if not isinstance(provider_numbering, dict):
+        raise RecapInputError(
+            f"{label}.selected.segments[0] missing provider numbering for the selected segment"
+        )
+    numberings: set[tuple[int, int]] = set()
+    for provider, numbering in provider_numbering.items():
+        if not isinstance(numbering, dict):
+            continue
+        if "season" not in numbering or "episode" not in numbering:
+            continue
+        season = _require_int(
+            numbering,
+            "season",
+            f"{label}.selected.segments[0].provider_numbering.{provider}",
+            minimum=1,
+        )
+        episode = _require_int(
+            numbering,
+            "episode",
+            f"{label}.selected.segments[0].provider_numbering.{provider}",
+            minimum=1,
+        )
+        numberings.add((season, episode))
+    if len(numberings) != 1:
+        raise RecapInputError(
+            f"{label}.selected.segments[0] needs one unambiguous provider season/episode"
+        )
+    normalized["season"], normalized["episode"] = numberings.pop()
+    return normalized
+
+
 def load_episode_identity(path: Path = EPISODE_IDENTITY_PATH) -> dict[str, Any]:
     """
     Load and validate episode_identity.json.
@@ -174,6 +242,7 @@ def load_episode_identity(path: Path = EPISODE_IDENTITY_PATH) -> dict[str, Any]:
     label = "episode_identity.json"
     data = _read_json(path, label)
     _require_schema_version(data, label)
+    data = _normalize_track_a_identity(data, label)
     _require_str(data, "title", label)
 
     media_type = _require_str(data, "media_type", label)
