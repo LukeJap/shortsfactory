@@ -15,6 +15,7 @@ from recap_intelligence.writer import (
     TemplateRecapWriter,
     build_narration_plan,
     normalize_script,
+    validate_script_quality_invariants,
 )
 
 
@@ -381,15 +382,17 @@ def rich_story_map():
     return source
 
 
-def rich_draft(source):
+def rich_draft(source, *, text_by_plan_id=None):
     plan = build_narration_plan(source, small_config())
+    text_by_plan_id = text_by_plan_id or {}
     return {
         "narration": [
             {
                 "plan_id": item["plan_id"],
-                "text": (
+                "text": text_by_plan_id.get(
+                    item["plan_id"],
                     "An original grounded narration thought advances the "
-                    f"verified story movement {index}."
+                    f"verified story movement {index}.",
                 ),
             }
             for index, item in enumerate(plan["planned_segments"], start=1)
@@ -563,6 +566,118 @@ def test_rich_writer_plan_repair_never_exceeds_two_calls():
         RecapWriter(model, config=small_config(max_repair_attempts=5)).write(source)
 
     assert len(model.prompts) == 2
+
+
+def _full_rich_text():
+    return (
+        "The verified conflict changes what each character can do next, pushes "
+        "the situation toward a consequence, and keeps the story moving toward "
+        "its grounded resolution while revealing why the final choice carries "
+        "real emotional weight for everyone involved."
+    )
+
+
+def _compact_payoff_text():
+    return (
+        "The hidden answer reframes the conflict, reveals why the choice mattered, "
+        "and lets the relationship reach its earned outcome at last."
+    )
+
+
+def _rich_response_with_protected_text(source, protected_text):
+    plan = build_narration_plan(source, small_config())
+    protected = next(
+        item for item in plan["planned_segments"] if item["function"] == "reversal_payoff"
+    )
+    return rich_draft(
+        source,
+        text_by_plan_id={
+            item["plan_id"]: (
+                protected_text if item["plan_id"] == protected["plan_id"] else _full_rich_text()
+            )
+            for item in plan["planned_segments"]
+        },
+    )
+
+
+def test_rich_accepts_complete_protected_thought_modestly_below_local_floor():
+    source = rich_story_map()
+    config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
+    response = _rich_response_with_protected_text(source, _compact_payoff_text())
+    writer = RecapWriter(SequenceModel([response]), config=config)
+
+    script = writer.write(source)
+    plan = build_narration_plan(source, config)
+    protected = next(
+        item for item in plan["planned_segments"] if item["function"] == "reversal_payoff"
+    )
+    protected_segment = script["segments"][
+        next(
+            index
+            for index, item in enumerate(plan["planned_segments"])
+            if item["plan_id"] == protected["plan_id"]
+        )
+    ]
+
+    assert protected_segment["word_count"] < protected["word_range"][0]
+    assert protected_segment["word_count"] >= protected["word_range"][0] // 4
+    assert script["actual_word_count"] >= 112
+
+
+def test_rich_rejects_severely_underwritten_protected_thought():
+    source = rich_story_map()
+    config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
+    response = _rich_response_with_protected_text(source, "Resolved now.")
+    writer = RecapWriter(SequenceModel([response, response]), config=config)
+
+    with pytest.raises(RecapWritingError, match="payoff/climax is underdeveloped"):
+        writer.write(source)
+
+
+def test_rich_missing_reveal_beat_still_fails_causal_coverage():
+    source = rich_story_map()
+    config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
+    response = _rich_response_with_protected_text(source, _compact_payoff_text())
+    accepted = RecapWriter(SequenceModel([response]), config=config).write(source)
+    plan = build_narration_plan(source, config)
+    reveal_id = plan["reversal"]["beat_ids"][0]
+    raw_segments = [
+        {
+            "segment_id": segment["segment_id"],
+            "text": segment["text"],
+            "beat_ids": [
+                beat_id for beat_id in segment["beat_ids"] if beat_id != reveal_id
+            ],
+            "presentation_hint": segment["presentation_hint"],
+        }
+        for segment in accepted["segments"]
+    ]
+    invalid = normalize_script({"segments": raw_segments}, source, config)
+
+    with pytest.raises(RecapWritingError, match="essential causal-chain beats"):
+        validate_script_quality_invariants(
+            invalid,
+            source,
+            plan,
+            config,
+            allow_compact_protected_thoughts=True,
+        )
+
+
+def test_rich_total_minimum_remains_required_for_compact_thoughts():
+    source = rich_story_map()
+    config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
+    response = rich_draft(
+        source,
+        text_by_plan_id={
+            item["plan_id"]: "Brief grounded thought."
+            for item in build_narration_plan(source, small_config())["planned_segments"]
+        },
+    )
+    writer = RecapWriter(SequenceModel([response, response]), config=config)
+
+    with pytest.raises(RecapWritingError, match="minimum sensible budget"):
+        writer.write(source)
 
 
 def test_narration_plan_chooses_conflict_hook_instead_of_chronological_setup():

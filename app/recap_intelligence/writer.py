@@ -1041,6 +1041,8 @@ def validate_script_quality_invariants(
     story_map: dict[str, Any],
     outline: dict[str, Any],
     config: RecapWritingConfig,
+    *,
+    allow_compact_protected_thoughts: bool = False,
 ) -> None:
     try:
         validate_recap_script(script, story_map)
@@ -1130,10 +1132,25 @@ def validate_script_quality_invariants(
             for segment in segments
             if payoff_ids.intersection(segment.get("beat_ids", []))
         )
-        if payoff_words < 24:
+        payoff_floor = 24
+        if allow_compact_protected_thoughts:
+            protected_thoughts = [
+                item
+                for item in outline.get("planned_segments", [])
+                if str(item.get("function", ""))
+                in {"reversal_payoff", "payoff_climax"}
+                and payoff_ids.intersection(item.get("beat_ids", []))
+            ]
+            if protected_thoughts:
+                planned_floor = min(
+                    int(item.get("word_range", [24])[0] or 24)
+                    for item in protected_thoughts
+                )
+                payoff_floor = max(12, planned_floor // 4)
+        if payoff_words < payoff_floor:
             raise RecapWritingError(
                 "The selected payoff/climax is underdeveloped; it needs at least "
-                "24 grounded narration words"
+                f"{payoff_floor} grounded narration words"
             )
 
     importance_values = {
@@ -2603,7 +2620,12 @@ class RecapWriter:
             self.config,
             deterministic_segment_ids=self._uses_rich_fast_path(story_map),
         )
-        validate_script_quality_invariants(script, story_map, outline, self.config)
+        validate_script_quality_invariants(
+            script,
+            story_map,
+            outline,
+            self.config,
+        )
         return script
 
     def _validated_rich_narration(
@@ -2663,7 +2685,13 @@ class RecapWriter:
             self.config,
             deterministic_segment_ids=True,
         )
-        validate_script_quality_invariants(script, story_map, outline, self.config)
+        validate_script_quality_invariants(
+            script,
+            story_map,
+            outline,
+            self.config,
+            allow_compact_protected_thoughts=True,
+        )
         return script
 
 
