@@ -25,7 +25,7 @@ DEFAULT_OUTLINE_PROMPT_PATH = ROOT / "prompts" / "recap_outline.md"
 DEFAULT_PROMPT_PATH = ROOT / "prompts" / "recap_writer.md"
 DEFAULT_CRITIC_PROMPT_PATH = ROOT / "prompts" / "recap_critic.md"
 DEFAULT_REPAIR_PROMPT_PATH = ROOT / "prompts" / "recap_repair.md"
-WRITER_PROMPT_VERSION = "recap-writer-rich-fast-path-v4"
+WRITER_PROMPT_VERSION = "recap-writer-rich-plan-authoritative-v5"
 
 
 class RecapWritingError(RuntimeError):
@@ -100,6 +100,46 @@ def _story_payload(story_map: dict[str, Any]) -> dict[str, Any]:
         "warnings": list(story_map.get("warnings", []) or []),
         "verified_beats": beats,
     }
+
+
+def _rich_thought_payload(
+    story_map: dict[str, Any],
+    outline: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose only the selected factual material to the RICH prose call."""
+    verified_beats = _beat_map(story_map, verified_only=True)
+    fields = (
+        "summary",
+        "characters",
+        "motivation",
+        "change",
+        "emotional_conflict",
+        "payoff_significance",
+    )
+    thoughts: list[dict[str, Any]] = []
+    for planned in outline.get("planned_segments", []):
+        facts = []
+        for beat_id in planned.get("beat_ids", []):
+            beat = verified_beats.get(str(beat_id))
+            if beat is None:
+                continue
+            fact = {
+                field: beat[field]
+                for field in fields
+                if field in beat and _meaningful_text(beat.get(field))
+            }
+            if fact:
+                facts.append(fact)
+        thoughts.append(
+            {
+                "plan_id": str(planned.get("plan_id", "")),
+                "story_role": str(planned.get("function", "")),
+                "assigned_facts": facts,
+                "target_words": int(planned.get("target_words", 0) or 0),
+                "word_range": list(planned.get("word_range", [])),
+            }
+        )
+    return {"planned_thoughts": thoughts}
 
 
 def _ranges_for_beats(
@@ -1365,27 +1405,37 @@ class RecapWriter:
         outline: dict[str, Any],
     ) -> str:
         return (
-            self._draft_prompt(story_map, outline)
-            + "\n\nRICH NARRATION RESPONSE CONTRACT:\n"
+            "Write original, grounded recap narration using only the factual "
+            "material in the authoritative plan below. Do not copy summaries "
+            "verbatim or invent facts, motives, dialogue, stakes, or transitions. "
+            "Keep each thought understandable as audio-only narration and stay near "
+            "its supplied word range.\n\nRICH AUTHORITATIVE NARRATION PLAN:\n"
+            + json.dumps(
+                _rich_thought_payload(story_map, outline),
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n\nFor this RICH task, the response contract below overrides "
+            "generic instructions about segment IDs, beat IDs, visuals, dialogue, "
+            "importance, and presentation hints. Write only the narration text for "
+            "each supplied plan_id. Do not add, remove, reorder, split, merge, or "
+            "reinterpret planned thoughts.\n\nRICH NARRATION RESPONSE CONTRACT:\n"
             + "Return ONLY one JSON object with this top-level shape:\n"
             + json.dumps(
                 {
-                    "segments": [
+                    "narration": [
                         {
-                            "segment_id": "VO_001",
+                            "plan_id": "P01",
                             "text": "Original grounded narration.",
-                            "beat_ids": ["B001"],
-                            "presentation_hint": "narration_over_source",
-                            "importance": 0.9,
                         }
                     ]
                 },
                 indent=2,
             )
-            + "\nThe top-level key must be segments. Do not return story beats, "
-            "beat objects, an outline, a story map, or an object with a beats key. "
-            "Do not return a single beat object. Each segment needs narration text "
-            "and valid beat_ids from the selected narrative outline."
+            + "\nThe top-level key must be narration. Return exactly one item for "
+            "every supplied plan_id, in the supplied order. Each item may contain "
+            "only plan_id and text. Do not return segments, story beats, beat IDs, "
+            "an outline, a story map, visuals, dialogue, importance, or presentation hints."
         )
 
     def _section_prompt(
@@ -2180,8 +2230,7 @@ class RecapWriter:
         errors: list[str],
     ) -> str:
         return (
-            self._read_prompt(self.repair_prompt_path)
-            + f"\n\nSTAGE: {stage}\n"
+            f"RICH NARRATION REPAIR. STAGE: {stage}\n"
             + "\nVALIDATION ERRORS:\n"
             + json.dumps(errors, indent=2, ensure_ascii=False)
             + "\n\nINVALID RESPONSE:\n"
@@ -2204,19 +2253,19 @@ class RecapWriter:
         errors: list[str],
     ) -> str:
         return (
-            self._repair_prompt(
-                stage=stage,
-                original_prompt=original_prompt,
-                generation=generation,
-                errors=errors,
-            )
-            + "\n\nRICH NARRATION SCHEMA CORRECTION:\n"
-            + "The prior response used the wrong schema. Return ONLY a JSON object "
-            "with a non-empty segments array. Never return a beat object, story "
-            "map, outline, or {\"beats\": [...]}. The required top-level shape is:\n"
-            + '{"segments":[{"segment_id":"VO_001","text":"...",'
-            + '"beat_ids":["B001"],"presentation_hint":"narration_over_source",'
-            + '"importance":0.9}]}'
+            self._read_prompt(self.repair_prompt_path)
+            + f"\n\nSTAGE: {stage}\n"
+            + "\nVALIDATION ERRORS:\n"
+            + json.dumps(errors, indent=2, ensure_ascii=False)
+            + "\n\nINVALID RESPONSE:\n"
+            + generation.raw_text
+            + "\n\nAUTHORITATIVE RICH PLAN:\n"
+            + original_prompt
+            + "\n\nRepair only the missing or invalid narration text items. Keep valid "
+            "plan_id/text pairs unchanged. Return the complete narration array in "
+            "the original exact plan order; do not alter the plan, grouping, or "
+            "factual assignment. Return ONLY {\"narration\":[{\"plan_id\":\"P01\","
+            "\"text\":\"...\"}]} with one item per plan_id."
         )
 
     def _generate(self, prompt: str) -> ModelGeneration:
@@ -2340,7 +2389,7 @@ class RecapWriter:
         script = self._run_stage(
             "rich_main_narration",
             self._rich_main_narration_prompt(story_map, outline),
-            lambda raw: self._validated_script(raw, story_map, outline),
+            lambda raw: self._validated_rich_narration(raw, story_map, outline),
             max_model_calls=2,
             repair_prompt_builder=lambda generation, errors: self._rich_repair_prompt(
                 stage="rich_main_narration",
@@ -2553,6 +2602,66 @@ class RecapWriter:
             story_map,
             self.config,
             deterministic_segment_ids=self._uses_rich_fast_path(story_map),
+        )
+        validate_script_quality_invariants(script, story_map, outline, self.config)
+        return script
+
+    def _validated_rich_narration(
+        self,
+        raw: dict[str, Any],
+        story_map: dict[str, Any],
+        outline: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise RecapWritingError("RICH narration response must be an object")
+        if set(raw) != {"narration"}:
+            raise RecapWritingError(
+                "RICH narration response must contain only the narration array"
+            )
+        narration = raw.get("narration")
+        if not isinstance(narration, list):
+            raise RecapWritingError("RICH narration response needs a narration array")
+
+        planned = list(outline.get("planned_segments", []))
+        expected_ids = [str(item.get("plan_id", "")) for item in planned]
+        actual_ids = [
+            str(item.get("plan_id", ""))
+            for item in narration
+            if isinstance(item, dict)
+        ]
+        if len(narration) != len(planned) or actual_ids != expected_ids:
+            raise RecapWritingError(
+                "RICH narration must contain exactly one item for each plan_id "
+                f"in deterministic order; expected={expected_ids}, actual={actual_ids}"
+            )
+
+        raw_segments: list[dict[str, Any]] = []
+        for planned_item, narration_item in zip(planned, narration):
+            if not isinstance(narration_item, dict):
+                raise RecapWritingError("RICH narration items must be objects")
+            if set(narration_item) != {"plan_id", "text"}:
+                raise RecapWritingError(
+                    "RICH narration items may contain only plan_id and text"
+                )
+            text = " ".join(str(narration_item.get("text", "") or "").split())
+            if not text:
+                raise RecapWritingError(
+                    f"RICH narration item {narration_item['plan_id']} has no text"
+                )
+            raw_segments.append(
+                {
+                    "segment_id": f"VO_{len(raw_segments) + 1:03d}",
+                    "text": text,
+                    "beat_ids": list(planned_item.get("beat_ids", [])),
+                    "presentation_hint": "narration_over_source",
+                }
+            )
+
+        script = normalize_script(
+            raw_segments_payload(raw_segments),
+            story_map,
+            self.config,
+            deterministic_segment_ids=True,
         )
         validate_script_quality_invariants(script, story_map, outline, self.config)
         return script
