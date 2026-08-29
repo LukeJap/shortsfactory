@@ -32,6 +32,8 @@ class RecapInputError(Exception):
 
 
 SUPPORTED_SCHEMA_VERSION = 1
+SUPPORTED_RECAP_SCRIPT_SCHEMA_VERSIONS = frozenset({1, 2})
+VALID_BLOCK_TYPES = {"narration", "source_moment"}
 
 VALID_PRESENTATION_HINTS = {
     "narration_over_source",
@@ -83,14 +85,21 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     return data
 
 
-def _require_schema_version(data: dict[str, Any], label: str) -> None:
+def _require_schema_version(
+    data: dict[str, Any],
+    label: str,
+    supported_versions: frozenset[int] | None = None,
+) -> int:
 
     version = data.get("schema_version")
-    if version != SUPPORTED_SCHEMA_VERSION:
+    expected = supported_versions or frozenset({SUPPORTED_SCHEMA_VERSION})
+    if version not in expected:
+        expected_text = ", ".join(str(item) for item in sorted(expected))
         raise RecapInputError(
             f"{label} has schema_version={version!r}, "
-            f"expected {SUPPORTED_SCHEMA_VERSION}"
+            f"expected one of {{{expected_text}}}"
         )
+    return int(version)
 
 
 def _require_str(data: dict[str, Any], key: str, label: str, allow_empty: bool = False) -> str:
@@ -373,7 +382,9 @@ def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
 
     label = "recap_script.json"
     data = _read_json(path, label)
-    _require_schema_version(data, label)
+    schema_version = _require_schema_version(
+        data, label, SUPPORTED_RECAP_SCRIPT_SCHEMA_VERSIONS
+    )
 
     _require_number(data, "target_duration_seconds", label, low=0.0)
     _require_int(data, "target_word_count", label, minimum=1)
@@ -383,6 +394,7 @@ def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
     seen_segment_ids: set[str] = set()
     seen_orders: set[int] = set()
 
+    normalized_segments: list[dict[str, Any]] = []
     for index, segment in enumerate(segments):
         segment_label = f"{label} segments[{index}]"
 
@@ -406,9 +418,24 @@ def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
                 f"one of {sorted(VALID_PRESENTATION_HINTS)}"
             )
 
-        # visual_only segments carry no narration; every other hint needs
-        # actual narration text to send to Orpheus.
-        _require_str(segment, "text", segment_label, allow_empty=(hint == "visual_only"))
+        block_type = "narration" if schema_version == 1 else segment.get("block_type")
+        if block_type not in VALID_BLOCK_TYPES:
+            raise RecapInputError(
+                f"{segment_label} field 'block_type'={block_type!r} must be "
+                f"one of {sorted(VALID_BLOCK_TYPES)}"
+            )
+
+        # Schema-v1 preserves its visual_only behavior. In schema-v2 the
+        # semantic block type, rather than presentation metadata, decides
+        # whether a segment carries narration text.
+        allow_empty_text = (
+            hint == "visual_only" if schema_version == 1 else block_type == "source_moment"
+        )
+        text = _require_str(segment, "text", segment_label, allow_empty=allow_empty_text)
+        if schema_version == 2 and block_type == "source_moment" and text.strip():
+            raise RecapInputError(
+                f"{segment_label} source_moment block must have empty text"
+            )
 
         beat_ids = _require_list(segment, "beat_ids", segment_label, allow_empty=False)
         for beat_id in beat_ids:
@@ -436,6 +463,10 @@ def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
                 _require_number(candidate, "score", candidate_label, low=0.0, high=1.0)
                 _require_str(candidate, "reason", candidate_label)
 
+        if block_type == "source_moment" and not dialogue_candidates:
+            raise RecapInputError(
+                f"{segment_label} source_moment needs an original_dialogue_candidates range"
+            )
         if not candidate_visuals and not dialogue_candidates:
             raise RecapInputError(
                 f"{segment_label} has no candidate_visuals and no "
@@ -443,7 +474,11 @@ def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
                 f"segment's narration"
             )
 
-    return data
+        normalized_segment = dict(segment)
+        normalized_segment["block_type"] = block_type
+        normalized_segments.append(normalized_segment)
+
+    return {**data, "schema_version": schema_version, "segments": normalized_segments}
 
 
 def load_recap_inputs(

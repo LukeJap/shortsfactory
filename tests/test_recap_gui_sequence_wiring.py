@@ -146,10 +146,20 @@ def test_production_generate_recap_sequence_passes_verified_story_map_through(mo
 
     real_assemble_sequence = recap_module.assemble_sequence
 
-    def _spy_assemble_sequence(recap_script, narration_durations=None, verified_story_map=None):
+    def _spy_assemble_sequence(
+        recap_script,
+        narration_durations=None,
+        verified_story_map=None,
+        source_video=None,
+        transcript_cache_dir=None,
+    ):
         captured_verified_story_map["value"] = verified_story_map
         return real_assemble_sequence(
-            recap_script, narration_durations, verified_story_map=verified_story_map
+            recap_script,
+            narration_durations,
+            verified_story_map=verified_story_map,
+            source_video=source_video,
+            transcript_cache_dir=transcript_cache_dir,
         )
 
     monkeypatch.setattr(recap_module, "load_recap_inputs", lambda: fake_inputs)

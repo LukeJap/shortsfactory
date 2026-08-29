@@ -153,6 +153,7 @@ class RecapMixin:
             inputs.recap_script,
             narration_durations,
             verified_story_map=inputs.verified_story_map,
+            source_video=_recap_source_filename(inputs.episode_identity),
         )
         sequence = interweave_original_dialogue(
             sequence,
@@ -205,7 +206,10 @@ class RecapMixin:
         timings = voiceover_timing_by_segment(sequence) if sequence else {}
 
         for segment in inputs.recap_script["segments"]:
-            if segment.get("presentation_hint") == "visual_only":
+            if (
+                segment.get("block_type") == "source_moment"
+                or segment.get("presentation_hint") == "visual_only"
+            ):
                 continue
 
             segment_id = segment["segment_id"]
@@ -290,6 +294,7 @@ class RecapMixin:
             inputs.recap_script,
             durations,
             verified_story_map=inputs.verified_story_map,
+            source_video=_recap_source_filename(inputs.episode_identity),
         )
         sequence = interweave_original_dialogue(
             sequence,

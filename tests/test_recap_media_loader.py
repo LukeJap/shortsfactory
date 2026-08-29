@@ -223,7 +223,7 @@ def test_non_object_top_level_raises(tmp_path):
 
 def test_wrong_schema_version_raises(tmp_path):
     data = _valid_recap_script()
-    data["schema_version"] = 2
+    data["schema_version"] = 3
     path = _write(tmp_path / "recap_script.json", data)
     with pytest.raises(RecapInputError, match="schema_version"):
         load_recap_script(path)

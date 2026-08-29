@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "target_duration_seconds": 20,
+  "target_word_count": 20,
+  "voice_style": "fast_story_recap",
+  "segments": [
+    {
+      "segment_id": "N_001",
+      "order": 1,
+      "block_type": "narration",
+      "text": "Gary makes the choice.",
+      "beat_ids": ["B001"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.8,
+      "candidate_visuals": [{"start": 10.0, "end": 15.0, "score": 0.9, "reason": "Choice reaction."}],
+      "original_dialogue_candidates": []
+    },
+    {
+      "segment_id": "S_001",
+      "order": 2,
+      "block_type": "source_moment",
+      "text": "",
+      "beat_ids": ["B001"],
+      "presentation_hint": "original_dialogue",
+      "importance": 0.9,
+      "candidate_visuals": [],
+      "original_dialogue_candidates": [{"start": 100.0, "end": 104.0, "score": 0.9, "reason": "Verified choice moment."}]
+    },
+    {
+      "segment_id": "N_002",
+      "order": 3,
+      "block_type": "narration",
+      "text": "The replacement plan gets worse.",
+      "beat_ids": ["B002"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.8,
+      "candidate_visuals": [{"start": 20.0, "end": 26.0, "score": 0.9, "reason": "Replacement attempt."}],
+      "original_dialogue_candidates": []
+    },
+    {
+      "segment_id": "S_002",
+      "order": 4,
+      "block_type": "source_moment",
+      "text": "",
+      "beat_ids": ["B002"],
+      "presentation_hint": "original_dialogue",
+      "importance": 0.9,
+      "candidate_visuals": [],
+      "original_dialogue_candidates": [{"start": 200.0, "end": 204.0, "score": 0.9, "reason": "Verified reaction moment."}]
+    },
+    {
+      "segment_id": "N_003",
+      "order": 5,
+      "block_type": "narration",
+      "text": "Then everything changes.",
+      "beat_ids": ["B003"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.8,
+      "candidate_visuals": [{"start": 30.0, "end": 34.0, "score": 0.9, "reason": "Payoff reaction."}],
+      "original_dialogue_candidates": []
+    }
+  ]
+}

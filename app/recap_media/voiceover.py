@@ -200,9 +200,9 @@ def synthesize_segments(
     """
     Synthesize every narration-bearing segment from a loaded
     recap_script.json's "segments" list (see
-    recap_media.loader.load_recap_script()). Segments with
-    presentation_hint "visual_only" carry no narration text and are
-    skipped -- there's nothing for Orpheus to say.
+    recap_media.loader.load_recap_script()). Schema-v2 source_moment
+    blocks are source audio, not narration, and are skipped. Schema-v1
+    keeps its existing visual_only behavior.
 
     One Orpheus-FastAPI failure does not abort the batch: each segment's
     outcome (including any error) is independent, so one offline/failed
@@ -213,7 +213,10 @@ def synthesize_segments(
     results = []
 
     for segment in segments:
-        if segment.get("presentation_hint") == "visual_only":
+        if (
+            segment.get("block_type") == "source_moment"
+            or segment.get("presentation_hint") == "visual_only"
+        ):
             continue
 
         segment_id = segment["segment_id"]

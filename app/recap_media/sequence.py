@@ -340,6 +340,9 @@ def target_duration_for_segment(
 
     segment_id = segment["segment_id"]
 
+    if segment.get("block_type") == "source_moment":
+        return 0.0, "source_moment"
+
     if segment.get("presentation_hint") == "visual_only":
         importance = float(segment.get("importance", 0.0))
         low, high = cadence_for_candidate(DEFAULT_VISUAL_FUNCTION, importance)
@@ -919,7 +922,10 @@ def _refresh_segment_timeline(segment: dict[str, Any]) -> None:
     insert_count = 0
     for shot in segment["shots"]:
         if shot.get("source_audio_insert"):
-            shot["narration_pause_offset_seconds"] = round(narration_cursor, 3)
+            if segment.get("block_type") == "source_moment":
+                shot.pop("narration_pause_offset_seconds", None)
+            else:
+                shot["narration_pause_offset_seconds"] = round(narration_cursor, 3)
             insert_count += 1
         else:
             narration_cursor += float(shot["timeline_duration_seconds"])
@@ -930,6 +936,8 @@ def assemble_sequence(
     recap_script: dict[str, Any],
     narration_durations: dict[str, float] | None = None,
     verified_story_map: dict[str, Any] | None = None,
+    source_video: str | Path | None = None,
+    transcript_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     """
     Build the full recap_sequence.json structure from an already-loaded
@@ -954,6 +962,50 @@ def assemble_sequence(
     previous_last_shot_end: float | None = None
 
     for segment in sorted(recap_script["segments"], key=lambda s: s["order"]):
+
+        if segment.get("block_type") == "source_moment":
+            source_shot = _source_moment_shot(
+                segment,
+                verified_story_map,
+                source_video=source_video,
+                transcript_cache_dir=transcript_cache_dir,
+            )
+            shots = [source_shot] if source_shot is not None else []
+            warnings: list[str] = []
+            if not shots:
+                warnings.append(
+                    "No accepted source-audio candidate -- source_moment has no assigned shot."
+                )
+            elif previous_last_shot_end is not None and shots[0]["start"] < (
+                previous_last_shot_end - NONSEQUENTIAL_JUMP_TOLERANCE_SECONDS
+            ):
+                warnings.append(
+                    f"Source time jumps backward from {previous_last_shot_end:.1f}s "
+                    f"to {shots[0]['start']:.1f}s -- review for a nonsensical cut."
+                )
+
+            if shots:
+                used_ranges.add(_range_key(shots[0]))
+                previous_last_shot_end = shots[-1]["end"]
+
+            output_segment = {
+                "segment_id": segment["segment_id"],
+                "order": segment["order"],
+                "block_type": "source_moment",
+                "presentation_hint": segment["presentation_hint"],
+                "beat_ids": segment["beat_ids"],
+                "narration_duration_seconds": 0.0,
+                "narration_duration_source": "source_moment",
+                "shots": shots,
+                "has_dialogue_insert": bool(shots),
+                "warnings": warnings,
+            }
+            _refresh_segment_timeline(output_segment)
+            segments_out.append(output_segment)
+            sequence_warnings.extend(
+                f"{segment['segment_id']}: {warning}" for warning in warnings
+            )
+            continue
 
         hint = segment["presentation_hint"]
         use_dialogue_band = hint == "original_dialogue"
@@ -1036,6 +1088,7 @@ def assemble_sequence(
         output_segment = {
             "segment_id": segment["segment_id"],
             "order": segment["order"],
+            "block_type": segment.get("block_type", "narration"),
             "presentation_hint": hint,
             "beat_ids": segment["beat_ids"],
             "narration_duration_seconds": round(target_duration, 3),
@@ -1072,6 +1125,10 @@ def assemble_sequence(
         "visual_hold_duration_seconds": visual_hold_duration,
         "visual_coverage_shortfall_seconds": visual_coverage_shortfall,
         "segments": segments_out,
+        "source_audio_insert_count": sum(
+            int(segment.get("source_audio_insert_count", 0))
+            for segment in segments_out
+        ),
         "sequence_warnings": sequence_warnings,
     }
     _annotate_output_timeline(sequence)
@@ -1206,6 +1263,61 @@ def _source_audio_candidates_for_segment(
     return explicit, fallback
 
 
+def _source_moment_shot(
+    script_segment: dict[str, Any],
+    verified_story_map: dict[str, Any] | None,
+    *,
+    source_video: str | Path | None,
+    transcript_cache_dir: Path | None,
+) -> dict[str, Any] | None:
+    """Build one resolved source-audio shot for an explicit v2 block."""
+
+    explicit, fallback = _source_audio_candidates_for_segment(
+        script_segment, verified_story_map
+    )
+    candidate = next(iter(explicit or fallback), None)
+    if candidate is None:
+        return None
+
+    boundary = resolve_source_audio_boundary(
+        candidate,
+        source_video=source_video,
+        transcript_cache_dir=transcript_cache_dir,
+    )
+    resolved_start = float(boundary["resolved_start"])
+    resolved_end = float(boundary["resolved_end"])
+    duration = resolved_end - resolved_start
+    if duration <= 0:
+        return None
+
+    shot = {
+        "start": round(resolved_start, 3),
+        "end": round(resolved_end, 3),
+        "duration": round(duration, 3),
+        "candidate_start": round(float(candidate["start"]), 3),
+        "candidate_end": round(float(candidate["end"]), 3),
+        "resolved_start": round(resolved_start, 3),
+        "resolved_end": round(resolved_end, 3),
+        "boundary_source": boundary["boundary_source"],
+        "boundary_reason": boundary["boundary_reason"],
+        "source_list": candidate["candidate_origin"],
+        "score": candidate["score"],
+        "selection_score": candidate["score"],
+        "reason": candidate.get("reason", ""),
+        "visual_function": "original_dialogue",
+        "reused": False,
+        "beat_id": candidate.get("beat_id"),
+        "candidate_origin": candidate["candidate_origin"],
+        "treatment": "original_dialogue",
+        "source_audio_insert": True,
+    }
+    if boundary.get("transcript_cache_path"):
+        shot["transcript_cache_path"] = boundary["transcript_cache_path"]
+    if candidate.get("text"):
+        shot["dialogue_text"] = str(candidate["text"])
+    return shot
+
+
 def _selected_source_audio_candidates(
     sequence: dict[str, Any],
     recap_script: dict[str, Any],
@@ -1268,6 +1380,8 @@ def _timeline_target_for_segment(segment: dict[str, Any]) -> float:
         for shot in segment.get("shots", [])
         if shot.get("source_audio_insert")
     )
+    if segment.get("block_type") == "source_moment":
+        return insert_duration
     return float(segment["narration_duration_seconds"]) + insert_duration
 
 
@@ -1297,6 +1411,10 @@ def interweave_original_dialogue(
     """
 
     sequence = copy.deepcopy(sequence)
+    if recap_script.get("schema_version") == 2:
+        # Explicit source_moment blocks already occupy their own timeline
+        # entries. The legacy insertion pass must not split schema-v2 WAVs.
+        return sequence
     # The floor is deliberately a relevance floor, not the former 0.85
     # all-or-nothing policy. Passing a smaller compatibility threshold does
     # not admit arbitrary weak source moments.

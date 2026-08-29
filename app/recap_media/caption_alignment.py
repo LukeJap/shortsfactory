@@ -247,9 +247,9 @@ def build_narration_captions(
 ) -> dict[str, Any]:
     """
     Build narration captions for every narration-bearing segment from a
-    loaded recap_script.json's "segments" list. Segments with
-    presentation_hint "visual_only" carry no narration and are skipped,
-    same as recap_media.voiceover.synthesize_segments().
+    loaded recap_script.json's "segments" list. Schema-v2 source_moment
+    blocks and legacy visual_only segments carry no narration and are
+    skipped, same as recap_media.voiceover.synthesize_segments().
     """
 
     recognized_words_by_segment = recognized_words_by_segment or {}
@@ -257,7 +257,10 @@ def build_narration_captions(
 
     segments_out = []
     for segment in segments:
-        if segment.get("presentation_hint") == "visual_only":
+        if (
+            segment.get("block_type") == "source_moment"
+            or segment.get("presentation_hint") == "visual_only"
+        ):
             continue
 
         segment_id = segment["segment_id"]

@@ -10,6 +10,8 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+RECAP_SCRIPT_SCHEMA_VERSIONS = frozenset({1, 2})
+RECAP_BLOCK_TYPES = frozenset({"narration", "source_moment"})
 PRESENTATION_HINTS = frozenset(
     {
         "narration_over_source",
@@ -363,7 +365,8 @@ def validate_recap_script(
     story_map: dict[str, Any] | None = None,
 ) -> None:
     _require_object(payload, "recap script")
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in RECAP_SCRIPT_SCHEMA_VERSIONS:
         raise RecapValidationError("Unsupported recap script schema version")
     target_duration = _number(
         payload.get("target_duration_seconds"),
@@ -387,8 +390,18 @@ def validate_recap_script(
         if not segment_id or segment_id in seen_ids:
             raise RecapValidationError("Recap segment IDs must be present and unique")
         seen_ids.add(segment_id)
-        if not str(segment.get("text", "")).strip():
+        block_type = "narration" if schema_version == 1 else str(
+            segment.get("block_type", "")
+        ).strip()
+        if block_type not in RECAP_BLOCK_TYPES:
+            raise RecapValidationError(f"{segment_id} has invalid block_type")
+        text = str(segment.get("text", ""))
+        if block_type == "narration" and not text.strip():
             raise RecapValidationError(f"{segment_id} needs narration text")
+        if block_type == "source_moment" and text.strip():
+            raise RecapValidationError(
+                f"{segment_id} source_moment blocks must not carry narration text"
+            )
         hint = str(segment.get("presentation_hint", "")).strip()
         if hint not in PRESENTATION_HINTS:
             raise RecapValidationError(f"{segment_id} has invalid presentation_hint")
@@ -404,3 +417,20 @@ def validate_recap_script(
             for item_index, item in enumerate(items):
                 item = _require_object(item, f"{segment_id}.{field}[{item_index}]")
                 _validate_range(item, f"{segment_id}.{field}[{item_index}]")
+
+        if block_type == "source_moment":
+            has_source_candidate = bool(segment.get("original_dialogue_candidates"))
+            if not has_source_candidate and known_beats:
+                has_source_candidate = any(
+                    isinstance(beat, dict)
+                    and str(beat.get("beat_id")) in beat_ids
+                    and bool(
+                        beat.get("source_evidence")
+                        or beat.get("actual_video_evidence_ranges")
+                    )
+                    for beat in (story_map or {}).get("beats", [])
+                )
+            if not has_source_candidate:
+                raise RecapValidationError(
+                    f"{segment_id} source_moment needs a trustworthy source range"
+                )
