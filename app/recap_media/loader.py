@@ -16,6 +16,7 @@ Track A has a real implementation to compare against.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ class RecapInputError(Exception):
 
 SUPPORTED_SCHEMA_VERSION = 1
 SUPPORTED_RECAP_SCRIPT_SCHEMA_VERSIONS = frozenset({1, 2})
+EXTERNAL_RECAP_SCRIPT_SCHEMA_VERSION = 2
 VALID_BLOCK_TYPES = {"narration", "source_moment"}
 
 VALID_PRESENTATION_HINTS = {
@@ -46,6 +48,21 @@ VALID_MEDIA_TYPES = {
     "tv_episode",
     "movie",
 }
+
+# An external script may describe editorial blocks, but it must never choose
+# a different media file from the accepted episode identity.
+EXTERNAL_SOURCE_OVERRIDE_FIELDS = frozenset(
+    {
+        "source_video",
+        "source_video_path",
+        "source_path",
+        "source_file",
+        "input_video",
+        "video_path",
+        "episode_identity_path",
+    }
+)
+SOURCE_EVIDENCE_TOLERANCE_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -368,20 +385,12 @@ def load_verified_story_map(path: Path = VERIFIED_STORY_MAP_PATH) -> dict[str, A
     return data
 
 
-def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
-    """
-    Load and validate recap_script.json -- schema frozen in
-    SHORTSFACTORY_AI_RECAP_SHARED_CONTRACT.md.
+def _validate_recap_script_payload(
+    data: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    """Validate one already-decoded recap-script payload."""
 
-    One rule enforced here that isn't spelled out verbatim in the
-    contract: every segment must offer at least one selectable source
-    range (a non-empty candidate_visuals or original_dialogue_candidates
-    list) -- otherwise Track B would have narration with literally
-    nothing to show underneath it, regardless of presentation_hint.
-    """
-
-    label = "recap_script.json"
-    data = _read_json(path, label)
     schema_version = _require_schema_version(
         data, label, SUPPORTED_RECAP_SCRIPT_SCHEMA_VERSIONS
     )
@@ -479,6 +488,230 @@ def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
         normalized_segments.append(normalized_segment)
 
     return {**data, "schema_version": schema_version, "segments": normalized_segments}
+
+
+def load_recap_script(path: Path = RECAP_SCRIPT_PATH) -> dict[str, Any]:
+    """
+    Load and validate recap_script.json -- schema frozen in
+    SHORTSFACTORY_AI_RECAP_SHARED_CONTRACT.md.
+
+    One rule enforced here that isn't spelled out verbatim in the
+    contract: every segment must offer at least one selectable source
+    range (a non-empty candidate_visuals or original_dialogue_candidates
+    list) -- otherwise Track B would have narration with literally
+    nothing to show underneath it, regardless of presentation_hint.
+    """
+
+    label = "recap_script.json"
+    return _validate_recap_script_payload(_read_json(path, label), label)
+
+
+def _external_source_range_is_supported(
+    candidate: dict[str, Any],
+    evidence: dict[str, Any],
+) -> bool:
+    """Accept an evidence-contained range or one that substantially overlaps it."""
+
+    start = float(candidate["start"])
+    end = float(candidate["end"])
+    evidence_start = float(evidence["start"])
+    evidence_end = float(evidence["end"])
+    tolerance = SOURCE_EVIDENCE_TOLERANCE_SECONDS
+
+    if start >= evidence_start - tolerance and end <= evidence_end + tolerance:
+        return True
+
+    overlap = max(0.0, min(end, evidence_end) - max(start, evidence_start))
+    duration = end - start
+    return duration > 0 and overlap / duration >= 0.8
+
+
+def _accepted_beats_by_id(verified_story_map: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not isinstance(verified_story_map, dict):
+        raise RecapInputError("accepted verified_story_map must be a JSON object")
+    beats = verified_story_map.get("beats")
+    if not isinstance(beats, list) or not beats:
+        raise RecapInputError("accepted verified_story_map must contain verified beats")
+
+    beats_by_id: dict[str, dict[str, Any]] = {}
+    for index, beat in enumerate(beats):
+        label = f"accepted verified_story_map beats[{index}]"
+        if not isinstance(beat, dict):
+            raise RecapInputError(f"{label} must be a JSON object")
+        beat_id = _require_str(beat, "beat_id", label)
+        _require_int(beat, "order", label)
+        evidence = _require_list(beat, "source_evidence", label)
+        for evidence_index, item in enumerate(evidence):
+            evidence_label = f"{label}.source_evidence[{evidence_index}]"
+            if not isinstance(item, dict):
+                raise RecapInputError(f"{evidence_label} must be a JSON object")
+            _require_time_range(item, evidence_label)
+        beats_by_id[beat_id] = beat
+    return beats_by_id
+
+
+def _validate_external_source_identity(episode_identity: dict[str, Any]) -> None:
+    if not isinstance(episode_identity, dict):
+        raise RecapInputError("accepted episode_identity must be a JSON object")
+    _require_str(episode_identity, "title", "accepted episode_identity")
+    _require_str(episode_identity, "media_type", "accepted episode_identity")
+
+
+def _validate_external_beat_ids(
+    segments: list[dict[str, Any]],
+    beats_by_id: dict[str, dict[str, Any]],
+) -> None:
+    for segment in segments:
+        segment_id = str(segment.get("segment_id", "<unknown>"))
+        for beat_id in segment.get("beat_ids", []):
+            if beat_id not in beats_by_id:
+                raise RecapInputError(f"Unknown beat {beat_id} in block {segment_id}.")
+
+
+def _validate_external_source_grounding(
+    segments: list[dict[str, Any]],
+    beats_by_id: dict[str, dict[str, Any]],
+) -> None:
+    for segment in segments:
+        if segment.get("block_type") != "source_moment":
+            continue
+        segment_id = str(segment["segment_id"])
+        assigned_evidence = [
+            evidence
+            for beat_id in segment["beat_ids"]
+            for evidence in beats_by_id[beat_id].get("source_evidence", [])
+        ]
+        for field in ("candidate_visuals", "original_dialogue_candidates"):
+            for candidate in segment.get(field, []):
+                if any(
+                    _external_source_range_is_supported(candidate, evidence)
+                    for evidence in assigned_evidence
+                ):
+                    continue
+                beat_label = ", ".join(segment["beat_ids"])
+                raise RecapInputError(
+                    f"Source moment {segment_id} range is not supported by accepted "
+                    f"evidence for {beat_label}."
+                )
+
+
+def _validate_external_chronology(
+    segments: list[dict[str, Any]],
+    beats_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """Allow one opening hook-to-setup backfill, but reject later regressions."""
+
+    seen_beat_ids: set[str] = set()
+    highest_order: int | None = None
+    used_opening_backfill = False
+
+    for segment in sorted(segments, key=lambda item: item["order"]):
+        new_beat_ids = [
+            beat_id for beat_id in segment["beat_ids"] if beat_id not in seen_beat_ids
+        ]
+        if not new_beat_ids:
+            continue
+        new_orders = [int(beats_by_id[beat_id]["order"]) for beat_id in new_beat_ids]
+        earliest_new_order = min(new_orders)
+        if highest_order is not None and earliest_new_order < highest_order:
+            # A non-chronological hook followed by a minimum earlier setup is
+            # an established recap pattern. It is safe only before the story
+            # has progressed through more than its first distinct beat.
+            can_backfill_opening = len(seen_beat_ids) == 1 and not used_opening_backfill
+            if not can_backfill_opening:
+                raise RecapInputError(
+                    f"Block {segment['segment_id']} moves backwards from accepted "
+                    "story chronology."
+                )
+            used_opening_backfill = True
+        seen_beat_ids.update(new_beat_ids)
+        highest_order = max(highest_order or new_orders[0], max(new_orders))
+
+
+def _supplement_missing_external_visuals(
+    segments: list[dict[str, Any]],
+    beats_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """Supply only accepted local evidence when narration has no visuals at all."""
+
+    for segment in segments:
+        if segment.get("block_type") != "narration":
+            continue
+        if segment.get("candidate_visuals") or segment.get("original_dialogue_candidates"):
+            continue
+        supplemental: list[dict[str, Any]] = []
+        for beat_id in segment["beat_ids"]:
+            for evidence in beats_by_id[beat_id].get("source_evidence", []):
+                supplemental.append(
+                    {
+                        "start": evidence["start"],
+                        "end": evidence["end"],
+                        "score": evidence.get("confidence", 0.5),
+                        "reason": f"Accepted verified story evidence for {beat_id}.",
+                        "beat_id": beat_id,
+                    }
+                )
+        if supplemental:
+            segment["candidate_visuals"] = supplemental
+
+
+def load_external_recap_script(
+    path: Path,
+    *,
+    episode_identity: dict[str, Any],
+    verified_story_map: dict[str, Any],
+) -> dict[str, Any]:
+    """Load an external schema-v2 script against accepted Track A artifacts.
+
+    ``episode_identity`` and ``verified_story_map`` must be the normalized,
+    already-accepted outputs of :func:`load_episode_identity` and
+    :func:`load_verified_story_map`. The imported file contributes creative
+    blocks only; it never selects a media source or changes story evidence.
+    """
+
+    _validate_external_source_identity(episode_identity)
+    beats_by_id = _accepted_beats_by_id(verified_story_map)
+    data = _read_json(path, "external recap script")
+    if data.get("schema_version") != EXTERNAL_RECAP_SCRIPT_SCHEMA_VERSION:
+        raise RecapInputError("External import requires schema v2.")
+    for field in EXTERNAL_SOURCE_OVERRIDE_FIELDS:
+        if data.get(field) not in (None, ""):
+            raise RecapInputError(
+                f"External recap script cannot override accepted source identity via {field!r}."
+            )
+
+    normalized = deepcopy(data)
+    raw_segments = normalized.get("segments")
+    if not isinstance(raw_segments, list):
+        # Let the existing contract validator provide its standard field error.
+        return _validate_recap_script_payload(normalized, "external recap script")
+
+    # Keep external prose exactly as supplied. Only missing source metadata is
+    # derived, and only from verified evidence for the block's own beat IDs.
+    _validate_external_beat_ids(
+        [segment for segment in raw_segments if isinstance(segment, dict)], beats_by_id
+    )
+    _supplement_missing_external_visuals(
+        [segment for segment in raw_segments if isinstance(segment, dict)], beats_by_id
+    )
+    parsed = _validate_recap_script_payload(normalized, "external recap script")
+
+    orders = [segment["order"] for segment in parsed["segments"]]
+    if orders != sorted(orders):
+        raise RecapInputError("External recap script segment orders must be strictly increasing.")
+    _validate_external_beat_ids(parsed["segments"], beats_by_id)
+    _validate_external_source_grounding(parsed["segments"], beats_by_id)
+    _validate_external_chronology(parsed["segments"], beats_by_id)
+
+    authoring_source = data.get("authoring_source")
+    if not isinstance(authoring_source, str) or not authoring_source.strip():
+        authoring_source = "external"
+    return {
+        **parsed,
+        "authoring_source": authoring_source.strip(),
+        "script_source": "external",
+        "imported_from": Path(path).name,
+    }
 
 
 def load_recap_inputs(

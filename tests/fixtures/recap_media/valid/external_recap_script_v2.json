@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "authoring_source": "external_chatgpt",
+  "target_duration_seconds": 24,
+  "target_word_count": 55,
+  "voice_style": "conversational_recap",
+  "segments": [
+    {
+      "segment_id": "N_001",
+      "order": 1,
+      "block_type": "narration",
+      "text": "A letter appears at the door, and the whole situation immediately feels suspicious.",
+      "beat_ids": ["B001"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.8,
+      "candidate_visuals": [{"start": 12.0, "end": 18.4, "score": 0.9, "reason": "Shows the letter discovery."}],
+      "original_dialogue_candidates": []
+    },
+    {
+      "segment_id": "S_001",
+      "order": 2,
+      "block_type": "source_moment",
+      "text": "",
+      "beat_ids": ["B001"],
+      "presentation_hint": "original_dialogue",
+      "importance": 0.85,
+      "candidate_visuals": [],
+      "original_dialogue_candidates": [{"start": 12.0, "end": 18.4, "score": 0.9, "reason": "Accepted dialogue moment."}]
+    },
+    {
+      "segment_id": "N_002",
+      "order": 3,
+      "block_type": "narration",
+      "text": "That discovery sends the protagonist straight into a confrontation with their rival.",
+      "beat_ids": ["B002"],
+      "presentation_hint": "narration_over_source",
+      "importance": 0.95,
+      "candidate_visuals": [],
+      "original_dialogue_candidates": []
+    },
+    {
+      "segment_id": "S_002",
+      "order": 4,
+      "block_type": "source_moment",
+      "text": "",
+      "beat_ids": ["B002"],
+      "presentation_hint": "original_dialogue",
+      "importance": 0.9,
+      "candidate_visuals": [{"start": 120.5, "end": 128.2, "score": 0.85, "reason": "Accepted confrontation footage."}],
+      "original_dialogue_candidates": [{"start": 120.5, "end": 128.2, "score": 0.88, "reason": "Accepted confrontation dialogue."}]
+    }
+  ]
+}
