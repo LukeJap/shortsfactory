@@ -25,6 +25,7 @@ input/
 # Generated ShortsFactory output
 output/
 videos/
+Orpheus-FastAPI/
 
 # Recovery/decompiler files
 .tmp_pycdc_rapid/
