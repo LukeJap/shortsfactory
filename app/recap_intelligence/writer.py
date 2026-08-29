@@ -25,7 +25,10 @@ DEFAULT_OUTLINE_PROMPT_PATH = ROOT / "prompts" / "recap_outline.md"
 DEFAULT_PROMPT_PATH = ROOT / "prompts" / "recap_writer.md"
 DEFAULT_CRITIC_PROMPT_PATH = ROOT / "prompts" / "recap_critic.md"
 DEFAULT_REPAIR_PROMPT_PATH = ROOT / "prompts" / "recap_repair.md"
-WRITER_PROMPT_VERSION = "recap-writer-rich-plan-authoritative-v5"
+WRITER_PROMPT_VERSION = "recap-writer-rich-explicit-blocks-v8"
+RICH_RECAP_SCHEMA_VERSION = 2
+RICH_TARGET_NARRATION_BLOCK_WORDS = 35
+RICH_MAX_NARRATION_BLOCK_WORDS = 48
 
 
 class RecapWritingError(RuntimeError):
@@ -104,12 +107,12 @@ def _story_payload(story_map: dict[str, Any]) -> dict[str, Any]:
 
 def _rich_thought_payload(
     story_map: dict[str, Any],
-    outline: dict[str, Any],
+    editorial_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expose only the selected factual material to the RICH prose call."""
+    """Expose only deterministic narration units to the RICH prose call."""
     verified_beats = _beat_map(story_map, verified_only=True)
     fields = (
-        "summary",
+        "story_purpose",
         "characters",
         "motivation",
         "change",
@@ -117,7 +120,7 @@ def _rich_thought_payload(
         "payoff_significance",
     )
     thoughts: list[dict[str, Any]] = []
-    for planned in outline.get("planned_segments", []):
+    for planned in editorial_plan.get("narration_blocks", []):
         facts = []
         for beat_id in planned.get("beat_ids", []):
             beat = verified_beats.get(str(beat_id))
@@ -129,17 +132,28 @@ def _rich_thought_payload(
                 if field in beat and _meaningful_text(beat.get(field))
             }
             if fact:
+                excerpts = [
+                    " ".join(
+                        str(item.get("transcript_excerpt", "") or "").split()
+                    )
+                    for item in beat.get("actual_video_evidence_ranges", []) or []
+                    if isinstance(item, dict)
+                    and str(item.get("transcript_excerpt", "") or "").strip()
+                ]
+                if excerpts:
+                    fact["verified_source_facts"] = list(dict.fromkeys(excerpts))[:2]
                 facts.append(fact)
         thoughts.append(
             {
-                "plan_id": str(planned.get("plan_id", "")),
+                "block_id": str(planned.get("block_id", "")),
                 "story_role": str(planned.get("function", "")),
                 "assigned_facts": facts,
                 "target_words": int(planned.get("target_words", 0) or 0),
                 "word_range": list(planned.get("word_range", [])),
+                "next_source_moment": planned.get("next_source_moment"),
             }
         )
-    return {"planned_thoughts": thoughts}
+    return {"planned_narration_blocks": thoughts}
 
 
 def _ranges_for_beats(
@@ -261,6 +275,98 @@ def _dialogue_for_beats(
             if isinstance(item, dict):
                 candidates.append(dict(item))
     return candidates[:2]
+
+
+def _candidate_text(candidate: dict[str, Any]) -> str:
+    """Return dialogue/excerpt text when a trusted source candidate carries it."""
+    for field in ("dialogue", "text", "transcript_excerpt", "excerpt"):
+        value = " ".join(str(candidate.get(field, "") or "").split())
+        if value:
+            return value
+    return ""
+
+
+def _accepted_source_candidates_for_beat(
+    beat_id: str,
+    beat: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Collect writer-safe source moments without searching beyond Track A evidence."""
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[float, float]] = set()
+
+    def add(
+        raw: dict[str, Any],
+        *,
+        origin: str,
+        default_reason: str,
+        priority_bonus: float,
+    ) -> None:
+        try:
+            start = round(float(raw.get("start")), 4)
+            end = round(float(raw.get("end")), 4)
+        except (TypeError, ValueError):
+            return
+        if end <= start or (start, end) in seen:
+            return
+        try:
+            score = float(raw.get("score", raw.get("confidence", 0.5)) or 0.5)
+        except (TypeError, ValueError):
+            score = 0.5
+        score = max(0.0, min(1.0, score))
+        purpose = _purpose(beat)
+        importance = max(0.0, min(1.0, float(beat.get("importance", 0.5) or 0.5)))
+        story_bonus = 0.12 if any(
+            token in purpose
+            for token in ("choice", "reversal", "reveal", "payoff", "climax", "resolution")
+        ) else 0.0
+        seen.add((start, end))
+        candidates.append(
+            {
+                "beat_id": beat_id,
+                "start": start,
+                "end": end,
+                "score": round(score, 4),
+                "reason": str(raw.get("reason", "") or "").strip() or default_reason,
+                "source_text": _candidate_text(raw),
+                "origin": origin,
+                "priority": round(score + importance * 0.25 + story_bonus + priority_bonus, 4),
+            }
+        )
+
+    for item in beat.get("original_dialogue_candidates", []) or []:
+        if isinstance(item, dict):
+            add(
+                item,
+                origin="accepted_dialogue_candidate",
+                default_reason=f"Accepted original-dialogue candidate for story beat {beat_id}.",
+                priority_bonus=0.25,
+            )
+    for item in beat.get("actual_video_evidence_ranges", []) or []:
+        if isinstance(item, dict):
+            add(
+                item,
+                origin="verified_story_evidence",
+                default_reason=f"Verified source evidence for story beat {beat_id}.",
+                priority_bonus=0.0,
+            )
+    return sorted(
+        candidates,
+        key=lambda item: (-item["priority"], -item["score"], item["start"], item["end"]),
+    )
+
+
+def _importance_for_beats(
+    beat_ids: list[str],
+    beats: dict[str, dict[str, Any]],
+) -> float:
+    importance = max(
+        [float(beats[beat_id].get("importance", 0.5) or 0.5) for beat_id in beat_ids if beat_id in beats]
+        or [0.5]
+    )
+    purposes = " ".join(_purpose(beats[beat_id]) for beat_id in beat_ids if beat_id in beats)
+    if any(token in purposes for token in ("payoff", "climax", "reversal", "reveal")):
+        importance += 0.025
+    return round(max(0.0, min(1.0, importance)), 4)
 
 
 def _purpose(beat: dict[str, Any]) -> str:
@@ -736,6 +842,126 @@ def build_narration_plan(
     }
 
 
+def _split_editorial_beat_ids(beat_ids: list[str], parts: int) -> list[list[str]]:
+    """Split a deterministic thought into contiguous, chronologically coherent units."""
+    count = max(1, min(parts, len(beat_ids)))
+    base, remainder = divmod(len(beat_ids), count)
+    output: list[list[str]] = []
+    cursor = 0
+    for index in range(count):
+        size = base + (1 if index < remainder else 0)
+        output.append(beat_ids[cursor : cursor + size])
+        cursor += size
+    return [item for item in output if item]
+
+
+def _split_editorial_word_budget(target_words: int, parts: int) -> list[int]:
+    target = max(1, int(target_words or 0))
+    base, remainder = divmod(target, max(1, parts))
+    return [base + (1 if index < remainder else 0) for index in range(parts)]
+
+
+def build_rich_editorial_plan(
+    story_map: dict[str, Any],
+    outline: dict[str, Any],
+    config: RecapWritingConfig,
+) -> dict[str, Any]:
+    """Expand the fixed story spine into deterministic narration/source blocks.
+
+    The language model gets narration units only. Source blocks are chosen here
+    from previously accepted Track A evidence, so prose generation cannot invent
+    source ranges or alter the edit structure.
+    """
+    beats = _beat_map(story_map, verified_only=True)
+    narration_blocks: list[dict[str, Any]] = []
+    source_blocks: list[dict[str, Any]] = []
+    blocks: list[dict[str, Any]] = []
+    used_ranges: set[tuple[float, float]] = set()
+
+    for planned in outline.get("planned_segments", []):
+        beat_ids = [
+            str(beat_id)
+            for beat_id in planned.get("beat_ids", [])
+            if str(beat_id) in beats
+        ]
+        if not beat_ids:
+            continue
+        target_words = max(1, int(planned.get("target_words", 0) or 0))
+        part_count = min(
+            len(beat_ids),
+            max(1, (target_words + RICH_TARGET_NARRATION_BLOCK_WORDS - 1) // RICH_TARGET_NARRATION_BLOCK_WORDS),
+        )
+        beat_groups = _split_editorial_beat_ids(beat_ids, part_count)
+        word_budgets = _split_editorial_word_budget(target_words, len(beat_groups))
+
+        source_pool = [
+            candidate
+            for beat_id in beat_ids
+            for candidate in _accepted_source_candidates_for_beat(beat_id, beats[beat_id])
+            if (candidate["start"], candidate["end"]) not in used_ranges
+        ]
+        source_candidate = max(
+            source_pool,
+            key=lambda item: (item["priority"], item["score"], -item["start"]),
+            default=None,
+        )
+        if source_candidate is not None:
+            used_ranges.add((source_candidate["start"], source_candidate["end"]))
+
+        source_host_index = next(
+            (
+                index
+                for index, group in enumerate(beat_groups)
+                if source_candidate is not None and source_candidate["beat_id"] in group
+            ),
+            None,
+        )
+        for group_index, (group, word_budget) in enumerate(zip(beat_groups, word_budgets)):
+            narration = {
+                "block_id": f"N_{len(narration_blocks) + 1:03d}",
+                "plan_id": str(planned.get("plan_id", "")),
+                "function": str(planned.get("function", "")),
+                "beat_ids": group,
+                "target_words": word_budget,
+                "word_range": [max(8, word_budget - 8), word_budget + 8],
+                "importance": _importance_for_beats(group, beats),
+                "next_source_moment": None,
+            }
+            if source_candidate is not None and group_index == source_host_index:
+                source = {
+                    "block_id": f"S_{len(source_blocks) + 1:03d}",
+                    "plan_id": str(planned.get("plan_id", "")),
+                    "block_type": "source_moment",
+                    "beat_ids": [source_candidate["beat_id"]],
+                    "candidate": {
+                        field: source_candidate[field]
+                        for field in ("start", "end", "score", "reason")
+                    },
+                    "source_text": source_candidate["source_text"],
+                    "origin": source_candidate["origin"],
+                    "importance": _importance_for_beats([source_candidate["beat_id"]], beats),
+                }
+                narration["next_source_moment"] = {
+                    "purpose": "Set up or react to the next source moment without repeating its line.",
+                    "source_dialogue": source_candidate["source_text"],
+                }
+                source_blocks.append(source)
+            narration_blocks.append(narration)
+            blocks.append(narration)
+            if source_candidate is not None and group_index == source_host_index:
+                blocks.append(source_blocks[-1])
+
+    if not narration_blocks:
+        raise RecapWritingError("RICH editorial plan has no narration blocks")
+    return {
+        "narration_blocks": narration_blocks,
+        "source_blocks": source_blocks,
+        "blocks": blocks,
+        "planned_word_count": sum(item["target_words"] for item in narration_blocks),
+        "source_moment_count": len(source_blocks),
+    }
+
+
 def _normalize_ranges(value: Any, field: str) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise RecapWritingError(f"{field} must be a list")
@@ -1089,6 +1315,11 @@ def validate_script_quality_invariants(
             for item in _dialogue_sources_for_beat(verified_beats.get(beat_id, {}))
             if isinstance(item, dict)
         ]
+        if segment.get("block_type") == "source_moment":
+            # A deterministic explicit source block may deliberately use an
+            # accepted verified-evidence range even when it is not a concise
+            # dialogue candidate. Track B refines its boundary later.
+            dialogue_sources.extend(evidence)
         for dialogue in segment.get("original_dialogue_candidates", []):
             if not _supported_range(dialogue, dialogue_sources):
                 raise RecapWritingError(
@@ -1165,6 +1396,91 @@ def validate_script_quality_invariants(
         raise RecapWritingError(
             "Narration importance is uniform despite varied verified beat importance"
         )
+
+
+def _ends_with_complete_thought(text: str) -> bool:
+    return str(text or "").rstrip().endswith((".", "!", "?", "…"))
+
+
+def _directly_repeats_source_dialogue(narration: str, source_dialogue: str) -> bool:
+    """Catch only clear duplicate dialogue, not ordinary shared story vocabulary."""
+    source = _normalized_prose(source_dialogue)
+    narration_text = _normalized_prose(narration)
+    if _word_count(source) < 4 or not narration_text:
+        return False
+    if source in narration_text:
+        return True
+    return SequenceMatcher(None, source, narration_text).ratio() >= 0.9
+
+
+def validate_rich_editorial_blocks(
+    script: dict[str, Any],
+    editorial_plan: dict[str, Any],
+) -> None:
+    """Enforce the writer-owned alternation without second-guessing Track B edits."""
+    if script.get("schema_version") != RICH_RECAP_SCHEMA_VERSION:
+        raise RecapWritingError("RICH writer must emit recap script schema version 2")
+    segments = list(script.get("segments", []))
+    expected_blocks = list(editorial_plan.get("blocks", []))
+    expected_ids = [str(item.get("block_id", "")) for item in expected_blocks]
+    actual_ids = [str(item.get("segment_id", "")) for item in segments]
+    if actual_ids != expected_ids:
+        raise RecapWritingError(
+            "RICH editorial block IDs/order changed after deterministic planning; "
+            f"expected={expected_ids}, actual={actual_ids}"
+        )
+    if [int(segment.get("order", 0) or 0) for segment in segments] != list(
+        range(1, len(segments) + 1)
+    ):
+        raise RecapWritingError("RICH editorial block order must be strictly increasing")
+
+    seen_ranges: set[tuple[float, float]] = set()
+    planned_by_id = {str(item.get("block_id", "")): item for item in expected_blocks}
+    for index, segment in enumerate(segments):
+        segment_id = str(segment.get("segment_id", ""))
+        planned = planned_by_id[segment_id]
+        block_type = str(segment.get("block_type", ""))
+        expected_type = str(planned.get("block_type", "narration"))
+        if block_type != expected_type:
+            raise RecapWritingError(f"{segment_id} has the wrong deterministic block_type")
+        if block_type == "narration":
+            text = str(segment.get("text", "") or "").strip()
+            if not text:
+                raise RecapWritingError(f"{segment_id} needs narration text")
+            target = int(planned.get("target_words", 0) or 0)
+            if _word_count(text) > max(RICH_MAX_NARRATION_BLOCK_WORDS + 16, target * 2):
+                raise RecapWritingError(
+                    f"{segment_id} is too long for a short editorial narration block"
+                )
+            continue
+
+        if str(segment.get("text", "") or "").strip():
+            raise RecapWritingError(f"{segment_id} source_moment must have blank text")
+        candidates = segment.get("original_dialogue_candidates", [])
+        if len(candidates) != 1 or not isinstance(candidates[0], dict):
+            raise RecapWritingError(f"{segment_id} needs one deterministic source candidate")
+        candidate = candidates[0]
+        expected_candidate = planned.get("candidate", {})
+        if not _supported_range(candidate, [expected_candidate]):
+            raise RecapWritingError(f"{segment_id} source candidate was not preserved")
+        key = (round(float(candidate["start"]), 4), round(float(candidate["end"]), 4))
+        if key in seen_ranges:
+            raise RecapWritingError(f"{segment_id} duplicates an earlier source range")
+        seen_ranges.add(key)
+        if index == 0 or segments[index - 1].get("block_type") != "narration":
+            raise RecapWritingError(f"{segment_id} must follow a narration block")
+        if index + 1 < len(segments) and segments[index + 1].get("block_type") != "narration":
+            raise RecapWritingError(f"{segment_id} must not form a source-moment cluster")
+        previous_text = str(segments[index - 1].get("text", "") or "").strip()
+        if not previous_text or not _ends_with_complete_thought(previous_text):
+            raise RecapWritingError(
+                f"Narration before {segment_id} must end as a complete thought"
+            )
+        source_text = str(planned.get("source_text", "") or "")
+        if _directly_repeats_source_dialogue(previous_text, source_text):
+            raise RecapWritingError(
+                f"Narration before {segment_id} repeats the upcoming source dialogue"
+            )
 
 
 def normalize_critique(
@@ -1419,30 +1735,40 @@ class RecapWriter:
     def _rich_main_narration_prompt(
         self,
         story_map: dict[str, Any],
-        outline: dict[str, Any],
+        editorial_plan: dict[str, Any],
     ) -> str:
         return (
             "Write original, grounded recap narration using only the factual "
-            "material in the authoritative plan below. Do not copy summaries "
-            "verbatim or invent facts, motives, dialogue, stakes, or transitions. "
-            "Keep each thought understandable as audio-only narration and stay near "
-            "its supplied word range.\n\nRICH AUTHORITATIVE NARRATION PLAN:\n"
+            "material in the authoritative editorial plan below. Sound like a "
+            "confident storyteller telling a viewer what happened: conversational, "
+            "reactive, concise, and emotionally aware. Use natural spoken phrasing "
+            "and an occasional mild observation when grounded, never generic TikTok "
+            "slang. Do not copy summaries verbatim or invent facts, motives, dialogue, "
+            "stakes, quotes, or transitions. Keep each narration unit short, complete, "
+            "and understandable as audio-only narration.\n\n"
+            "The assigned facts may include a source summary. Treat it as private "
+            "fact reference only: do not reuse a distinctive phrase or the same "
+            "sentence structure. Re-express the beat in a fresh spoken angle.\n\n"
+            "If a unit is immediately followed by a source moment, set it up or react "
+            "to it without saying the exact dialogue the viewer is about to hear.\n\n"
+            "RICH AUTHORITATIVE EDITORIAL PLAN:\n"
             + json.dumps(
-                _rich_thought_payload(story_map, outline),
+                _rich_thought_payload(story_map, editorial_plan),
                 indent=2,
                 ensure_ascii=False,
             )
             + "\n\nFor this RICH task, the response contract below overrides "
             "generic instructions about segment IDs, beat IDs, visuals, dialogue, "
-            "importance, and presentation hints. Write only the narration text for "
-            "each supplied plan_id. Do not add, remove, reorder, split, merge, or "
-            "reinterpret planned thoughts.\n\nRICH NARRATION RESPONSE CONTRACT:\n"
+            "importance, presentation hints, source ranges, or block ordering. Write "
+            "only the narration text for each supplied block_id. Do not add, remove, "
+            "reorder, split, merge, or reinterpret planned narration blocks.\n\n"
+            "RICH NARRATION RESPONSE CONTRACT:\n"
             + "Return ONLY one JSON object with this top-level shape:\n"
             + json.dumps(
                 {
                     "narration": [
                         {
-                            "plan_id": "P01",
+                            "block_id": "N_001",
                             "text": "Original grounded narration.",
                         }
                     ]
@@ -1450,9 +1776,10 @@ class RecapWriter:
                 indent=2,
             )
             + "\nThe top-level key must be narration. Return exactly one item for "
-            "every supplied plan_id, in the supplied order. Each item may contain "
-            "only plan_id and text. Do not return segments, story beats, beat IDs, "
-            "an outline, a story map, visuals, dialogue, importance, or presentation hints."
+            "every supplied block_id, in the supplied order. Each item may contain "
+            "only block_id and text. Do not return segments, story beats, beat IDs, "
+            "an outline, a story map, visuals, dialogue, source ranges, importance, "
+            "or presentation hints."
         )
 
     def _section_prompt(
@@ -2279,10 +2606,11 @@ class RecapWriter:
             + "\n\nAUTHORITATIVE RICH PLAN:\n"
             + original_prompt
             + "\n\nRepair only the missing or invalid narration text items. Keep valid "
-            "plan_id/text pairs unchanged. Return the complete narration array in "
-            "the original exact plan order; do not alter the plan, grouping, or "
-            "factual assignment. Return ONLY {\"narration\":[{\"plan_id\":\"P01\","
-            "\"text\":\"...\"}]} with one item per plan_id."
+            "block IDs in the original exact plan order; do not alter the plan, "
+            "grouping, or factual assignment. For every cited invalid block, write "
+            "fresh phrasing rather than reusing its prior sentence or the source "
+            "summary's clause structure. Return ONLY {\"narration\":[{\"block_id\":\"N_001\","
+            "\"text\":\"...\"}]} with one item per block_id."
         )
 
     def _generate(self, prompt: str) -> ModelGeneration:
@@ -2395,22 +2723,30 @@ class RecapWriter:
         outline: dict[str, Any],
     ) -> dict[str, Any]:
         """Write a rich researched story in one draft plus one bounded repair."""
+        editorial_plan = build_rich_editorial_plan(story_map, outline, self.config)
         self.last_diagnostics.update(
             {
                 "control_flow": "rich_fast_path",
                 "critic_bypassed": True,
                 "revision_attempt_count": 0,
                 "targeted_expansion_used": False,
+                "editorial_block_plan": editorial_plan,
             }
         )
+        prompt = self._rich_main_narration_prompt(story_map, editorial_plan)
         script = self._run_stage(
             "rich_main_narration",
-            self._rich_main_narration_prompt(story_map, outline),
-            lambda raw: self._validated_rich_narration(raw, story_map, outline),
+            prompt,
+            lambda raw: self._validated_rich_narration(
+                raw,
+                story_map,
+                outline,
+                editorial_plan,
+            ),
             max_model_calls=2,
             repair_prompt_builder=lambda generation, errors: self._rich_repair_prompt(
                 stage="rich_main_narration",
-                original_prompt=self._rich_main_narration_prompt(story_map, outline),
+                original_prompt=prompt,
                 generation=generation,
                 errors=errors,
             ),
@@ -2633,6 +2969,7 @@ class RecapWriter:
         raw: dict[str, Any],
         story_map: dict[str, Any],
         outline: dict[str, Any],
+        editorial_plan: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise RecapWritingError("RICH narration response must be an object")
@@ -2644,47 +2981,106 @@ class RecapWriter:
         if not isinstance(narration, list):
             raise RecapWritingError("RICH narration response needs a narration array")
 
-        planned = list(outline.get("planned_segments", []))
-        expected_ids = [str(item.get("plan_id", "")) for item in planned]
+        planned = list(editorial_plan.get("narration_blocks", []))
+        expected_ids = [str(item.get("block_id", "")) for item in planned]
         actual_ids = [
-            str(item.get("plan_id", ""))
+            str(item.get("block_id", ""))
             for item in narration
             if isinstance(item, dict)
         ]
         if len(narration) != len(planned) or actual_ids != expected_ids:
             raise RecapWritingError(
-                "RICH narration must contain exactly one item for each plan_id "
+                "RICH narration must contain exactly one item for each block_id "
                 f"in deterministic order; expected={expected_ids}, actual={actual_ids}"
             )
 
-        raw_segments: list[dict[str, Any]] = []
+        beats = _beat_map(story_map, verified_only=True)
+        narration_by_id: dict[str, str] = {}
         for planned_item, narration_item in zip(planned, narration):
             if not isinstance(narration_item, dict):
                 raise RecapWritingError("RICH narration items must be objects")
-            if set(narration_item) != {"plan_id", "text"}:
+            if set(narration_item) != {"block_id", "text"}:
                 raise RecapWritingError(
-                    "RICH narration items may contain only plan_id and text"
+                    "RICH narration items may contain only block_id and text"
                 )
             text = " ".join(str(narration_item.get("text", "") or "").split())
             if not text:
                 raise RecapWritingError(
-                    f"RICH narration item {narration_item['plan_id']} has no text"
+                    f"RICH narration item {narration_item['block_id']} has no text"
                 )
-            raw_segments.append(
+            copied = [
+                beat_id
+                for beat_id in planned_item.get("beat_ids", [])
+                if _looks_copied_from_summary(
+                    text,
+                    beats.get(str(beat_id), {}),
+                )
+            ]
+            if copied:
+                raise RecapWritingError(
+                    f"RICH narration block {planned_item['block_id']} copies "
+                    f"verified story-map summary wording: {copied}"
+                )
+            narration_by_id[str(planned_item["block_id"])] = text
+
+        segments: list[dict[str, Any]] = []
+        for order, block in enumerate(editorial_plan.get("blocks", []), start=1):
+            block_id = str(block.get("block_id", ""))
+            block_type = str(block.get("block_type", "narration"))
+            beat_ids = list(block.get("beat_ids", []))
+            if block_type == "narration":
+                text = narration_by_id[block_id]
+                segments.append(
+                    {
+                        "segment_id": block_id,
+                        "order": order,
+                        "block_type": "narration",
+                        "text": text,
+                        "word_count": _word_count(text),
+                        "beat_ids": beat_ids,
+                        "presentation_hint": "narration_over_source",
+                        "importance": _importance_for_beats(beat_ids, beats),
+                        "candidate_visuals": _ranges_for_beats(beat_ids, beats),
+                        "original_dialogue_candidates": _normalize_ranges(
+                            _dialogue_for_beats(beat_ids, beats),
+                            f"{block_id}.original_dialogue_candidates",
+                        ),
+                    }
+                )
+                continue
+            candidate = dict(block.get("candidate", {}))
+            segments.append(
                 {
-                    "segment_id": f"VO_{len(raw_segments) + 1:03d}",
-                    "text": text,
-                    "beat_ids": list(planned_item.get("beat_ids", [])),
-                    "presentation_hint": "narration_over_source",
+                    "segment_id": block_id,
+                    "order": order,
+                    "block_type": "source_moment",
+                    "text": "",
+                    "word_count": 0,
+                    "beat_ids": beat_ids,
+                    "presentation_hint": "original_dialogue",
+                    "importance": _importance_for_beats(beat_ids, beats),
+                    "candidate_visuals": _ranges_for_beats(beat_ids, beats),
+                    "original_dialogue_candidates": _normalize_ranges(
+                        [candidate],
+                        f"{block_id}.original_dialogue_candidates",
+                    ),
                 }
             )
 
-        script = normalize_script(
-            raw_segments_payload(raw_segments),
-            story_map,
-            self.config,
-            deterministic_segment_ids=True,
-        )
+        script = {
+            "schema_version": RICH_RECAP_SCHEMA_VERSION,
+            "generated_at": utc_now(),
+            "target_duration_seconds": self.config.target_duration_seconds,
+            "target_word_count": self.config.target_word_count,
+            "voice_style": self.config.voice_style,
+            "actual_word_count": sum(
+                int(segment["word_count"])
+                for segment in segments
+                if segment["block_type"] == "narration"
+            ),
+            "segments": segments,
+            "warnings": [],
+        }
         validate_script_quality_invariants(
             script,
             story_map,
@@ -2692,6 +3088,7 @@ class RecapWriter:
             self.config,
             allow_compact_protected_thoughts=True,
         )
+        validate_rich_editorial_blocks(script, editorial_plan)
         return script
 
 

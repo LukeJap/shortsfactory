@@ -14,6 +14,7 @@ from recap_intelligence.writer import (
     RecapWritingError,
     TemplateRecapWriter,
     build_narration_plan,
+    build_rich_editorial_plan,
     normalize_script,
     validate_script_quality_invariants,
 )
@@ -382,20 +383,22 @@ def rich_story_map():
     return source
 
 
-def rich_draft(source, *, text_by_plan_id=None):
-    plan = build_narration_plan(source, small_config())
+def rich_draft(source, *, text_by_plan_id=None, config=None):
+    config = config or small_config()
+    plan = build_narration_plan(source, config)
+    editorial = build_rich_editorial_plan(source, plan, config)
     text_by_plan_id = text_by_plan_id or {}
     return {
         "narration": [
             {
-                "plan_id": item["plan_id"],
+                "block_id": item["block_id"],
                 "text": text_by_plan_id.get(
                     item["plan_id"],
                     "An original grounded narration thought advances the "
                     f"verified story movement {index}.",
                 ),
             }
-            for index, item in enumerate(plan["planned_segments"], start=1)
+            for index, item in enumerate(editorial["narration_blocks"], start=1)
         ]
     }
 
@@ -434,10 +437,12 @@ def test_rich_writer_uses_one_generation_without_critic_or_revision():
     assert writer.last_diagnostics["critic_bypassed"] is True
     assert writer.last_diagnostics["targeted_repair_used"] is False
     assert writer.last_diagnostics["revision_attempt_count"] == 0
-    assert '"planned_thoughts"' in model.prompts[0]
+    assert script["schema_version"] == 2
+    assert '"planned_narration_blocks"' in model.prompts[0]
     assert '"narration"' in model.prompts[0]
     assert '"verified_beats"' not in model.prompts[0]
     assert '"B001"' not in model.prompts[0]
+    assert "Verified story event number 1 changes the situation." not in model.prompts[0]
 
 
 def test_rich_writer_allows_only_one_targeted_repair_call():
@@ -483,7 +488,7 @@ def test_rich_writer_repairs_a_beats_envelope_to_plan_text_only():
     assert writer.last_diagnostics["attempts"][0]["validation_errors"] == [
         "RICH narration response must contain only the narration array"
     ]
-    assert "one item per plan_id" in model.prompts[1]
+    assert "one item per block_id" in model.prompts[1]
 
 
 def test_rich_writer_schema_repair_never_exceeds_two_calls():
@@ -513,9 +518,11 @@ def test_rich_writer_requires_exactly_one_item_for_every_planned_thought():
 
     script = writer.write(source)
 
-    assert len(script["segments"]) == len(response["narration"])
+    assert sum(
+        segment["block_type"] == "narration" for segment in script["segments"]
+    ) == len(response["narration"])
     assert len(model.prompts) == 2
-    assert "exactly one item for each plan_id" in writer.last_diagnostics["attempts"][0][
+    assert "exactly one item for each block_id" in writer.last_diagnostics["attempts"][0][
         "validation_errors"
     ][0]
 
@@ -524,7 +531,7 @@ def test_rich_writer_rejects_extra_or_reordered_plan_items_with_one_repair():
     source = rich_story_map()
     response = rich_draft(source)
     invalid = {"narration": list(reversed(response["narration"]))}
-    invalid["narration"].append({"plan_id": "P999", "text": "Extra text."})
+    invalid["narration"].append({"block_id": "N_999", "text": "Extra text."})
     model = SequenceModel([invalid, response])
     writer = RecapWriter(model, config=small_config())
 
@@ -543,15 +550,136 @@ def test_rich_writer_assembles_deterministic_segment_metadata_from_plan():
 
     script = RecapWriter(model, config=small_config()).write(source)
     plan = build_narration_plan(source, small_config())
+    editorial = build_rich_editorial_plan(source, plan, small_config())
 
     assert [segment["segment_id"] for segment in script["segments"]] == [
-        f"VO_{index:03d}" for index in range(1, len(plan["planned_segments"]) + 1)
+        item["block_id"] for item in editorial["blocks"]
     ]
-    assert [segment["beat_ids"] for segment in script["segments"]] == [
-        item["beat_ids"] for item in plan["planned_segments"]
+    assert [
+        segment["beat_ids"]
+        for segment in script["segments"]
+        if segment["block_type"] == "narration"
+    ] == [
+        item["beat_ids"] for item in editorial["narration_blocks"]
     ]
     assert all(segment["candidate_visuals"] for segment in script["segments"])
     assert len(model.prompts) == 2
+
+
+def test_rich_writer_emits_interleaved_v2_editorial_blocks_from_accepted_evidence():
+    source = rich_story_map()
+    writer = RecapWriter(SequenceModel([rich_draft(source)]), config=small_config())
+
+    script = writer.write(source)
+    source_blocks = [
+        segment for segment in script["segments"] if segment["block_type"] == "source_moment"
+    ]
+    narration_blocks = [
+        segment for segment in script["segments"] if segment["block_type"] == "narration"
+    ]
+    verified = {beat["beat_id"]: beat for beat in source["beats"]}
+
+    assert script["schema_version"] == 2
+    assert narration_blocks and source_blocks
+    assert all(segment["segment_id"].startswith("N_") for segment in narration_blocks)
+    assert all(segment["segment_id"].startswith("S_") for segment in source_blocks)
+    assert all(not segment["text"] for segment in source_blocks)
+    assert all(
+        script["segments"][index - 1]["block_type"] == "narration"
+        for index, segment in enumerate(script["segments"])
+        if segment["block_type"] == "source_moment"
+    )
+    for segment in source_blocks:
+        candidate = segment["original_dialogue_candidates"][0]
+        evidence = [
+            item
+            for beat_id in segment["beat_ids"]
+            for item in verified[beat_id]["actual_video_evidence_ranges"]
+        ]
+        accepted = list(verified[segment["beat_ids"][0]]["original_dialogue_candidates"])
+        assert any(
+            candidate["start"] == item["start"] and candidate["end"] == item["end"]
+            for item in evidence + accepted
+        )
+
+
+def test_rich_editorial_blocks_are_not_fixed_to_six_narration_units():
+    source = story_map()
+    source["research_depth"] = {"level": "RICH", "route": "fixture"}
+    script = RecapWriter(
+        SequenceModel([rich_draft(source)]),
+        config=small_config(),
+    ).write(source)
+
+    assert [
+        segment["segment_id"]
+        for segment in script["segments"]
+        if segment["block_type"] == "narration"
+    ] == ["N_001"]
+
+
+def test_rich_writer_repairs_direct_source_dialogue_repetition_once():
+    source = story_map()
+    source["research_depth"] = {"level": "RICH", "route": "fixture"}
+    source["beats"][0]["original_dialogue_candidates"][0]["dialogue"] = (
+        "Please do not leave me behind today."
+    )
+    plan = build_narration_plan(source, small_config())
+    editorial = build_rich_editorial_plan(source, plan, small_config())
+    block_id = editorial["narration_blocks"][0]["block_id"]
+    repeated = {
+        "narration": [
+            {"block_id": block_id, "text": "Please do not leave me behind today."}
+        ]
+    }
+    repaired = {
+        "narration": [
+            {
+                "block_id": block_id,
+                "text": "The decision lands harder than anyone expected.",
+            }
+        ]
+    }
+    writer = RecapWriter(SequenceModel([repeated, repaired]), config=small_config())
+
+    script = writer.write(source)
+
+    assert script["segments"]
+    assert len(writer.last_diagnostics["attempts"]) == 2
+    assert "repeats the upcoming source dialogue" in writer.last_diagnostics["attempts"][0][
+        "validation_errors"
+    ][0]
+
+
+def test_rich_writer_repairs_summary_copy_with_a_named_editorial_block():
+    source = story_map()
+    source["research_depth"] = {"level": "RICH", "route": "fixture"}
+    source["beats"][0]["summary"] = "Alice opens the locked door during a storm."
+    plan = build_narration_plan(source, small_config())
+    editorial = build_rich_editorial_plan(source, plan, small_config())
+    block_id = editorial["narration_blocks"][0]["block_id"]
+    copied = {
+        "narration": [
+            {"block_id": block_id, "text": "Alice opens the locked door during a storm."}
+        ]
+    }
+    repaired = {
+        "narration": [
+            {
+                "block_id": block_id,
+                "text": "One quick decision launches the trouble.",
+            }
+        ]
+    }
+    writer = RecapWriter(SequenceModel([copied, repaired]), config=small_config())
+
+    script = writer.write(source)
+
+    assert script["segments"]
+    assert len(writer.last_diagnostics["attempts"]) == 2
+    assert f"RICH narration block {block_id} copies" in writer.last_diagnostics[
+        "attempts"
+    ][0]["validation_errors"][0]
 
 
 def test_rich_writer_plan_repair_never_exceeds_two_calls():
@@ -584,8 +712,8 @@ def _compact_payoff_text():
     )
 
 
-def _rich_response_with_protected_text(source, protected_text):
-    plan = build_narration_plan(source, small_config())
+def _rich_response_with_protected_text(source, protected_text, config):
+    plan = build_narration_plan(source, config)
     protected = next(
         item for item in plan["planned_segments"] if item["function"] == "reversal_payoff"
     )
@@ -597,13 +725,18 @@ def _rich_response_with_protected_text(source, protected_text):
             )
             for item in plan["planned_segments"]
         },
+        config=config,
     )
 
 
 def test_rich_accepts_complete_protected_thought_modestly_below_local_floor():
     source = rich_story_map()
     config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
-    response = _rich_response_with_protected_text(source, _compact_payoff_text())
+    response = _rich_response_with_protected_text(
+        source,
+        _compact_payoff_text(),
+        config,
+    )
     writer = RecapWriter(SequenceModel([response]), config=config)
 
     script = writer.write(source)
@@ -611,13 +744,13 @@ def test_rich_accepts_complete_protected_thought_modestly_below_local_floor():
     protected = next(
         item for item in plan["planned_segments"] if item["function"] == "reversal_payoff"
     )
-    protected_segment = script["segments"][
-        next(
-            index
-            for index, item in enumerate(plan["planned_segments"])
-            if item["plan_id"] == protected["plan_id"]
-        )
-    ]
+    payoff_ids = set(plan["payoff_climax"]["beat_ids"])
+    protected_segment = next(
+        segment
+        for segment in script["segments"]
+        if segment["block_type"] == "narration"
+        and payoff_ids.intersection(segment["beat_ids"])
+    )
 
     assert protected_segment["word_count"] < protected["word_range"][0]
     assert protected_segment["word_count"] >= protected["word_range"][0] // 4
@@ -627,7 +760,7 @@ def test_rich_accepts_complete_protected_thought_modestly_below_local_floor():
 def test_rich_rejects_severely_underwritten_protected_thought():
     source = rich_story_map()
     config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
-    response = _rich_response_with_protected_text(source, "Resolved now.")
+    response = _rich_response_with_protected_text(source, "Resolved now.", config)
     writer = RecapWriter(SequenceModel([response, response]), config=config)
 
     with pytest.raises(RecapWritingError, match="payoff/climax is underdeveloped"):
@@ -637,7 +770,11 @@ def test_rich_rejects_severely_underwritten_protected_thought():
 def test_rich_missing_reveal_beat_still_fails_causal_coverage():
     source = rich_story_map()
     config = RecapWritingConfig(minimum_word_count=180, maximum_word_count=360)
-    response = _rich_response_with_protected_text(source, _compact_payoff_text())
+    response = _rich_response_with_protected_text(
+        source,
+        _compact_payoff_text(),
+        config,
+    )
     accepted = RecapWriter(SequenceModel([response]), config=config).write(source)
     plan = build_narration_plan(source, config)
     reveal_id = plan["reversal"]["beat_ids"][0]
@@ -651,6 +788,8 @@ def test_rich_missing_reveal_beat_still_fails_causal_coverage():
             "presentation_hint": segment["presentation_hint"],
         }
         for segment in accepted["segments"]
+        if segment["block_type"] == "narration"
+        and any(beat_id != reveal_id for beat_id in segment["beat_ids"])
     ]
     invalid = normalize_script({"segments": raw_segments}, source, config)
 
@@ -671,8 +810,9 @@ def test_rich_total_minimum_remains_required_for_compact_thoughts():
         source,
         text_by_plan_id={
             item["plan_id"]: "Brief grounded thought."
-            for item in build_narration_plan(source, small_config())["planned_segments"]
+            for item in build_narration_plan(source, config)["planned_segments"]
         },
+        config=config,
     )
     writer = RecapWriter(SequenceModel([response, response]), config=config)
 
