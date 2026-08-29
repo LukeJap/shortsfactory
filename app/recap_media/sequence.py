@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_paths import RECAP_SEQUENCE_PATH
+from recap_media.dialogue_boundaries import resolve_source_audio_boundary
 from recap_media.loader import RecapInputError
 
 SEQUENCE_SCHEMA_VERSION = 1
@@ -867,16 +868,16 @@ def _add_trailing_evidence_moment(
 
 def _apply_timeline_coverage(
     shots: list[dict[str, Any]],
-    narration_duration: float,
+    timeline_target: float,
 ) -> tuple[float, float, float, float]:
-    """Make selected source shots occupy one narration window exactly.
+    """Make selected source shots occupy their full output window exactly.
 
     ``duration`` remains the actual moving source span. Any remaining
     shortfall is explicit metadata; the renderer rejects a material shortfall
     rather than turning it into a multi-second frozen frame.
     """
 
-    target = round(max(0.0, float(narration_duration)), 3)
+    target = round(max(0.0, float(timeline_target)), 3)
     remaining = target
     trimmed: list[dict[str, Any]] = []
 
@@ -907,12 +908,22 @@ def _refresh_segment_timeline(segment: dict[str, Any]) -> None:
     """Refresh raw-footage and output-timeline metrics after shot changes."""
 
     raw_total, hold_total, timeline_total, shortfall = _apply_timeline_coverage(
-        segment["shots"], segment["narration_duration_seconds"]
+        segment["shots"], _timeline_target_for_segment(segment)
     )
     segment["shots_total_duration_seconds"] = raw_total
     segment["visual_hold_duration_seconds"] = hold_total
     segment["timeline_duration_seconds"] = timeline_total
     segment["visual_coverage_shortfall_seconds"] = shortfall
+
+    narration_cursor = 0.0
+    insert_count = 0
+    for shot in segment["shots"]:
+        if shot.get("source_audio_insert"):
+            shot["narration_pause_offset_seconds"] = round(narration_cursor, 3)
+            insert_count += 1
+        else:
+            narration_cursor += float(shot["timeline_duration_seconds"])
+    segment["source_audio_insert_count"] = insert_count
 
 
 def assemble_sequence(
@@ -1053,7 +1064,7 @@ def assemble_sequence(
         sum(segment["visual_coverage_shortfall_seconds"] for segment in segments_out), 3
     )
 
-    return {
+    sequence = {
         "schema_version": SEQUENCE_SCHEMA_VERSION,
         "target_duration_seconds": recap_script.get("target_duration_seconds"),
         "total_duration_seconds": total_duration,
@@ -1063,6 +1074,8 @@ def assemble_sequence(
         "segments": segments_out,
         "sequence_warnings": sequence_warnings,
     }
+    _annotate_output_timeline(sequence)
+    return sequence
 
 
 # ============================================================
@@ -1072,19 +1085,19 @@ def assemble_sequence(
 # "Allow the narrator to stop when the source scene is better"
 # (VOICEOVER -> ORIGINAL DIALOGUE -> VOICEOVER RESUMES). A whole segment
 # already using presentation_hint "original_dialogue" is handled above by
-# assemble_sequence() itself -- this is the selective, PARTIAL case: a
-# narration_over_source segment that also happens to carry a strong
-# original_dialogue_candidates option can have the narrator briefly yield
-# to it mid-segment. "Do not force dialogue inserts into every section"
-# is enforced by a score threshold, not a fixed rate -- most segments
-# should get no insert at all.
+# assemble_sequence() itself. This pass creates additive source-audio windows
+# inside narration segments. The windows extend the recap timeline; the
+# renderer then delays the remaining portion of the relevant narration WAV
+# instead of merely muting and losing its words.
 
-DIALOGUE_INSERT_SCORE_THRESHOLD = 0.85
+MIN_SOURCE_AUDIO_INSERTS = 4
+SOURCE_AUDIO_INSERT_SCORE_FLOOR = 0.45
+MIN_SOURCE_AUDIO_INSERT_DURATION_SECONDS = 1.0
+MIN_NARRATION_DURATION_FOR_SOURCE_AUDIO_INSERT = 3.0
 
-# An insert is capped at this fraction of its segment's own total
-# duration, so the narrator genuinely resumes afterward rather than the
-# segment becoming effectively all-dialogue (that's what a segment with
-# its own presentation_hint of "original_dialogue" is already for).
+# Kept as public compatibility knobs for callers from the earlier B4 pass.
+# The additive timeline means the old fraction is no longer a duration cap.
+DIALOGUE_INSERT_SCORE_THRESHOLD = SOURCE_AUDIO_INSERT_SCORE_FLOOR
 DIALOGUE_INSERT_MAX_FRACTION = 0.4
 
 
@@ -1101,30 +1114,161 @@ def _insert_dialogue_shot(
     shots: list[dict[str, Any]],
     insert_shot: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """
-    Splice a dialogue-treatment shot into roughly the middle of an
-    existing shot list. When the inserted dialogue is shorter than the
-    displaced locally verified shot, retain the unused source remainder so
-    the insert cannot create a visual-coverage shortfall. Requires at least
-    2 shots going in, so at least one illustrative shot survives on each
-    side (the caller enforces this) -- otherwise "VOICEOVER RESUMES" would
-    not mean anything.
+    """Add a source-audio window without consuming narration coverage.
+
+    The normal source shots remain intact. The inserted source range is its
+    own moving-video window, so the output timeline grows and narration can
+    resume after it. Keep normal footage on both sides whenever possible.
     """
 
-    insertion_index = len(shots) // 2
-    displaced = shots[insertion_index]
-    remaining = shots[:insertion_index] + shots[insertion_index + 1:]
-    remaining.insert(insertion_index, insert_shot)
-
-    unused_duration = round(
-        float(displaced["duration"]) - float(insert_shot["duration"]), 3
+    source_start = float(insert_shot["start"])
+    insertion_index = next(
+        (index for index, shot in enumerate(shots) if float(shot["start"]) > source_start),
+        len(shots) - 1,
     )
-    if unused_duration > 0:
-        retained = dict(displaced)
-        retained["end"] = round(float(retained["start"]) + unused_duration, 3)
-        retained["duration"] = unused_duration
-        remaining.insert(insertion_index + 1, retained)
-    return remaining
+    insertion_index = max(1, min(insertion_index, len(shots) - 1))
+    return shots[:insertion_index] + [insert_shot] + shots[insertion_index:]
+
+
+def _source_audio_candidates_for_segment(
+    script_segment: dict[str, Any],
+    verified_story_map: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return explicit dialogue candidates, then accepted local-evidence fallbacks."""
+
+    explicit: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    seen_ranges: set[tuple[float, float]] = set()
+    verified_candidates = verified_candidates_for_segment(
+        script_segment, verified_story_map
+    )
+
+    def normalize(candidate: dict[str, Any], origin: str) -> dict[str, Any] | None:
+        try:
+            start = float(candidate["start"])
+            end = float(candidate["end"])
+            score = float(candidate.get("score", 0.0))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if end - start < MIN_SOURCE_AUDIO_INSERT_DURATION_SECONDS:
+            return None
+        if score < SOURCE_AUDIO_INSERT_SCORE_FLOOR:
+            return None
+
+        normalized = dict(candidate)
+        normalized.update(
+            {
+                "start": start,
+                "end": end,
+                "score": score,
+                "candidate_origin": origin,
+            }
+        )
+        if not normalized.get("beat_id") and len(script_segment.get("beat_ids", [])) == 1:
+            normalized["beat_id"] = script_segment["beat_ids"][0]
+        if not normalized.get("beat_id"):
+            for verified in verified_candidates:
+                if (
+                    float(verified["start"]) <= start
+                    and end <= float(verified["end"])
+                ):
+                    normalized["beat_id"] = verified.get("beat_id")
+                    break
+        return normalized
+
+    for candidate in script_segment.get("original_dialogue_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        normalized = normalize(candidate, "original_dialogue_candidates")
+        if normalized is None:
+            continue
+        key = _candidate_key(normalized)
+        if key in seen_ranges:
+            continue
+        explicit.append(normalized)
+        seen_ranges.add(key)
+
+    # Fallback candidates are restricted to Track A's accepted local source
+    # evidence for the same narration beat. They never introduce a timestamp
+    # outside the frozen Track A -> Track B handoff.
+    for candidate in verified_candidates:
+        normalized = normalize(candidate, "verified_story_map")
+        if normalized is None:
+            continue
+        key = _candidate_key(normalized)
+        if key in seen_ranges:
+            continue
+        fallback.append(normalized)
+        seen_ranges.add(key)
+
+    explicit.sort(key=lambda candidate: (-float(candidate["score"]), float(candidate["start"])))
+    fallback.sort(key=lambda candidate: (-float(candidate["score"]), float(candidate["start"])))
+    return explicit, fallback
+
+
+def _selected_source_audio_candidates(
+    sequence: dict[str, Any],
+    recap_script: dict[str, Any],
+    verified_story_map: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Choose up to one relevant insert per narration segment in story order."""
+
+    script_segments_by_id = {
+        segment["segment_id"]: segment for segment in recap_script["segments"]
+    }
+    eligible: list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]] = []
+    for seq_segment in sorted(sequence["segments"], key=lambda segment: segment["order"]):
+        if seq_segment.get("presentation_hint") != "narration_over_source":
+            continue
+        if len(seq_segment.get("shots", [])) < 2:
+            continue
+        if float(seq_segment.get("narration_duration_seconds", 0.0)) < MIN_NARRATION_DURATION_FOR_SOURCE_AUDIO_INSERT:
+            continue
+        script_segment = script_segments_by_id.get(seq_segment["segment_id"])
+        if script_segment is None:
+            continue
+        explicit, fallback = _source_audio_candidates_for_segment(
+            script_segment, verified_story_map
+        )
+        eligible.append((seq_segment, explicit, fallback))
+
+    selected: dict[str, dict[str, Any]] = {}
+    inserted_ranges: set[tuple[float, float]] = set()
+    latest_source_start = float("-inf")
+
+    def select_from(position: int) -> None:
+        nonlocal latest_source_start
+        for seq_segment, explicit, fallback in eligible:
+            if len(selected) >= MIN_SOURCE_AUDIO_INSERTS:
+                return
+            candidates = (explicit, fallback)[position]
+            for candidate in candidates:
+                key = _candidate_key(candidate)
+                if key in inserted_ranges or float(candidate["start"]) < latest_source_start:
+                    continue
+                selected[seq_segment["segment_id"]] = candidate
+                inserted_ranges.add(key)
+                latest_source_start = float(candidate["start"])
+                break
+
+    # Script-provided dialogue candidates are the editorial preference.
+    select_from(0)
+    # Only fill remaining slots with local, verified evidence for the exact
+    # assigned beat. This turns sparse candidate metadata into useful source
+    # moments without weakening regular visual shot selection.
+    select_from(1)
+    return selected
+
+
+def _timeline_target_for_segment(segment: dict[str, Any]) -> float:
+    """Narration duration plus explicit source-audio windows, if any."""
+
+    insert_duration = sum(
+        float(shot["duration"])
+        for shot in segment.get("shots", [])
+        if shot.get("source_audio_insert")
+    )
+    return float(segment["narration_duration_seconds"]) + insert_duration
 
 
 def interweave_original_dialogue(
@@ -1132,84 +1276,113 @@ def interweave_original_dialogue(
     recap_script: dict[str, Any],
     score_threshold: float = DIALOGUE_INSERT_SCORE_THRESHOLD,
     max_fraction_of_segment: float = DIALOGUE_INSERT_MAX_FRACTION,
+    verified_story_map: dict[str, Any] | None = None,
+    source_video: str | Path | None = None,
+    transcript_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     """
     Second pass over an already-assembled sequence (assemble_sequence()).
     Does not mutate its inputs -- returns a new sequence dict.
 
-    Eligible segments: presentation_hint "narration_over_source", at
-    least 2 assigned shots (so one can be displaced without emptying the
-    segment), and a real original_dialogue_candidates list on the source
-    recap_script segment whose best score clears score_threshold. Every
-    other segment (including ones already presentation_hint
-    "original_dialogue" -- assemble_sequence() already gave those full
-    dialogue treatment) passes through unchanged.
+    Relevant original-dialogue candidates are used first. If fewer than
+    ``MIN_SOURCE_AUDIO_INSERTS`` are available, candidates from locally
+    verified evidence for each segment's assigned beats can fill the gap.
+    Every selected insert becomes a distinct timeline window, so narration
+    is suspended and resumes rather than being silently removed beneath it.
 
-    The inserted shot's own duration is still clamped to the original-
-    dialogue cadence band and to max_fraction_of_segment of the
-    segment's total duration -- never blindly the candidate's full span.
+    ``score_threshold`` and ``max_fraction_of_segment`` remain accepted for
+    API compatibility with the first B4 implementation. The lower threshold
+    cannot raise the new policy floor, and the old fraction cap intentionally
+    does not shrink an additive source-audio window.
     """
 
     sequence = copy.deepcopy(sequence)
-    script_segments_by_id = {
-        segment["segment_id"]: segment for segment in recap_script["segments"]
-    }
-    used_ranges = _collect_used_ranges(sequence)
+    # The floor is deliberately a relevance floor, not the former 0.85
+    # all-or-nothing policy. Passing a smaller compatibility threshold does
+    # not admit arbitrary weak source moments.
+    if score_threshold > SOURCE_AUDIO_INSERT_SCORE_FLOOR:
+        score_threshold = float(score_threshold)
+
+    selected = _selected_source_audio_candidates(
+        sequence, recap_script, verified_story_map
+    )
+
+    # Old callers may explicitly demand a stricter score. Keep that option
+    # deterministic without restoring the former conservative default.
+    if score_threshold > SOURCE_AUDIO_INSERT_SCORE_FLOOR:
+        selected = {
+            segment_id: candidate
+            for segment_id, candidate in selected.items()
+            if float(candidate["score"]) >= score_threshold
+        }
 
     for seq_segment in sequence["segments"]:
-
-        if seq_segment["presentation_hint"] != "narration_over_source":
-            continue
-        if len(seq_segment["shots"]) < 2:
+        candidate = selected.get(seq_segment["segment_id"])
+        if candidate is None:
             continue
 
-        script_segment = script_segments_by_id.get(seq_segment["segment_id"])
-        if script_segment is None:
-            continue
-
-        dialogue_candidates = script_segment.get("original_dialogue_candidates") or []
-        if not dialogue_candidates:
-            continue
-
-        best = max(dialogue_candidates, key=lambda candidate: candidate["score"])
-        if best["score"] < score_threshold:
-            continue
-
-        total_duration = seq_segment["timeline_duration_seconds"]
-        max_insert_duration = total_duration * max_fraction_of_segment
-        if max_insert_duration < CADENCE_ORIGINAL_DIALOGUE[0]:
-            # Segment too short to fit even the minimum dialogue cadence
-            # without eating the whole thing -- skip rather than force it.
-            continue
-
-        span = float(best["end"]) - float(best["start"])
-        insert_duration = min(
-            span,
-            CADENCE_ORIGINAL_DIALOGUE[1],
-            max(CADENCE_ORIGINAL_DIALOGUE[0], max_insert_duration),
+        boundary = resolve_source_audio_boundary(
+            candidate,
+            source_video=source_video,
+            transcript_cache_dir=transcript_cache_dir,
         )
-        insert_duration = min(insert_duration, max_insert_duration)
-        if insert_duration <= 0:
+        resolved_start = float(boundary["resolved_start"])
+        resolved_end = float(boundary["resolved_end"])
+        insert_duration = resolved_end - resolved_start
+        if insert_duration < MIN_SOURCE_AUDIO_INSERT_DURATION_SECONDS:
             continue
 
         insert_shot = {
-            "start": round(float(best["start"]), 3),
-            "end": round(float(best["start"]) + insert_duration, 3),
+            "start": round(resolved_start, 3),
+            "end": round(resolved_end, 3),
             "duration": round(insert_duration, 3),
-            "source_list": "original_dialogue_candidates",
-            "score": best["score"],
-            "selection_score": best["score"],
-            "reason": best.get("reason", ""),
+            "candidate_start": round(float(candidate["start"]), 3),
+            "candidate_end": round(float(candidate["end"]), 3),
+            "resolved_start": round(resolved_start, 3),
+            "resolved_end": round(resolved_end, 3),
+            "boundary_source": boundary["boundary_source"],
+            "boundary_reason": boundary["boundary_reason"],
+            "source_list": candidate["candidate_origin"],
+            "score": candidate["score"],
+            "selection_score": candidate["score"],
+            "reason": candidate.get("reason", ""),
             "visual_function": "original_dialogue",
-            "reused": _range_key(best) in used_ranges,
+            "reused": False,
+            "beat_id": candidate.get("beat_id"),
+            "candidate_origin": candidate["candidate_origin"],
             "treatment": "original_dialogue",
+            "source_audio_insert": True,
         }
+        if boundary.get("transcript_cache_path"):
+            insert_shot["transcript_cache_path"] = boundary["transcript_cache_path"]
+        if candidate.get("text"):
+            insert_shot["dialogue_text"] = str(candidate["text"])
 
-        seq_segment["shots"] = _insert_dialogue_shot(seq_segment["shots"], insert_shot)
+        seq_segment["shots"] = _insert_dialogue_shot(
+            seq_segment["shots"], insert_shot
+        )
         _refresh_segment_timeline(seq_segment)
         seq_segment["has_dialogue_insert"] = True
 
-        used_ranges.add(_range_key(best))
+    _refresh_sequence_totals(sequence)
+
+    return sequence
+
+
+def _annotate_output_timeline(sequence: dict[str, Any]) -> None:
+    """Persist every cut's output-timeline position for inspection/debugging."""
+
+    cursor = 0.0
+    for segment in sorted(sequence.get("segments", []), key=lambda item: item["order"]):
+        for shot in segment.get("shots", []):
+            duration = float(shot.get("timeline_duration_seconds", shot["duration"]))
+            shot["timeline_start_seconds"] = round(cursor, 3)
+            cursor += duration
+            shot["timeline_end_seconds"] = round(cursor, 3)
+
+
+def _refresh_sequence_totals(sequence: dict[str, Any]) -> None:
+    """Recompute recap-level metrics after additive source-audio windows."""
 
     sequence["total_duration_seconds"] = round(
         sum(segment["timeline_duration_seconds"] for segment in sequence["segments"]), 3
@@ -1227,8 +1400,55 @@ def interweave_original_dialogue(
         ),
         3,
     )
+    sequence["source_audio_insert_count"] = sum(
+        int(segment.get("source_audio_insert_count", 0))
+        for segment in sequence["segments"]
+    )
+    _annotate_output_timeline(sequence)
 
-    return sequence
+
+def voiceover_timing_by_segment(sequence: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return render/editor VO timing including pauses for source-audio inserts.
+
+    A VOICEOVER clip retains the WAV's own narration duration, but its output
+    window also includes each source-audio pause. Downstream clips therefore
+    begin after every earlier insert, and render/caption code can use the
+    same ``dialogue_pauses`` metadata to split the WAV and its captions.
+    """
+
+    timings: dict[str, dict[str, Any]] = {}
+    cursor = 0.0
+    for segment in sorted(sequence.get("segments", []), key=lambda item: item["order"]):
+        narration_duration = float(segment.get("narration_duration_seconds", 0.0))
+        pauses = [
+            {
+                "narration_offset_seconds": float(
+                    shot.get("narration_pause_offset_seconds", 0.0)
+                ),
+                "duration_seconds": float(shot["timeline_duration_seconds"]),
+            }
+            for shot in segment.get("shots", [])
+            if shot.get("source_audio_insert")
+        ]
+        pauses.sort(key=lambda pause: pause["narration_offset_seconds"])
+        if narration_duration > 0 and segment.get("presentation_hint") != "visual_only":
+            timings[segment["segment_id"]] = {
+                "start": round(cursor, 3),
+                "end": round(cursor + narration_duration + sum(
+                    pause["duration_seconds"] for pause in pauses
+                ), 3),
+                "dialogue_pauses": [
+                    {
+                        "narration_offset_seconds": round(
+                            pause["narration_offset_seconds"], 3
+                        ),
+                        "duration_seconds": round(pause["duration_seconds"], 3),
+                    }
+                    for pause in pauses
+                ],
+            }
+        cursor += float(segment.get("timeline_duration_seconds", 0.0))
+    return timings
 
 
 def write_recap_sequence(

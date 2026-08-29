@@ -172,6 +172,35 @@ def test_source_mute_begins_exactly_when_narration_resumes():
     assert plan["source_keyframes"] == [[0.0, 1.0], [3.0, 1.0], [3.0, 0.0], [6.0, 0.0]]
 
 
+def test_source_audio_is_audible_only_inside_explicit_insert_window():
+    sequence = _sequence_from_treatments(
+        [
+            ("narration_over_source", 2.0),
+            ("original_dialogue", 2.5),
+            ("narration_over_source", 2.0),
+        ]
+    )
+
+    plan = build_duck_plan(sequence)
+
+    assert plan["source_keyframes"] == [
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 1.0],
+        [4.5, 1.0],
+        [4.5, 0.0],
+        [6.5, 0.0],
+    ]
+    assert plan["narration_keyframes"] == [
+        [0.0, 0.95],
+        [2.0, 0.95],
+        [2.0, 0.0],
+        [4.5, 0.0],
+        [4.5, 0.95],
+        [6.5, 0.95],
+    ]
+
+
 def test_visual_only_treated_like_restored_source_no_narration():
     sequence = _sequence_from_treatments([("visual_only", 2.0)])
     plan = build_duck_plan(sequence)

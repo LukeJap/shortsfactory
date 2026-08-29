@@ -40,7 +40,12 @@ from pipeline_paths import (
 )
 from recap_media.loader import RecapInputError, load_recap_inputs
 from recap_media.orpheus_provider import DEFAULT_VOICE, KNOWN_VOICES, OrpheusProvider
-from recap_media.sequence import assemble_sequence, interweave_original_dialogue, write_recap_sequence
+from recap_media.sequence import (
+    assemble_sequence,
+    interweave_original_dialogue,
+    voiceover_timing_by_segment,
+    write_recap_sequence,
+)
 from recap_media.voiceover import load_voiceover_durations, synthesize_segment, synthesize_segments
 
 from ..settings_keys import RECAP_TARGET_DURATION_SECONDS, RECAP_VOICE
@@ -50,6 +55,16 @@ TRACK_A_INPUT_PATHS = (
     VERIFIED_STORY_MAP_PATH,
     RECAP_SCRIPT_PATH,
 )
+
+
+def _recap_source_filename(episode_identity: dict) -> str | None:
+    query = episode_identity.get("query")
+    if not isinstance(query, dict):
+        return None
+    source_filename = query.get("source_filename")
+    if not isinstance(source_filename, str) or not source_filename.strip():
+        return None
+    return source_filename.strip()
 
 
 class RecapMixin:
@@ -139,10 +154,30 @@ class RecapMixin:
             narration_durations,
             verified_story_map=inputs.verified_story_map,
         )
-        sequence = interweave_original_dialogue(sequence, inputs.recap_script)
+        sequence = interweave_original_dialogue(
+            sequence,
+            inputs.recap_script,
+            verified_story_map=inputs.verified_story_map,
+            source_video=_recap_source_filename(inputs.episode_identity),
+        )
         write_recap_sequence(sequence)
 
         self.recap_sequence = sequence
+
+        # Existing synthesized narration must move after newly-added source
+        # audio windows, so editor, captions, and final render share one
+        # authoritative timeline. Manual/locked clips remain protected by
+        # replace_kind_clips() below.
+        if narration_durations:
+            new_clips = self._rebuild_voiceover_clips(
+                inputs, narration_durations, sequence
+            )
+            self.editor_asset_plan = replace_kind_clips(
+                self.editor_asset_plan, "VOICEOVER", new_clips
+            )
+            self.save_editor_asset_plan_state()
+            self.refresh_editor_asset_timeline()
+            self.refresh_recap_voiceover_list()
 
         segment_count = len(sequence["segments"])
         total_duration = sequence["total_duration_seconds"]
@@ -158,10 +193,16 @@ class RecapMixin:
 
         self.generate_recap_voiceover_button.setEnabled(True)
 
-    def _rebuild_voiceover_clips(self, inputs, durations: dict) -> list[dict]:
+    def _rebuild_voiceover_clips(
+        self,
+        inputs,
+        durations: dict,
+        sequence: dict | None = None,
+    ) -> list[dict]:
 
         cursor = 0.0
         clips = []
+        timings = voiceover_timing_by_segment(sequence) if sequence else {}
 
         for segment in inputs.recap_script["segments"]:
             if segment.get("presentation_hint") == "visual_only":
@@ -169,20 +210,24 @@ class RecapMixin:
 
             segment_id = segment["segment_id"]
             duration = max(0.01, float(durations.get(segment_id, 0.0)) or 0.01)
+            timing = timings.get(segment_id)
+            start = float(timing["start"]) if timing else cursor
+            end = float(timing["end"]) if timing else cursor + duration
 
             clips.append(
                 {
                     "id": segment_id,
                     "kind": "VOICEOVER",
-                    "start": round(cursor, 3),
-                    "end": round(cursor + duration, 3),
+                    "start": round(start, 3),
+                    "end": round(end, 3),
                     "label": str(segment.get("text", ""))[:60],
                     "active": segment_id in durations,
                     "volume": 1.0,
                     "manual_override": False,
+                    "dialogue_pauses": timing.get("dialogue_pauses", []) if timing else [],
                 }
             )
-            cursor += duration
+            cursor = end
 
         return clips
 
@@ -238,7 +283,24 @@ class RecapMixin:
         }
         errors = [f"{result.segment_id}: {result.error}" for result in results if result.error]
 
-        new_clips = self._rebuild_voiceover_clips(inputs, durations)
+        # Reassemble from the measured WAV durations before creating editor
+        # clips. Insert windows are additive, so every following VO starts
+        # after the source-audio moments already placed in the sequence.
+        sequence = assemble_sequence(
+            inputs.recap_script,
+            durations,
+            verified_story_map=inputs.verified_story_map,
+        )
+        sequence = interweave_original_dialogue(
+            sequence,
+            inputs.recap_script,
+            verified_story_map=inputs.verified_story_map,
+            source_video=_recap_source_filename(inputs.episode_identity),
+        )
+        write_recap_sequence(sequence)
+        self.recap_sequence = sequence
+
+        new_clips = self._rebuild_voiceover_clips(inputs, durations, sequence)
         self.editor_asset_plan = replace_kind_clips(
             self.editor_asset_plan, "VOICEOVER", new_clips
         )

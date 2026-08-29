@@ -148,10 +148,12 @@ def set_editor_plan_context(
     )
     return plan
 
-def load_editor_asset_plan() -> dict[str, Any]:
+def load_editor_asset_plan(
+    path: Path = PLAN_PATH,
+) -> dict[str, Any]:
 
     plan = read_json(
-        PLAN_PATH
+        path
     )
 
     if not isinstance(
@@ -168,6 +170,7 @@ def load_editor_asset_plan() -> dict[str, Any]:
 
 def save_editor_asset_plan(
     plan: dict[str, Any],
+    path: Path = PLAN_PATH,
 ) -> None:
 
     payload = dict(
@@ -186,11 +189,11 @@ def save_editor_asset_plan(
         )
     ]
 
-    PLAN_PATH.parent.mkdir(
+    path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
-    PLAN_PATH.write_text(
+    path.write_text(
         json.dumps(
             payload,
             indent=2,

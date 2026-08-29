@@ -159,7 +159,8 @@ def test_dialogue_insert_keeps_unused_verified_context_as_moving_coverage():
     out_segment = result["segments"][0]
     shots = out_segment["shots"]
 
-    assert out_segment["shots_total_duration_seconds"] == pytest.approx(13.739)
+    assert out_segment["shots_total_duration_seconds"] == pytest.approx(17.519)
+    assert out_segment["timeline_duration_seconds"] == pytest.approx(17.519)
     assert out_segment["visual_hold_duration_seconds"] == 0.0
     assert out_segment["visual_coverage_shortfall_seconds"] == 0.0
     assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)

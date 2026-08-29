@@ -164,8 +164,10 @@ def build_duck_plan(
         NARRATION_FOREGROUND_TREATMENTS,
         high_gain=voiceover_gain,
         low_gain=0.0,  # "narration stops" during original dialogue -- true silence, not just quiet
-        attack_seconds=attack_seconds,
-        release_seconds=release_seconds,
+        # Source-audio inserts are a hard handoff, not a conventional duck:
+        # even a 150ms fade would leave competing narration under dialogue.
+        attack_seconds=0.0,
+        release_seconds=0.0,
     )
 
     source_keyframes = build_gain_keyframes(

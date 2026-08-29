@@ -57,3 +57,7 @@ RECAP_AUDIO_DUCK_PLAN_PATH = RECAP_DIR / "audio_duck_plan.json"
 RECAP_NARRATION_CAPTIONS_PATH = RECAP_DIR / "narration_captions.json"
 RECAP_PORTRAIT_PLAN_PATH = RECAP_DIR / "portrait_framing_plan.json"
 RECAP_FINAL_OUTPUT_PATH = RECAP_DIR / "final_recap.mp4"
+# Recap effects are authored on Track B's base timeline. Keeping their plan
+# beside recap artifacts prevents one recap from overwriting a normal Short.
+RECAP_EDITOR_ASSET_PLAN_PATH = RECAP_DIR / "editor_asset_plan.json"
+RECAP_EFFECTS_PLAN_PATH = RECAP_DIR / "effects_plan.json"

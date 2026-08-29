@@ -547,40 +547,30 @@ def prepare_emoji_events(
 
         prepared.append(
             {
+                "id": str(event.get("id", "") or ""),
                 "emoji": emoji_label,
                 "path": path,
                 "start": start,
                 "end": end,
+                "matched_word": str(event.get("matched_word", "") or ""),
                 "position_x": event.get("position_x"),
                 "position_y": event.get("position_y"),
+                "scale": event.get("scale", 1.0),
             }
         )
 
     return prepared
 
 
-def build_emoji_inputs(
-    prepared: list[dict[str, Any]],
-    input_path: Path = INPUT_PATH,
-) -> list[str]:
-    """
-    Build the ffmpeg -i input arguments: one per emoji asset, looped
-    (static images) or ignore-looped (animated GIFs) so each covers its
-    whole overlay window.
-    """
-    inputs = [
-        "-i",
-        str(input_path),
-    ]
+def emoji_input_arguments(prepared: list[dict[str, Any]]) -> list[str]:
+    """FFmpeg arguments for the prepared emoji asset inputs only."""
 
+    inputs: list[str] = []
     for event in prepared:
-
         path = Path(
             event["path"]
         )
-
         if path.suffix.lower() == ".gif":
-
             inputs.extend(
                 [
                     "-ignore_loop",
@@ -592,9 +582,7 @@ def build_emoji_inputs(
                     ),
                 ]
             )
-
         else:
-
             inputs.extend(
                 [
                     "-loop",
@@ -613,9 +601,25 @@ def build_emoji_inputs(
     return inputs
 
 
+def build_emoji_inputs(
+    prepared: list[dict[str, Any]],
+    input_path: Path = INPUT_PATH,
+) -> list[str]:
+    """
+    Build the ffmpeg -i input arguments: one per emoji asset, looped
+    (static images) or ignore-looped (animated GIFs) so each covers its
+    whole overlay window.
+    """
+    inputs = ["-i", str(input_path)]
+    inputs.extend(emoji_input_arguments(prepared))
+
+    return inputs
+
+
 def build_emoji_filter_complex(
     prepared: list[dict[str, Any]],
     base_label: str = "[0:v]",
+    first_input_index: int = 1,
 ) -> tuple[str, str]:
     """
     Build the filter_complex chain overlaying every prepared emoji onto
@@ -632,9 +636,7 @@ def build_emoji_filter_complex(
         prepared
     ):
 
-        input_label = (
-            f"[{index + 1}:v]"
-        )
+        input_label = f"[{first_input_index + index}:v]"
 
         emoji_label = (
             f"[emoji{index}]"

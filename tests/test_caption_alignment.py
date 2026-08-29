@@ -292,6 +292,34 @@ def test_ass_content_offsets_by_voiceover_clip_start():
     assert "Dialogue: 0,0:00:20.00,0:00:20.50" in content
 
 
+def test_ass_captions_pause_for_source_audio_and_resume_afterward():
+    narration_captions = build_narration_captions(
+        [{"segment_id": "VO_001", "text": "First second", "presentation_hint": "narration_over_source"}],
+        recognized_words_by_segment={
+            "VO_001": [
+                _recognized("First", 0.0, 0.5),
+                _recognized("second", 0.5, 1.0),
+            ]
+        },
+    )
+    voiceover_clips = [
+        {
+            "id": "VO_001",
+            "start": 10.0,
+            "active": True,
+            "dialogue_pauses": [
+                {"narration_offset_seconds": 0.5, "duration_seconds": 2.0}
+            ],
+        }
+    ]
+
+    content = build_narration_captions_ass_content(narration_captions, voiceover_clips)
+
+    assert "Dialogue: 0,0:00:10.00,0:00:10.50" in content
+    assert "Dialogue: 0,0:00:12.50,0:00:13.00" in content
+    assert "0:00:10.50,0:00:12.50" not in content
+
+
 def test_ass_content_skips_disabled_or_deleted_segments():
     narration_captions = build_narration_captions(
         [

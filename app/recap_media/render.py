@@ -37,17 +37,30 @@ from pathlib import Path
 from typing import Any
 
 from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
+from emoji_overlay import (
+    build_emoji_filter_complex,
+    emoji_input_arguments,
+)
 from pipeline_paths import RECAP_FINAL_OUTPUT_PATH, ROOT
 from recap_media.audio_mix import build_duck_filter_complex
+from recap_media.caption_alignment import load_narration_captions
+from recap_media.effects import (
+    RecapEffectsError,
+    create_recap_effects_plan,
+    load_recap_effects,
+)
 from recap_media.portrait_framing import build_portrait_filter_chain
 from recap_media.voiceover import wav_path_for_segment
+from smart_motion import x_expression, y_expression, zoom_expression
+from sfx_engine import build_sfx_mix_filter_complex
+from visual_fx import build_semantic_filter_chain
 
 
 class RecapRenderError(Exception):
     """The recap render command could not be built or failed to run."""
 
 
-RECAP_PLAYBACK_SPEED = 1.75
+RECAP_PLAYBACK_SPEED = 1.5
 MAX_RENDERABLE_VISUAL_SHORTFALL_SECONDS = 0.15
 
 
@@ -219,6 +232,20 @@ def build_narration_track_filter(
     parts = []
     labels = []
 
+    def dialogue_pauses(clip: dict[str, Any]) -> list[tuple[float, float]]:
+        pauses: list[tuple[float, float]] = []
+        for pause in clip.get("dialogue_pauses", []) or []:
+            if not isinstance(pause, dict):
+                continue
+            try:
+                offset = max(0.0, float(pause["narration_offset_seconds"]))
+                duration = float(pause["duration_seconds"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if duration > 0:
+                pauses.append((offset, duration))
+        return sorted(pauses)
+
     for clip in active_clips:
         clip_id = clip["id"]
         if clip_id not in input_index_by_clip_id:
@@ -231,10 +258,42 @@ def build_narration_track_filter(
         except (TypeError, ValueError):
             volume = 1.0
 
-        label = f"narr{input_index}"
+        pauses = dialogue_pauses(clip)
+        if not pauses:
+            label = f"narr{input_index}"
+            parts.append(
+                f"[{input_index}:a]volume={volume:.3f},"
+                f"adelay={delay_ms}|{delay_ms}[{label}]"
+            )
+            labels.append(f"[{label}]")
+            continue
+
+        narration_cursor = 0.0
+        added_pause_duration = 0.0
+        for fragment_index, (pause_offset, pause_duration) in enumerate(pauses):
+            if pause_offset > narration_cursor:
+                label = f"narr{input_index}_{fragment_index}"
+                fragment_delay_ms = max(
+                    0,
+                    round((float(clip.get("start", 0.0) or 0.0) + narration_cursor + added_pause_duration) * 1000),
+                )
+                parts.append(
+                    f"[{input_index}:a]atrim=start={narration_cursor:.3f}:end={pause_offset:.3f},"
+                    f"asetpts=PTS-STARTPTS,volume={volume:.3f},"
+                    f"adelay={fragment_delay_ms}|{fragment_delay_ms}[{label}]"
+                )
+                labels.append(f"[{label}]")
+            narration_cursor = max(narration_cursor, pause_offset)
+            added_pause_duration += pause_duration
+
+        label = f"narr{input_index}_{len(pauses)}"
+        fragment_delay_ms = max(
+            0,
+            round((float(clip.get("start", 0.0) or 0.0) + narration_cursor + added_pause_duration) * 1000),
+        )
         parts.append(
-            f"[{input_index}:a]volume={volume:.3f},"
-            f"adelay={delay_ms}|{delay_ms}[{label}]"
+            f"[{input_index}:a]atrim=start={narration_cursor:.3f},asetpts=PTS-STARTPTS,"
+            f"volume={volume:.3f},adelay={fragment_delay_ms}|{fragment_delay_ms}[{label}]"
         )
         labels.append(f"[{label}]")
 
@@ -254,6 +313,7 @@ def build_recap_filter_complex(
     duck_plan: dict[str, Any],
     captions_ass_path: Path | None = None,
     playback_speed: float = RECAP_PLAYBACK_SPEED,
+    recap_effects: dict[str, Any] | None = None,
 ) -> tuple[str, str, str]:
     """
     Assemble the complete filter_complex for one recap render pass.
@@ -280,10 +340,62 @@ def build_recap_filter_complex(
         input_label=video_label,
     )
     final_video_label = "recap_out"
+    recap_effects = recap_effects or {}
+    visual_fx_events = recap_effects.get("visual_fx_events", [])
+    if not isinstance(visual_fx_events, list):
+        visual_fx_events = []
+    sfx_events = recap_effects.get("sfx_events", [])
+    if not isinstance(sfx_events, list):
+        sfx_events = []
+    emoji_events = recap_effects.get("emoji_events", [])
+    if not isinstance(emoji_events, list):
+        emoji_events = []
+
+    motion_events = recap_effects.get("motion_events", [])
+    if not isinstance(motion_events, list):
+        motion_events = []
+
+    motion_filter = None
+    if motion_events:
+        # The standard smart-motion expressions are intentionally reused on
+        # the already-framed 1080x1920 recap canvas. This retains Recap
+        # Mode's portrait composition while giving its semantic moments the
+        # same punch-in/pan language as a regular Short.
+        fps = 30.0
+        motion_filter = (
+            "[recap_out]zoompan="
+            f"z='{zoom_expression(motion_events, fps)}':"
+            f"x='{x_expression(motion_events, fps)}':"
+            f"y='{y_expression(motion_events, fps)}':"
+            "d=1:s=1080x1920:fps=30.000[recap_motion]"
+        )
+        final_video_label = "recap_motion"
+
+    fx_filter = None
+    if visual_fx_events:
+        fx_filter = (
+            f"[{final_video_label}]"
+            f"{build_semantic_filter_chain(visual_fx_events)}"
+            "[recap_fx]"
+        )
+        final_video_label = "recap_fx"
+
+    emoji_filter = None
+    if emoji_events:
+        first_sfx_input_index = 1 + len(active_voiceover_clips)
+        first_emoji_input_index = first_sfx_input_index + len(sfx_events)
+        emoji_filter, final_video_label = build_emoji_filter_complex(
+            emoji_events,
+            f"[{final_video_label}]",
+            first_input_index=first_emoji_input_index,
+        )
+        # The shared emoji helper returns a bracketed FFmpeg label while this
+        # builder carries labels without brackets between stages.
+        final_video_label = final_video_label.strip("[]")
 
     if captions_ass_path is not None:
         caption_filter = (
-            f"[recap_out]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
+            f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
             "[recap_captioned]"
         )
         final_video_label = "recap_captioned"
@@ -296,20 +408,38 @@ def build_recap_filter_complex(
         source_label=f"[{source_audio_label}]",
         output_label="[mixed]",
     )
+    sfx_filter = None
+    mixed_audio_label = "mixed"
+    if sfx_events:
+        sfx_filter = build_sfx_mix_filter_complex(
+            "[mixed]",
+            sfx_events,
+            first_input_index=1 + len(active_voiceover_clips),
+            output_label="[recap_mixed]",
+        )
+        mixed_audio_label = "recap_mixed"
     speed = _validated_playback_speed(playback_speed)
     speed_video_label = "recap_playback_video"
     speed_audio_label = "recap_playback_audio"
     playback_filter = (
         f"[{final_video_label}]setpts=PTS/{speed:.3f}[{speed_video_label}];"
-        f"[mixed]atempo={speed:.3f}[{speed_audio_label}]"
+        f"[{mixed_audio_label}]atempo={speed:.3f}[{speed_audio_label}]"
     )
     final_video_label = speed_video_label
     final_audio_label = speed_audio_label
 
     fragments = [video_filter, source_audio_filter, narration_filter, portrait_filter]
+    if motion_filter is not None:
+        fragments.append(motion_filter)
+    if fx_filter is not None:
+        fragments.append(fx_filter)
+    if emoji_filter is not None:
+        fragments.append(emoji_filter)
     if caption_filter is not None:
         fragments.append(caption_filter)
     fragments.append(duck_filter)
+    if sfx_filter is not None:
+        fragments.append(sfx_filter)
     fragments.append(playback_filter)
 
     return ";".join(fragments), final_video_label, final_audio_label
@@ -323,6 +453,8 @@ def build_recap_ffmpeg_command(
     final_audio_label: str,
     output_path: Path,
     total_duration_seconds: float | None = None,
+    sfx_events: list[dict[str, Any]] | None = None,
+    emoji_events: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """
     Build the full ffmpeg CLI argument list: source video as input 0,
@@ -339,6 +471,10 @@ def build_recap_ffmpeg_command(
 
     for clip in active_voiceover_clips:
         command.extend(["-i", str(wav_path_for_segment(clip["id"]))])
+
+    for event in sfx_events or []:
+        command.extend(["-i", str(event["asset_path"])])
+    command.extend(emoji_input_arguments(emoji_events or []))
 
     command.extend(["-filter_complex", filter_complex])
     command.extend(["-map", f"[{final_video_label}]", "-map", f"[{final_audio_label}]"])
@@ -382,6 +518,7 @@ def render_recap(
     captions_ass_path: Path | None = None,
     output_path: Path = RECAP_FINAL_OUTPUT_PATH,
     playback_speed: float = RECAP_PLAYBACK_SPEED,
+    recap_effects: dict[str, Any] | None = None,
 ) -> Path:
     """
     Top-level orchestration: resolve the accepted recap source, build the
@@ -418,6 +555,20 @@ def render_recap(
         if not wav_path.exists():
             raise RecapRenderError(f"Voiceover WAV not found for {clip['id']!r}: {wav_path}")
 
+    if recap_effects is None:
+        try:
+            recap_effects = load_recap_effects()
+        except RecapEffectsError:
+            query = episode_identity.get("query", {})
+            source_key = str(query.get("source_filename", "recap")) if isinstance(query, dict) else "recap"
+            create_recap_effects_plan(
+                sequence,
+                load_narration_captions(),
+                portrait_plan,
+                source_key=source_key,
+            )
+            recap_effects = load_recap_effects()
+
     input_index_by_clip_id = input_index_for_voiceover_clips(active_clips)
 
     filter_complex, final_video_label, final_audio_label = build_recap_filter_complex(
@@ -428,6 +579,7 @@ def render_recap(
         duck_plan,
         captions_ass_path,
         speed,
+        recap_effects,
     )
 
     command = build_recap_ffmpeg_command(
@@ -440,6 +592,8 @@ def render_recap(
         total_duration_seconds=final_recap_duration_seconds(
             sequence.get("total_duration_seconds", 0.0), speed
         ),
+        sfx_events=recap_effects.get("sfx_events", []),
+        emoji_events=recap_effects.get("emoji_events", []),
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

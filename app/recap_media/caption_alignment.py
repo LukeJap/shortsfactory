@@ -280,6 +280,7 @@ def build_narration_captions(
 def build_narration_ass_dialogue_lines(
     segment_captions: dict[str, Any],
     time_offset_seconds: float = 0.0,
+    dialogue_pauses: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """
     Convert one segment's word-level captions (build_segment_narration_
@@ -297,14 +298,48 @@ def build_narration_ass_dialogue_lines(
     final output timeline.
     """
 
+    pauses: list[tuple[float, float]] = []
+    for pause in dialogue_pauses or []:
+        if not isinstance(pause, dict):
+            continue
+        try:
+            offset = max(0.0, float(pause["narration_offset_seconds"]))
+            duration = float(pause["duration_seconds"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if duration > 0:
+            pauses.append((offset, duration))
+    pauses.sort()
+
+    def output_intervals(start: float, end: float) -> list[tuple[float, float]]:
+        """Split a caption at a source-audio pause so it never spans one."""
+
+        intervals: list[tuple[float, float]] = []
+        cursor = start
+        accumulated_pause = 0.0
+        for pause_offset, pause_duration in pauses:
+            if pause_offset <= cursor:
+                accumulated_pause += pause_duration
+                continue
+            if pause_offset >= end:
+                break
+            intervals.append((cursor + accumulated_pause, pause_offset + accumulated_pause))
+            cursor = pause_offset
+            accumulated_pause += pause_duration
+        intervals.append((cursor + accumulated_pause, end + accumulated_pause))
+        return [interval for interval in intervals if interval[1] > interval[0]]
+
     lines = []
     for word in segment_captions["words"]:
-        start = ass_time(float(word["start"]) + time_offset_seconds)
-        end = ass_time(float(word["end"]) + time_offset_seconds)
         text = escape_ass_text(word["text"])
-        lines.append(
-            f"Dialogue: 0,{start},{end},Recap,,0,0,0,,{{\\c{WHITE}\\fs{FONT_SIZE}}}{text}"
-        )
+        for start_seconds, end_seconds in output_intervals(
+            float(word["start"]), float(word["end"])
+        ):
+            start = ass_time(start_seconds + time_offset_seconds)
+            end = ass_time(end_seconds + time_offset_seconds)
+            lines.append(
+                f"Dialogue: 0,{start},{end},Recap,,0,0,0,,{{\\c{WHITE}\\fs{FONT_SIZE}}}{text}"
+            )
 
     return lines
 
@@ -370,8 +405,8 @@ def build_narration_captions_ass_content(
     canvas -- see _margin_v_for_portrait_plan().
     """
 
-    offsets_by_segment_id = {
-        clip["id"]: float(clip.get("start", 0.0) or 0.0)
+    clips_by_segment_id = {
+        clip["id"]: clip
         for clip in voiceover_clips
         if clip.get("active", True) and not clip.get("deleted")
     }
@@ -401,11 +436,14 @@ def build_narration_captions_ass_content(
     lines: list[str] = []
     for segment_captions in narration_captions["segments"]:
         segment_id = segment_captions["segment_id"]
-        if segment_id not in offsets_by_segment_id:
+        clip = clips_by_segment_id.get(segment_id)
+        if clip is None:
             continue
         lines.extend(
             build_narration_ass_dialogue_lines(
-                segment_captions, offsets_by_segment_id[segment_id]
+                segment_captions,
+                float(clip.get("start", 0.0) or 0.0),
+                clip.get("dialogue_pauses"),
             )
         )
 

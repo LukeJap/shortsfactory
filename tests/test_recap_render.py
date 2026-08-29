@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from recap_media.render import (
+    RECAP_PLAYBACK_SPEED,
     RecapRenderError,
     active_voiceover_clips_in_order,
     build_narration_track_filter,
@@ -144,6 +145,24 @@ def test_narration_track_filter_missing_input_index_raises():
         build_narration_track_filter(clips, {})
 
 
+def test_narration_track_filter_splits_and_delays_audio_around_source_insert():
+    clips = [
+        {
+            **_voiceover_clip("VO_001", start=4.0, volume=0.8),
+            "dialogue_pauses": [
+                {"narration_offset_seconds": 2.0, "duration_seconds": 2.5}
+            ],
+        }
+    ]
+
+    filter_str, _ = build_narration_track_filter(clips, {"VO_001": 1})
+
+    assert "atrim=start=0.000:end=2.000" in filter_str
+    assert "adelay=4000|4000[narr1_0]" in filter_str
+    assert "atrim=start=2.000" in filter_str
+    assert "adelay=8500|8500[narr1_1]" in filter_str
+
+
 # ============================================================
 # input_index_for_voiceover_clips
 # ============================================================
@@ -204,8 +223,8 @@ def test_filter_complex_assembles_all_pieces_without_captions():
     assert "split=2" in filter_complex and "gblur" in filter_complex  # portrait framing
     assert "amix=" in filter_complex and "alimiter=" in filter_complex  # duck mix
     assert "subtitles=" not in filter_complex
-    assert "setpts=PTS/1.750" in filter_complex
-    assert "atempo=1.750" in filter_complex
+    assert "setpts=PTS/1.500" in filter_complex
+    assert "atempo=1.500" in filter_complex
     assert video_label == "recap_playback_video"
     assert audio_label == "recap_playback_audio"
 
@@ -220,8 +239,54 @@ def test_filter_complex_includes_captions_when_path_given(tmp_path):
     )
 
     assert f"subtitles=filename={escape_ffmpeg_filter_path(ass_path)}" in filter_complex
-    assert "[recap_captioned]setpts=PTS/1.750" in filter_complex
+    assert "[recap_captioned]setpts=PTS/1.500" in filter_complex
     assert video_label == "recap_playback_video"
+
+
+def test_filter_complex_uses_shared_fx_sfx_and_emoji_before_the_single_speed_pass(tmp_path):
+    clips = [_voiceover_clip("VO_001", start=0.0)]
+    ass_path = tmp_path / "narration.ass"
+    effects = {
+        "visual_fx_events": [
+            {"type": "filter", "effect": "impact_punch", "start": 1.0, "end": 1.5}
+        ],
+        "motion_events": [
+            {"start": 1.0, "end": 1.5, "zoom": 1.08, "movement": "impact_punch"}
+        ],
+        "sfx_events": [
+            {
+                "start": 1.0,
+                "duration": 0.2,
+                "volume": 0.2,
+                "trim_in": 0.0,
+                "asset_path": str(tmp_path / "ding.mp3"),
+            }
+        ],
+        "emoji_events": [
+            {
+                "path": tmp_path / "emoji.png",
+                "start": 1.2,
+                "end": 2.2,
+                "position_x": 0.2,
+                "position_y": 0.3,
+            }
+        ],
+    }
+
+    filter_complex, video_label, audio_label = build_recap_filter_complex(
+        _sequence(), clips, {"VO_001": 1}, _portrait_plan(), _duck_plan(), ass_path,
+        recap_effects=effects,
+    )
+
+    assert "[recap_out]zoompan=" in filter_complex
+    assert "[recap_motion]" in filter_complex
+    assert "[2:a:0]atrim=" in filter_complex
+    assert "[3:v]format=rgba" in filter_complex
+    assert "[ov0]subtitles=" in filter_complex
+    assert filter_complex.index("[ov0]subtitles=") < filter_complex.index("setpts=PTS/1.500")
+    assert filter_complex.count("atempo=1.500") == 1
+    assert video_label == "recap_playback_video"
+    assert audio_label == "recap_playback_audio"
 
 
 def test_filter_complex_escapes_windows_ass_drive_path_for_subtitles():
@@ -237,7 +302,7 @@ def test_filter_complex_escapes_windows_ass_drive_path_for_subtitles():
     assert escape_ffmpeg_filter_path(ass_path) == expected_path
     assert f"subtitles=filename={expected_path}" in filter_complex
     assert "original_size=/Users" not in filter_complex
-    assert "[recap_captioned]setpts=PTS/1.750" in filter_complex
+    assert "[recap_captioned]setpts=PTS/1.500" in filter_complex
 
 
 def test_filter_path_escaping_leaves_posix_paths_valid():
@@ -245,7 +310,8 @@ def test_filter_path_escaping_leaves_posix_paths_valid():
 
 
 def test_final_duration_scales_with_recap_playback_speed():
-    assert final_recap_duration_seconds(83.883) == pytest.approx(47.933, abs=0.001)
+    assert RECAP_PLAYBACK_SPEED == 1.5
+    assert final_recap_duration_seconds(83.883) == pytest.approx(55.922, abs=0.001)
 
 
 def test_recap_source_resolves_only_from_identity_provenance(tmp_path):
@@ -301,3 +367,21 @@ def test_ffmpeg_command_includes_source_and_voiceover_inputs_and_maps(tmp_path):
     assert "-map" in command and "[recap_out]" in command and "[mixed]" in command
     assert "-t" in command and "12.345" in command
     assert str(output_path) in command
+
+
+def test_ffmpeg_command_adds_shared_sfx_and_emoji_inputs_after_voiceover(tmp_path):
+    clips = [_voiceover_clip("VO_001", start=0.0)]
+    command = build_recap_ffmpeg_command(
+        tmp_path / "source.mp4",
+        clips,
+        "somefilter",
+        "recap_out",
+        "mixed",
+        tmp_path / "final_recap.mp4",
+        sfx_events=[{"asset_path": tmp_path / "ding.mp3"}],
+        emoji_events=[{"path": tmp_path / "emoji.png"}],
+    )
+
+    assert command.count("-i") == 4
+    assert str(tmp_path / "ding.mp3") in command
+    assert str(tmp_path / "emoji.png") in command

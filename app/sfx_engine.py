@@ -3450,6 +3450,61 @@ def merge_sfx_with_editor_plan(
     return final_events, plan
 
 
+def build_sfx_mix_filter_complex(
+    base_label: str,
+    events: list[dict[str, Any]],
+    *,
+    first_input_index: int,
+    output_label: str = "[mixed]",
+) -> str:
+    """Build the shared FFmpeg SFX mix fragment for an existing audio bus.
+
+    ``mix_sfx_into_video()`` and Recap Mode both add the same local SFX
+    assets as FFmpeg inputs. Keeping the trim, gain, delay, and limiter
+    logic here means their output timing and volume conventions stay shared.
+    """
+
+    clean_output = output_label.strip("[]")
+    filter_parts = [
+        (
+            f"{base_label}"
+            "aformat=sample_rates=48000:channel_layouts=stereo,"
+            "volume=1.0[sfx_base]"
+        )
+    ]
+    mix_inputs = ["[sfx_base]"]
+
+    for offset, event in enumerate(events):
+        input_index = first_input_index + offset
+        delay_ms = max(0, int(round(float(event.get("start", 0.0)) * 1000)))
+        duration = max(0.06, float(event.get("duration", 0.25)))
+        trim_in = max(0.0, float(event.get("trim_in", 0.0) or 0.0))
+        volume = max(0.0, min(0.8, float(event.get("volume", 0.25))))
+        label = f"sfx{offset}"
+        filter_parts.append(
+            (
+                f"[{input_index}:a:0]"
+                f"atrim=start={trim_in:.3f}:duration={duration:.3f},"
+                "asetpts=PTS-STARTPTS,"
+                "aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"volume={volume:.4f},"
+                f"adelay={delay_ms}|{delay_ms}"
+                f"[{label}]"
+            )
+        )
+        mix_inputs.append(f"[{label}]")
+
+    filter_parts.append(
+        "".join(mix_inputs)
+        + "amix="
+        + f"inputs={len(mix_inputs)}:"
+        + "duration=first:dropout_transition=0:normalize=0,"
+        + "alimiter=limit=0.92"
+        + f"[{clean_output}]"
+    )
+    return ";".join(filter_parts)
+
+
 def mix_sfx_into_video(
     video: Path,
     events: list[dict[str, Any]],
@@ -3509,99 +3564,11 @@ def mix_sfx_into_video(
             ]
         )
 
-    filter_parts = [
-        (
-            f"{base_label}"
-            "aformat=sample_rates=48000:channel_layouts=stereo,"
-            "volume=1.0[base]"
-        )
-    ]
-    mix_inputs = [
-        "[base]"
-    ]
-
-    for offset, event in enumerate(
-        events
-    ):
-        input_index = next_input_index + offset
-        delay_ms = max(
-            0,
-            int(
-                round(
-                    float(
-                        event.get(
-                            "start",
-                            0.0,
-                        )
-                    )
-                    * 1000
-                )
-            ),
-        )
-        duration = max(
-            0.06,
-            float(
-                event.get(
-                    "duration",
-                    0.25,
-                )
-            ),
-        )
-        trim_in = max(
-            0.0,
-            float(
-                event.get(
-                    "trim_in",
-                    0.0,
-                )
-                or 0.0
-            ),
-        )
-        volume = max(
-            0.0,
-            min(
-                0.8,
-                float(
-                    event.get(
-                        "volume",
-                        0.25,
-                    )
-                ),
-            ),
-        )
-        label = f"sfx{offset}"
-        filter_parts.append(
-            (
-                f"[{input_index}:a:0]"
-                f"atrim=start={trim_in:.3f}:duration={duration:.3f},"
-                "asetpts=PTS-STARTPTS,"
-                "aformat=sample_rates=48000:channel_layouts=stereo,"
-                f"volume={volume:.4f},"
-                f"adelay={delay_ms}|{delay_ms}"
-                f"[{label}]"
-            )
-        )
-        mix_inputs.append(
-            f"[{label}]"
-        )
-
-    filter_parts.append(
-        (
-            "".join(
-                mix_inputs
-            )
-            + "amix="
-            + f"inputs={len(mix_inputs)}:"
-            + "duration=first:"
-            + "dropout_transition=0:"
-            + "normalize=0,"
-            + "alimiter=limit=0.92"
-            + "[mixed]"
-        )
-    )
-
-    filter_complex = ";".join(
-        filter_parts
+    filter_complex = build_sfx_mix_filter_complex(
+        base_label,
+        events,
+        first_input_index=next_input_index,
+        output_label="[mixed]",
     )
 
     if TEMP_VIDEO_PATH.exists():

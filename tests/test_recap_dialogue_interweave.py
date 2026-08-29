@@ -3,9 +3,9 @@ import copy
 import pytest
 
 from recap_media.sequence import (
-    CADENCE_ORIGINAL_DIALOGUE,
     assemble_sequence,
     interweave_original_dialogue,
+    voiceover_timing_by_segment,
 )
 
 
@@ -83,7 +83,7 @@ def test_strong_candidate_gets_inserted():
 
 
 def test_weak_candidate_does_not_get_inserted():
-    segment = _multi_shot_segment(dialogue_score=0.5)  # below default threshold
+    segment = _multi_shot_segment(dialogue_score=0.3)  # below relevance floor
     sequence = assemble_sequence(_script([segment]), {"VO_001": 8.0})
 
     result = interweave_original_dialogue(sequence, _script([segment]))
@@ -160,10 +160,10 @@ def test_reaction_beat_hint_segment_untouched():
 # Duration/cadence discipline
 # ============================================================
 
-def test_insert_duration_capped_by_max_fraction():
+def test_accepted_dialogue_candidate_keeps_its_complete_range():
     segment = _multi_shot_segment(dialogue_score=0.9)
     segment["original_dialogue_candidates"] = [
-        _candidate(100.0, 200.0, score=0.9)  # a huge 100s span available
+        _candidate(100.0, 112.36, score=0.9)  # complete payoff/exchange
     ]
     sequence = assemble_sequence(_script([segment]), {"VO_001": 8.0})
 
@@ -175,9 +175,9 @@ def test_insert_duration_capped_by_max_fraction():
     insert_shot = next(
         shot for shot in out_segment["shots"] if shot["treatment"] == "original_dialogue"
     )
-    # capped by max_fraction * original total duration, not the full 100s span
-    assert insert_shot["duration"] <= 8.0 * 0.4 + 0.01
-    assert insert_shot["duration"] <= CADENCE_ORIGINAL_DIALOGUE[1] + 0.01
+    assert (insert_shot["start"], insert_shot["end"]) == (100.0, 112.36)
+    assert insert_shot["duration"] == pytest.approx(12.36)
+    assert (insert_shot["candidate_start"], insert_shot["candidate_end"]) == (100.0, 112.36)
 
 
 def test_too_short_segment_skips_insert_rather_than_forcing_it():
@@ -202,7 +202,133 @@ def test_total_duration_seconds_recomputed_after_insert():
 
     expected = round(sum(s["timeline_duration_seconds"] for s in result["segments"]), 3)
     assert result["total_duration_seconds"] == expected
-    assert result["total_duration_seconds"] == pytest.approx(8.0)
+    assert result["total_duration_seconds"] == pytest.approx(12.0)
+
+
+# ============================================================
+# Source-audio recap policy
+# ============================================================
+
+def test_relevant_candidates_create_four_distinct_source_audio_inserts():
+    segments = [
+        _multi_shot_segment(
+            dialogue_score=score,
+            dialogue_candidates=[
+                _candidate(start, start + 3.5, score=score, reason=reason)
+            ],
+        )
+        for start, score, reason in (
+            (100.0, 0.77, "Character choice reaction."),
+            (200.0, 0.83, "Emotional plea."),
+            (300.0, 0.48, "Payoff reversal."),
+            (400.0, 0.91, "Final punchline reaction."),
+        )
+    ]
+    for order, segment in enumerate(segments, start=1):
+        segment["segment_id"] = f"VO_{order:03d}"
+        segment["order"] = order
+        segment["beat_ids"] = [f"B{order:03d}"]
+        visual_offset = (order - 1) * 100.0
+        for candidate in segment["candidate_visuals"]:
+            candidate["start"] += visual_offset
+            candidate["end"] += visual_offset
+
+    script = _script(segments)
+    sequence = assemble_sequence(
+        script, {segment["segment_id"]: 8.0 for segment in segments}
+    )
+    result = interweave_original_dialogue(sequence, script)
+
+    inserts = [
+        shot
+        for segment in result["segments"]
+        for shot in segment["shots"]
+        if shot.get("source_audio_insert")
+    ]
+    assert len(inserts) == 4
+    assert result["source_audio_insert_count"] == 4
+    assert all(shot["duration"] == pytest.approx(3.5) for shot in inserts)
+    assert [(shot["start"], shot["end"]) for shot in inserts] == [
+        (100.0, 103.5),
+        (200.0, 203.5),
+        (300.0, 303.5),
+        (400.0, 403.5),
+    ]
+    assert [shot["timeline_start_seconds"] for shot in inserts] == sorted(
+        shot["timeline_start_seconds"] for shot in inserts
+    )
+    assert result["total_duration_seconds"] == pytest.approx(46.0)
+    assert result["visual_hold_duration_seconds"] == 0.0
+    assert result["visual_coverage_shortfall_seconds"] == 0.0
+
+
+def test_verified_evidence_fills_source_audio_slots_when_script_metadata_is_sparse():
+    segments = []
+    beats = []
+    for order in range(1, 5):
+        beat_id = f"B{order:03d}"
+        segment = _multi_shot_segment(dialogue_candidates=[])
+        segment.update(
+            {
+                "segment_id": f"VO_{order:03d}",
+                "order": order,
+                "beat_ids": [beat_id],
+            }
+        )
+        segments.append(segment)
+        start = 100.0 * order
+        beats.append(
+            {
+                "beat_id": beat_id,
+                "source_evidence": [
+                    {"start": start, "end": start + 4.0, "confidence": 0.6}
+                ],
+            }
+        )
+
+    script = _script(segments)
+    sequence = assemble_sequence(
+        script,
+        {segment["segment_id"]: 8.0 for segment in segments},
+        verified_story_map={"beats": beats},
+    )
+    result = interweave_original_dialogue(
+        sequence, script, verified_story_map={"beats": beats}
+    )
+
+    inserts = [
+        shot
+        for segment in result["segments"]
+        for shot in segment["shots"]
+        if shot.get("source_audio_insert")
+    ]
+    assert len(inserts) == 4
+    assert {shot["candidate_origin"] for shot in inserts} == {"verified_story_map"}
+    assert [shot["beat_id"] for shot in inserts] == ["B001", "B002", "B003", "B004"]
+
+
+def test_source_audio_windows_pause_narration_and_shift_following_voiceover():
+    first = _multi_shot_segment(dialogue_score=0.9)
+    second = _multi_shot_segment(
+        dialogue_score=0.9,
+        dialogue_candidates=[_candidate(200.0, 204.0, score=0.9, reason="Later reaction.")],
+    )
+    first.update({"segment_id": "VO_001", "order": 1, "beat_ids": ["B001"]})
+    second.update({"segment_id": "VO_002", "order": 2, "beat_ids": ["B002"]})
+    for candidate in second["candidate_visuals"]:
+        candidate["start"] += 100.0
+        candidate["end"] += 100.0
+    script = _script([first, second])
+    sequence = assemble_sequence(script, {"VO_001": 8.0, "VO_002": 8.0})
+    result = interweave_original_dialogue(sequence, script)
+
+    timing = voiceover_timing_by_segment(result)
+    pauses = timing["VO_001"]["dialogue_pauses"]
+    assert len(pauses) == 1
+    assert 0.0 < pauses[0]["narration_offset_seconds"] < 8.0
+    assert pauses[0]["duration_seconds"] == 4.0
+    assert timing["VO_002"]["start"] == pytest.approx(12.0)
+    assert timing["VO_002"]["end"] == pytest.approx(24.0)
 
 
 # ============================================================
