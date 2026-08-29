@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
-from pipeline_paths import RECAP_FINAL_OUTPUT_PATH
+from pipeline_paths import RECAP_FINAL_OUTPUT_PATH, ROOT
 from recap_media.audio_mix import build_duck_filter_complex
 from recap_media.portrait_framing import build_portrait_filter_chain
 from recap_media.voiceover import wav_path_for_segment
@@ -45,6 +45,88 @@ from recap_media.voiceover import wav_path_for_segment
 
 class RecapRenderError(Exception):
     """The recap render command could not be built or failed to run."""
+
+
+RECAP_PLAYBACK_SPEED = 1.75
+MAX_RENDERABLE_VISUAL_SHORTFALL_SECONDS = 0.15
+
+
+def _validated_playback_speed(playback_speed: float) -> float:
+    try:
+        speed = float(playback_speed)
+    except (TypeError, ValueError) as exc:
+        raise RecapRenderError(f"Invalid recap playback speed: {playback_speed!r}") from exc
+    if not 0.5 <= speed <= 2.0:
+        raise RecapRenderError("Recap playback speed must be between 0.5x and 2.0x.")
+    return speed
+
+
+def final_recap_duration_seconds(
+    base_duration_seconds: float,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
+) -> float:
+    """Output duration after the final composite speed transform."""
+
+    return round(max(0.0, float(base_duration_seconds)) / _validated_playback_speed(playback_speed), 3)
+
+
+def escape_ffmpeg_filter_path(path: Path) -> str:
+    """Escape a file path embedded in an FFmpeg filtergraph option value."""
+
+    normalized = str(path).replace("\\", "/")
+
+    # First escape the subtitles filter's option value. Then escape that
+    # result for the surrounding filtergraph, which consumes one layer before
+    # the subtitles filter parses its own colon-delimited options.
+    option_value = (
+        normalized.replace("\\", r"\\")
+        .replace("'", r"\'")
+        .replace(":", r"\:")
+    )
+    return (
+        option_value.replace("\\", r"\\")
+        .replace("'", r"\'")
+        .replace(",", r"\,")
+        .replace(";", r"\;")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+    )
+
+
+def resolve_recap_source_video(
+    episode_identity: dict[str, Any],
+    input_dir: Path | None = None,
+) -> Path:
+    """Resolve the source named by accepted recap identity provenance.
+
+    A recap must never borrow the global editor-plan source, which may point
+    to another short or episode. Track A's identity query records the original
+    source filename; resolving that exact filename below the project input
+    directory is the narrow, auditable bridge to Track B's renderer.
+    """
+
+    query = episode_identity.get("query")
+    if not isinstance(query, dict):
+        raise RecapRenderError("Recap episode identity has no source query provenance.")
+    source_filename = query.get("source_filename")
+    if not isinstance(source_filename, str) or not source_filename.strip():
+        raise RecapRenderError("Recap episode identity has no source_filename provenance.")
+
+    source_name = Path(source_filename)
+    if source_name.is_absolute() or source_name.name != source_filename:
+        raise RecapRenderError("Recap source_filename must be a single input filename.")
+
+    root = (input_dir or ROOT / "input").resolve()
+    source_path = (root / source_name).resolve()
+    try:
+        source_path.relative_to(root)
+    except ValueError as exc:
+        raise RecapRenderError("Recap source path escapes the project input directory.") from exc
+    if not source_path.is_file():
+        raise RecapRenderError(
+            f"Recap source from episode identity was not found: {source_path}"
+        )
+    return source_path
 
 
 def active_voiceover_clips_in_order(voiceover_clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -171,6 +253,7 @@ def build_recap_filter_complex(
     portrait_plan: dict[str, Any],
     duck_plan: dict[str, Any],
     captions_ass_path: Path | None = None,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> tuple[str, str, str]:
     """
     Assemble the complete filter_complex for one recap render pass.
@@ -199,9 +282,9 @@ def build_recap_filter_complex(
     final_video_label = "recap_out"
 
     if captions_ass_path is not None:
-        normalized_path = str(captions_ass_path).replace("\\", "/").replace(":", r"\:")
         caption_filter = (
-            f"[recap_out]subtitles={normalized_path}[recap_captioned]"
+            f"[recap_out]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
+            "[recap_captioned]"
         )
         final_video_label = "recap_captioned"
     else:
@@ -213,12 +296,21 @@ def build_recap_filter_complex(
         source_label=f"[{source_audio_label}]",
         output_label="[mixed]",
     )
-    final_audio_label = "mixed"
+    speed = _validated_playback_speed(playback_speed)
+    speed_video_label = "recap_playback_video"
+    speed_audio_label = "recap_playback_audio"
+    playback_filter = (
+        f"[{final_video_label}]setpts=PTS/{speed:.3f}[{speed_video_label}];"
+        f"[mixed]atempo={speed:.3f}[{speed_audio_label}]"
+    )
+    final_video_label = speed_video_label
+    final_audio_label = speed_audio_label
 
     fragments = [video_filter, source_audio_filter, narration_filter, portrait_filter]
     if caption_filter is not None:
         fragments.append(caption_filter)
     fragments.append(duck_filter)
+    fragments.append(playback_filter)
 
     return ";".join(fragments), final_video_label, final_audio_label
 
@@ -282,20 +374,38 @@ def input_index_for_voiceover_clips(
 
 
 def render_recap(
-    source_video: Path,
+    episode_identity: dict[str, Any],
     sequence: dict[str, Any],
     voiceover_clips: list[dict[str, Any]],
     portrait_plan: dict[str, Any],
     duck_plan: dict[str, Any],
     captions_ass_path: Path | None = None,
     output_path: Path = RECAP_FINAL_OUTPUT_PATH,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> Path:
     """
-    Top-level orchestration: build the command and actually run ffmpeg.
-    Raises RecapRenderError on an empty shot list, zero active narration,
-    a missing WAV file, or a nonzero ffmpeg exit code.
+    Top-level orchestration: resolve the accepted recap source, build the
+    command, and run ffmpeg. The source is deliberately resolved from the
+    recap identity rather than the global editor plan, which may refer to a
+    different short or episode.
     """
 
+    if captions_ass_path is None:
+        raise RecapRenderError(
+            "Narration captions are required for a recap render; build the recap ASS file first."
+        )
+    if not captions_ass_path.is_file():
+        raise RecapRenderError(f"Narration caption ASS file not found: {captions_ass_path}")
+
+    shortfall = float(sequence.get("visual_coverage_shortfall_seconds", 0.0) or 0.0)
+    if shortfall > MAX_RENDERABLE_VISUAL_SHORTFALL_SECONDS:
+        raise RecapRenderError(
+            "Recap sequence lacks moving visual coverage for "
+            f"{shortfall:.3f}s; regenerate sequence coverage instead of freezing frames."
+        )
+
+    source_video = resolve_recap_source_video(episode_identity)
+    speed = _validated_playback_speed(playback_speed)
     active_clips = active_voiceover_clips_in_order(voiceover_clips)
     if not active_clips:
         raise RecapRenderError(
@@ -317,6 +427,7 @@ def render_recap(
         portrait_plan,
         duck_plan,
         captions_ass_path,
+        speed,
     )
 
     command = build_recap_ffmpeg_command(
@@ -326,7 +437,9 @@ def render_recap(
         final_video_label,
         final_audio_label,
         output_path,
-        total_duration_seconds=sequence.get("total_duration_seconds"),
+        total_duration_seconds=final_recap_duration_seconds(
+            sequence.get("total_duration_seconds", 0.0), speed
+        ),
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

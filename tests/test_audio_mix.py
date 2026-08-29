@@ -54,6 +54,13 @@ def test_windows_empty_sequence():
     assert shot_output_windows(sequence) == []
 
 
+def test_windows_prefer_explicit_timeline_duration_over_raw_source_duration():
+    sequence = _sequence_from_treatments([("narration_over_source", 2.0)])
+    sequence["segments"][0]["shots"][0]["timeline_duration_seconds"] = 8.0
+
+    assert shot_output_windows(sequence) == [(0.0, 8.0, "narration_over_source")]
+
+
 # ============================================================
 # build_gain_keyframes
 # ============================================================
@@ -144,6 +151,25 @@ def test_source_restores_during_dialogue_and_ducks_during_narration():
     gains = [gain for _, gain in plan["source_keyframes"]]
     assert 0.2 in gains
     assert 1.0 in gains
+
+
+def test_default_source_audio_is_hard_muted_for_narration():
+    sequence = _sequence_from_treatments([("narration_over_source", 3.0)])
+
+    plan = build_duck_plan(sequence)
+
+    assert plan["settings"]["source_ducked_gain"] == 0.0
+    assert plan["source_keyframes"] == [[0.0, 0.0], [3.0, 0.0]]
+
+
+def test_source_mute_begins_exactly_when_narration_resumes():
+    sequence = _sequence_from_treatments(
+        [("original_dialogue", 3.0), ("narration_over_source", 3.0)]
+    )
+
+    plan = build_duck_plan(sequence)
+
+    assert plan["source_keyframes"] == [[0.0, 1.0], [3.0, 1.0], [3.0, 0.0], [6.0, 0.0]]
 
 
 def test_visual_only_treated_like_restored_source_no_narration():

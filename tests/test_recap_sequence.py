@@ -11,8 +11,10 @@ from recap_media.sequence import (
     CADENCE_PAYOFF,
     CADENCE_REACTION,
     DEFAULT_VISUAL_FUNCTION,
+    MAX_MOVING_COVERAGE_SHOT_SECONDS,
     assemble_sequence,
     infer_visual_function,
+    interweave_original_dialogue,
     load_recap_sequence,
     write_recap_sequence,
 )
@@ -106,6 +108,70 @@ def test_single_candidate_covers_target_duration():
     assert result["segments"][0]["shots_total_duration_seconds"] >= 1.9
 
 
+def test_narration_timeline_uses_moving_source_coverage_before_any_hold():
+    segment = _segment(candidate_visuals=[_candidate(10.0, 20.0)])
+
+    result = assemble_sequence(_script([segment]), {"VO_001": 8.0})
+
+    out_segment = result["segments"][0]
+    assert out_segment["shots_total_duration_seconds"] == pytest.approx(8.0)
+    assert out_segment["timeline_duration_seconds"] == pytest.approx(8.0)
+    assert all(shot["hold_duration_seconds"] == 0.0 for shot in out_segment["shots"])
+    assert any(shot.get("coverage_mode") == "verified_range_extension" for shot in out_segment["shots"])
+    assert result["raw_source_duration_seconds"] == pytest.approx(8.0)
+    assert result["total_duration_seconds"] == pytest.approx(8.0)
+    assert result["visual_coverage_shortfall_seconds"] == 0.0
+
+
+def test_moving_coverage_extends_only_within_candidate_bounds():
+    segment = _segment(
+        candidate_visuals=[
+            _candidate(10.0, 18.0),
+            _candidate(20.0, 28.0),
+        ]
+    )
+
+    result = assemble_sequence(_script([segment]), {"VO_001": 10.0})
+
+    shots = result["segments"][0]["shots"]
+    assert all(10.0 <= shot["start"] <= 28.0 for shot in shots)
+    assert all(shot["end"] <= 18.0 or shot["start"] >= 20.0 for shot in shots)
+    assert all(shot["hold_duration_seconds"] == 0.0 for shot in shots)
+    assert sum(shot["duration"] for shot in shots) == pytest.approx(10.0)
+    assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)
+
+
+def test_dialogue_insert_keeps_unused_verified_context_as_moving_coverage():
+    segment = _segment(
+        beat_ids=["B018"],
+        candidate_visuals=[_candidate(120.0, 123.78, score=0.95)],
+        original_dialogue_candidates=[_candidate(120.0, 123.78, score=0.99)],
+    )
+    story_map = _story_map(
+        _beat("B017", 17, _evidence(100.0, 110.0)),
+        _beat("B018", 18, _evidence(120.0, 123.78)),
+    )
+
+    assembled = assemble_sequence(
+        _script([segment]), {"VO_001": 13.739}, verified_story_map=story_map
+    )
+    result = interweave_original_dialogue(assembled, _script([segment]))
+    out_segment = result["segments"][0]
+    shots = out_segment["shots"]
+
+    assert out_segment["shots_total_duration_seconds"] == pytest.approx(13.739)
+    assert out_segment["visual_hold_duration_seconds"] == 0.0
+    assert out_segment["visual_coverage_shortfall_seconds"] == 0.0
+    assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)
+    assert all(100.0 <= shot["start"] and shot["end"] <= 123.78 for shot in shots)
+    assert len({(shot["start"], shot["end"]) for shot in shots}) == len(shots)
+    assert any(
+        shot.get("beat_id") == "B018"
+        and shot.get("coverage_mode") == "contiguous_local_context"
+        for shot in shots
+    )
+
+
 def test_multiple_distinct_candidates_are_all_used_for_a_long_target():
     segment = _segment(
         candidate_visuals=[
@@ -123,7 +189,7 @@ def test_multiple_distinct_candidates_are_all_used_for_a_long_target():
     assert starts == {0.0, 30.0, 60.0}
     assert all(shot["reused"] is False for shot in shots)
     for shot in shots:
-        assert shot["duration"] <= CADENCE_ILLUSTRATIVE[1] + 0.01
+        assert shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS + 0.01
 
 
 def test_shots_never_exceed_their_own_candidate_bounds():
@@ -159,6 +225,77 @@ def test_multi_beat_segment_supplements_script_candidates_from_assigned_beats():
     }
 
 
+def test_multi_beat_moving_coverage_keeps_distinct_verified_beats_chronological():
+    segment = _segment(
+        beat_ids=["B006", "B008", "B009", "B012"],
+        candidate_visuals=[
+            _candidate(100.0, 106.0, score=0.95, beat_id="B006"),
+            _candidate(130.0, 136.0, score=0.92, beat_id="B012"),
+        ],
+    )
+    story_map = _story_map(
+        _beat("B006", 6, _evidence(100.0, 106.0)),
+        _beat("B008", 8, _evidence(110.0, 116.0)),
+        _beat("B009", 9, _evidence(120.0, 126.0)),
+        _beat("B012", 12, _evidence(130.0, 136.0)),
+    )
+
+    result = assemble_sequence(
+        _script([segment]), {"VO_001": 20.0}, verified_story_map=story_map
+    )
+
+    shots = result["segments"][0]["shots"]
+    assert [shot["start"] for shot in shots] == sorted(shot["start"] for shot in shots)
+    assert {shot["beat_id"] for shot in shots} == {"B006", "B008", "B009", "B012"}
+    assert result["segments"][0]["visual_coverage_shortfall_seconds"] == 0.0
+
+
+def test_multi_beat_sequence_trades_redundant_coverage_for_unused_evidence_moment():
+    segment = _segment(
+        beat_ids=["B001", "B002"],
+        candidate_visuals=[
+            _candidate(10.0, 20.0, score=0.95, beat_id="B001"),
+            _candidate(30.0, 40.0, score=0.90, beat_id="B002"),
+        ],
+    )
+    story_map = _story_map(
+        _beat("B001", 1, _evidence(10.0, 20.0)),
+        _beat("B002", 2, _evidence(30.0, 40.0)),
+    )
+
+    result = assemble_sequence(
+        _script([segment]), {"VO_001": 12.0}, verified_story_map=story_map
+    )
+    out_segment = result["segments"][0]
+    shots = out_segment["shots"]
+    trailing_moments = [
+        shot for shot in shots if shot.get("coverage_mode") == "trailing_evidence_moment"
+    ]
+
+    assert len(trailing_moments) == 1
+    assert trailing_moments[0]["beat_id"] == "B002"
+    assert trailing_moments[0]["start"] >= 37.5
+    assert out_segment["shots_total_duration_seconds"] == pytest.approx(12.0)
+    assert out_segment["visual_hold_duration_seconds"] == 0.0
+    assert out_segment["visual_coverage_shortfall_seconds"] == 0.0
+    assert [shot["start"] for shot in shots] == sorted(shot["start"] for shot in shots)
+    assert len({(shot["start"], shot["end"]) for shot in shots}) == len(shots)
+    assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)
+
+
+def test_contiguous_context_never_leaves_verified_story_window():
+    segment = _segment(beat_ids=["B001"], candidate_visuals=[_candidate(100.0, 102.0)])
+    story_map = _story_map(_beat("B001", 1, _evidence(100.0, 102.0)))
+
+    result = assemble_sequence(
+        _script([segment]), {"VO_001": 4.0}, verified_story_map=story_map
+    )
+
+    shots = result["segments"][0]["shots"]
+    assert all(100.0 <= shot["start"] and shot["end"] <= 102.0 for shot in shots)
+    assert result["segments"][0]["visual_coverage_shortfall_seconds"] == pytest.approx(2.0)
+
+
 def test_supplemental_evidence_is_limited_to_the_segment_assigned_beats():
     segment = _segment(beat_ids=["B001"], candidate_visuals=[])
     story_map = _story_map(
@@ -171,11 +308,14 @@ def test_supplemental_evidence_is_limited_to_the_segment_assigned_beats():
     )
 
     shots = result["segments"][0]["shots"]
-    assert [shot["start"] for shot in shots] == [10.0]
-    assert shots[0]["beat_id"] == "B001"
+    assert shots
+    assert all(shot["beat_id"] == "B001" for shot in shots)
+    assert all(shot["start"] < 90.0 for shot in shots)
+    assert all(shot["end"] < 90.0 for shot in shots)
+    assert all(shot["candidate_origin"] in {"verified_story_map", "recap_script"} for shot in shots)
 
 
-def test_verified_evidence_deduplicates_script_ranges_and_never_creates_giant_filler():
+def test_verified_evidence_deduplicates_script_ranges_and_uses_bounded_moving_coverage():
     segment = _segment(
         beat_ids=["B001", "B002"],
         candidate_visuals=[_candidate(10.0, 30.0, score=0.95)],
@@ -190,10 +330,11 @@ def test_verified_evidence_deduplicates_script_ranges_and_never_creates_giant_fi
     )
 
     shots = result["segments"][0]["shots"]
-    assert len(shots) == 2
-    assert len({(shot["start"], shot["end"]) for shot in shots}) == 2
+    assert len(shots) > 2
+    assert len({(shot["start"], shot["end"]) for shot in shots}) == len(shots)
     assert all(shot["reused"] is False for shot in shots)
-    assert all(shot["duration"] <= CADENCE_ILLUSTRATIVE[1] for shot in shots)
+    assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)
+    assert {shot["beat_id"] for shot in shots} == {"B001", "B002"}
 
 
 def test_legacy_sequence_assembly_is_unchanged_without_a_story_map():
@@ -324,6 +465,8 @@ def test_single_candidate_segment_stops_short_rather_than_pad_with_reuse():
     assert len(shots) == 1
     assert shots[0]["reused"] is False
     assert result["segments"][0]["shots_total_duration_seconds"] < 3.0
+    assert result["segments"][0]["timeline_duration_seconds"] == pytest.approx(10.0)
+    assert result["segments"][0]["visual_coverage_shortfall_seconds"] > 7.0
 
 
 def test_reuse_avoidance_is_global_across_segments():
@@ -408,6 +551,7 @@ def test_reaction_visual_function_inferred_from_reason_gets_reaction_cadence():
     shots = result["segments"][0]["shots"]
     assert shots[0]["visual_function"] == "reaction"
     assert shots[0]["duration"] <= CADENCE_REACTION[1] + 0.01
+    assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)
 
 
 def test_detail_visual_function_uses_detail_cadence_regardless_of_importance():
@@ -420,6 +564,7 @@ def test_detail_visual_function_uses_detail_cadence_regardless_of_importance():
     shots = result["segments"][0]["shots"]
     assert shots[0]["visual_function"] == "detail"
     assert shots[0]["duration"] <= CADENCE_DETAIL[1] + 0.01
+    assert all(shot["duration"] <= MAX_MOVING_COVERAGE_SHOT_SECONDS for shot in shots)
 
 
 def test_important_segment_uses_wider_cadence_than_normal():

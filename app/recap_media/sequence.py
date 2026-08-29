@@ -151,6 +151,19 @@ NONSEQUENTIAL_JUMP_TOLERANCE_SECONDS = 5.0
 
 MAX_SHOTS_PER_SEGMENT = 20
 
+# Moving footage is allowed to run longer than the fast-cut anchor cadence
+# when it comes from a locally verified range. This prevents the timeline
+# layer from turning a lack of cuts into frozen clone-frame filler.
+MAX_MOVING_COVERAGE_SHOT_SECONDS = 4.5
+LOCAL_CONTEXT_EXTENSION_SECONDS = 10.0
+MIN_MOVING_CONTINUATION_SECONDS = 0.7
+
+# A small final-pass budget for swapping redundant coverage for additional
+# source moments in longer, multi-beat narration thoughts. The source timeline
+# and moving-footage total remain unchanged.
+MAX_ADDITIONAL_SOURCE_MOMENTS_PER_RECAP = 3
+MIN_DISTINCT_SOURCE_MOMENT_SECONDS = 1.8
+
 
 def _candidate_key(candidate: dict[str, Any]) -> tuple[float, float]:
     """Use source timing, not incidental metadata, to identify one source range."""
@@ -225,9 +238,23 @@ def visual_candidates_for_segment(
         candidate.setdefault("candidate_origin", "recap_script")
 
     seen_ranges = {_candidate_key(candidate) for candidate in preferred}
+    verified = verified_candidates_for_segment(segment, verified_story_map)
+    verified_by_range = {
+        _candidate_key(candidate): candidate for candidate in verified
+    }
+
+    # A recap-script range can deliberately duplicate the stronger story-map
+    # evidence. Keep the script's editorial preference, but never discard the
+    # assigned beat provenance when those ranges are the same.
+    for candidate in preferred:
+        verified_match = verified_by_range.get(_candidate_key(candidate))
+        if verified_match is not None and not candidate.get("beat_id"):
+            candidate["beat_id"] = verified_match.get("beat_id")
+            candidate["evidence_type"] = verified_match.get("evidence_type", "")
+
     supplemental = [
         candidate
-        for candidate in verified_candidates_for_segment(segment, verified_story_map)
+        for candidate in verified
         if _candidate_key(candidate) not in seen_ranges
     ]
     return preferred + supplemental
@@ -459,6 +486,8 @@ def select_shots(
                 "start": round(shot_start, 3),
                 "end": shot_end,
                 "duration": round(shot_duration, 3),
+                "candidate_start": round(float(best_candidate["start"]), 3),
+                "candidate_end": round(float(best_candidate["end"]), 3),
                 "source_list": source_list_name,
                 "score": best_candidate["score"],
                 "selection_score": round(best_score, 3),
@@ -482,6 +511,410 @@ def select_shots(
     return _order_selected_shots(shots, segment)
 
 
+def _source_window_from_story_map(
+    verified_story_map: dict[str, Any] | None,
+) -> tuple[float, float] | None:
+    """Return the locally verified source window for the selected story only."""
+
+    if not verified_story_map:
+        return None
+
+    ranges: list[tuple[float, float]] = []
+    for beat in verified_story_map.get("beats", []):
+        if not isinstance(beat, dict):
+            continue
+        for evidence in beat.get("source_evidence", []):
+            if not isinstance(evidence, dict):
+                continue
+            try:
+                start = float(evidence["start"])
+                end = float(evidence["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end > start:
+                ranges.append((start, end))
+
+    if not ranges:
+        return None
+    return min(start for start, _ in ranges), max(end for _, end in ranges)
+
+
+def _uncovered_intervals(
+    start: float,
+    end: float,
+    occupied: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Portions of a source range not already selected in this thought."""
+
+    cursor = start
+    intervals: list[tuple[float, float]] = []
+    for occupied_start, occupied_end in sorted(occupied):
+        if occupied_end <= cursor or occupied_start >= end:
+            continue
+        if occupied_start > cursor:
+            intervals.append((cursor, min(occupied_start, end)))
+        cursor = max(cursor, occupied_end)
+        if cursor >= end:
+            break
+    if cursor < end:
+        intervals.append((cursor, end))
+    return intervals
+
+
+def _append_moving_coverage(
+    shots: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    segment: dict[str, Any],
+    target_duration: float,
+    used_ranges: set[tuple[float, float]],
+    source_list_name: str,
+    story_source_window: tuple[float, float] | None,
+) -> list[dict[str, Any]]:
+    """Use remaining verified/contextual source footage before any hold.
+
+    The initial selector chooses concise editorial anchors. This second pass
+    keeps those anchors, then consumes unused locally verified evidence for
+    the thought and finally bounded contiguous local context around those
+    anchors. Context never leaves the verified selected-story window.
+    """
+
+    if segment.get("presentation_hint") != "narration_over_source" or not shots:
+        return shots
+
+    remaining = target_duration - sum(float(shot["duration"]) for shot in shots)
+    if remaining <= 0:
+        return shots
+
+    occupied = [(float(shot["start"]), float(shot["end"])) for shot in shots]
+    selected_keys = {
+        (round(float(shot.get("candidate_start", shot["start"])), 2),
+         round(float(shot.get("candidate_end", shot["end"])), 2))
+        for shot in shots
+    }
+
+    selected_candidates = [
+        candidate
+        for candidate in candidates
+        if _candidate_key(candidate) in selected_keys
+        and float(candidate.get("score", 0.0)) >= MIN_USEFUL_SELECTION_SCORE
+    ]
+    supplemental_candidates = [
+        candidate
+        for candidate in candidates
+        if _candidate_key(candidate) not in selected_keys
+        and _candidate_key(candidate) not in used_ranges
+        and float(candidate.get("score", 0.0)) >= MIN_USEFUL_SELECTION_SCORE
+    ]
+    supplemental_candidates.sort(
+        key=lambda candidate: (
+            candidate.get("candidate_origin") != "verified_story_map",
+            -float(candidate["score"]),
+            float(candidate["start"]),
+        )
+    )
+
+    def append_from_range(
+        start: float,
+        end: float,
+        candidate: dict[str, Any],
+        coverage_mode: str,
+    ) -> None:
+        nonlocal remaining
+        for available_start, available_end in _uncovered_intervals(start, end, occupied):
+            cursor = available_start
+            while (
+                cursor < available_end
+                and remaining > 0.001
+                and len(shots) < MAX_SHOTS_PER_SEGMENT
+            ):
+                duration = min(
+                    MAX_MOVING_COVERAGE_SHOT_SECONDS,
+                    available_end - cursor,
+                    remaining,
+                )
+                if duration < MIN_MOVING_CONTINUATION_SECONDS:
+                    # A small, contiguous tail is still useful when it can
+                    # extend an already-selected shot from this exact source
+                    # range. Folding it in avoids a visually meaningless
+                    # rapid cut; otherwise leave it uncovered rather than
+                    # creating filler from a tiny fragment.
+                    extension_target = next(
+                        (
+                            shot
+                            for shot in shots
+                            if round(float(shot["end"]), 3) == round(cursor, 3)
+                            and (
+                                round(float(shot.get("candidate_start", shot["start"])), 2),
+                                round(float(shot.get("candidate_end", shot["end"])), 2),
+                            ) == _candidate_key(candidate)
+                        ),
+                        None,
+                    )
+                    if extension_target is None:
+                        return
+                    extended_duration = float(extension_target["duration"]) + duration
+                    if extended_duration > MAX_MOVING_COVERAGE_SHOT_SECONDS:
+                        # Keep the moving-shot cap absolute. Rebalance this
+                        # contiguous same-candidate span instead of turning
+                        # its small tail into an oversized source shot.
+                        if len(shots) >= MAX_SHOTS_PER_SEGMENT:
+                            return
+                        chunk_count = int(
+                            (extended_duration + MAX_MOVING_COVERAGE_SHOT_SECONDS - 0.001)
+                            // MAX_MOVING_COVERAGE_SHOT_SECONDS
+                        )
+                        chunk_count = max(2, chunk_count)
+                        chunk_duration = round(extended_duration / chunk_count, 3)
+                        chunk_start = float(extension_target["start"])
+                        extension_target["end"] = round(chunk_start + chunk_duration, 3)
+                        extension_target["duration"] = chunk_duration
+                        rebalanced_shot = dict(extension_target)
+                        rebalanced_shot["start"] = extension_target["end"]
+                        rebalanced_shot["end"] = round(cursor + duration, 3)
+                        rebalanced_shot["duration"] = round(
+                            float(rebalanced_shot["end"]) - float(rebalanced_shot["start"]),
+                            3,
+                        )
+                        shots.append(rebalanced_shot)
+                    else:
+                        extension_target["end"] = round(cursor + duration, 3)
+                        extension_target["duration"] = round(extended_duration, 3)
+                    occupied[:] = [
+                        (float(shot["start"]), float(shot["end"]))
+                        for shot in shots
+                    ]
+                    remaining -= duration
+                    cursor += duration
+                    continue
+                shot_end = round(cursor + duration, 3)
+                visual_function = infer_visual_function(candidate)
+                shots.append(
+                    {
+                        "start": round(cursor, 3),
+                        "end": shot_end,
+                        "duration": round(duration, 3),
+                        "candidate_start": round(float(candidate["start"]), 3),
+                        "candidate_end": round(float(candidate["end"]), 3),
+                        "source_list": source_list_name,
+                        "score": candidate["score"],
+                        "selection_score": round(float(candidate["score"]), 3),
+                        "reason": candidate.get("reason", ""),
+                        "visual_function": visual_function,
+                        "reused": False,
+                        "beat_id": candidate.get("beat_id"),
+                        "candidate_origin": candidate.get("candidate_origin", source_list_name),
+                        "coverage_mode": coverage_mode,
+                    }
+                )
+                occupied.append((cursor, shot_end))
+                remaining -= duration
+                cursor = shot_end
+
+    # Use distinct useful evidence before extending an already-used anchor.
+    # This preserves beat diversity and prevents a tiny tail from crowding
+    # out another strong source moment.
+    for candidate in supplemental_candidates + selected_candidates:
+        if remaining <= 0.001 or len(shots) >= MAX_SHOTS_PER_SEGMENT:
+            break
+        append_from_range(
+            float(candidate["start"]),
+            float(candidate["end"]),
+            candidate,
+            "verified_range_extension",
+        )
+        used_ranges.add(_candidate_key(candidate))
+
+    # The final moving-coverage fallback is contiguous local footage directly
+    # around an assigned verified anchor. It remains inside the selected
+    # story's global locally verified window, so it cannot spill into a sister
+    # episode in a compound source file.
+    if remaining > 0.001 and story_source_window is not None:
+        window_start, window_end = story_source_window
+        context_candidates = sorted(
+            selected_candidates + supplemental_candidates,
+            key=lambda candidate: float(candidate["start"]),
+        )
+        for candidate in context_candidates:
+            if remaining <= 0.001 or len(shots) >= MAX_SHOTS_PER_SEGMENT:
+                break
+            start = float(candidate["start"])
+            end = float(candidate["end"])
+            context_ranges = (
+                (max(window_start, start - LOCAL_CONTEXT_EXTENSION_SECONDS), start),
+                (end, min(window_end, end + LOCAL_CONTEXT_EXTENSION_SECONDS)),
+            )
+            for context_start, context_end in context_ranges:
+                if remaining <= 0.001:
+                    break
+                append_from_range(
+                    context_start,
+                    context_end,
+                    candidate,
+                    "contiguous_local_context",
+                )
+
+    return _order_selected_shots(shots, segment)
+
+
+def _add_trailing_evidence_moment(
+    shots: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    segment: dict[str, Any],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Trade redundant coverage for one unused, locally verified source moment."""
+
+    if (
+        segment.get("presentation_hint") != "narration_over_source"
+        or len(set(segment.get("beat_ids", []))) < 2
+    ):
+        return shots, False
+
+    occupied = [(float(shot["start"]), float(shot["end"])) for shot in shots]
+    beat_counts: dict[str, int] = {}
+    for shot in shots:
+        beat_id = shot.get("beat_id")
+        if isinstance(beat_id, str):
+            beat_counts[beat_id] = beat_counts.get(beat_id, 0) + 1
+
+    eligible: list[tuple[dict[str, Any], tuple[float, float]]] = []
+    for candidate in candidates:
+        if float(candidate.get("score", 0.0)) < MIN_USEFUL_SELECTION_SCORE:
+            continue
+        unused_intervals = _uncovered_intervals(
+            float(candidate["start"]), float(candidate["end"]), occupied
+        )
+        tail = next(
+            (
+                interval
+                for interval in reversed(unused_intervals)
+                if interval[1] - interval[0] >= MIN_DISTINCT_SOURCE_MOMENT_SECONDS
+            ),
+            None,
+        )
+        if tail is not None:
+            eligible.append((candidate, tail))
+
+    if not eligible:
+        return shots, False
+
+    # Favor unrepresented/underrepresented assigned beats, with locally
+    # verified supplemental evidence ahead of an equivalent script preference.
+    eligible.sort(
+        key=lambda item: (
+            item[0].get("candidate_origin") != "verified_story_map",
+            beat_counts.get(str(item[0].get("beat_id", "")), 0),
+            -float(item[0]["score"]),
+            -(item[1][1] - item[1][0]),
+            float(item[0]["start"]),
+        )
+    )
+    candidate, tail = eligible[0]
+
+    # Preserve a readable source moment on both sides of the swap. Favor a
+    # repeated beat as the donor so a new beat/context moment adds variety.
+    donors = [
+        shot
+        for shot in shots
+        if float(shot["duration"]) >= 2 * MIN_DISTINCT_SOURCE_MOMENT_SECONDS
+        and shot.get("treatment", "narration_over_source") != "original_dialogue"
+    ]
+    if not donors:
+        return shots, False
+    donor = max(
+        donors,
+        key=lambda shot: (
+            beat_counts.get(str(shot.get("beat_id", "")), 0) > 1,
+            float(shot["duration"]),
+            -float(shot["start"]),
+        ),
+    )
+
+    moment_duration = min(
+        CADENCE_ILLUSTRATIVE[1],
+        tail[1] - tail[0],
+        float(donor["duration"]) - MIN_DISTINCT_SOURCE_MOMENT_SECONDS,
+    )
+    if moment_duration < MIN_DISTINCT_SOURCE_MOMENT_SECONDS:
+        return shots, False
+
+    # Shorten the donor and spend the same timeline duration on an unused tail
+    # of the verified candidate. This adds a source moment without changing
+    # narration timing, total coverage, or the hard moving-shot cap.
+    donor["end"] = round(float(donor["end"]) - moment_duration, 3)
+    donor["duration"] = round(float(donor["duration"]) - moment_duration, 3)
+    moment_start = round(tail[1] - moment_duration, 3)
+    moment_end = round(tail[1], 3)
+    shots.append(
+        {
+            "start": moment_start,
+            "end": moment_end,
+            "duration": round(moment_end - moment_start, 3),
+            "candidate_start": round(float(candidate["start"]), 3),
+            "candidate_end": round(float(candidate["end"]), 3),
+            "source_list": "candidate_visuals",
+            "score": candidate["score"],
+            "selection_score": round(float(candidate["score"]), 3),
+            "reason": candidate.get("reason", ""),
+            "visual_function": infer_visual_function(candidate),
+            "reused": False,
+            "beat_id": candidate.get("beat_id"),
+            "candidate_origin": candidate.get("candidate_origin", "candidate_visuals"),
+            "coverage_mode": "trailing_evidence_moment",
+        }
+    )
+    return _order_selected_shots(shots, segment), True
+
+
+def _apply_timeline_coverage(
+    shots: list[dict[str, Any]],
+    narration_duration: float,
+) -> tuple[float, float, float, float]:
+    """Make selected source shots occupy one narration window exactly.
+
+    ``duration`` remains the actual moving source span. Any remaining
+    shortfall is explicit metadata; the renderer rejects a material shortfall
+    rather than turning it into a multi-second frozen frame.
+    """
+
+    target = round(max(0.0, float(narration_duration)), 3)
+    remaining = target
+    trimmed: list[dict[str, Any]] = []
+
+    # Selection normally stays within the target.  Guard the edge case where
+    # a cadence minimum slightly overshoots it so every output track still has
+    # exactly the narration timeline length.
+    for shot in shots:
+        raw_duration = max(0.0, float(shot["duration"]))
+        kept_duration = min(raw_duration, remaining)
+        if kept_duration <= 0:
+            continue
+        if kept_duration != raw_duration:
+            shot["duration"] = round(kept_duration, 3)
+            shot["end"] = round(float(shot["start"]) + kept_duration, 3)
+        shot["hold_duration_seconds"] = 0.0
+        shot["timeline_duration_seconds"] = round(kept_duration, 3)
+        trimmed.append(shot)
+        remaining -= kept_duration
+
+    shots[:] = trimmed
+    raw_total = round(sum(float(shot["duration"]) for shot in shots), 3)
+    shortfall = round(max(0.0, target - raw_total), 3)
+    timeline_total = target
+    return raw_total, 0.0, timeline_total, shortfall
+
+
+def _refresh_segment_timeline(segment: dict[str, Any]) -> None:
+    """Refresh raw-footage and output-timeline metrics after shot changes."""
+
+    raw_total, hold_total, timeline_total, shortfall = _apply_timeline_coverage(
+        segment["shots"], segment["narration_duration_seconds"]
+    )
+    segment["shots_total_duration_seconds"] = raw_total
+    segment["visual_hold_duration_seconds"] = hold_total
+    segment["timeline_duration_seconds"] = timeline_total
+    segment["visual_coverage_shortfall_seconds"] = shortfall
+
+
 def assemble_sequence(
     recap_script: dict[str, Any],
     narration_durations: dict[str, float] | None = None,
@@ -500,6 +933,10 @@ def assemble_sequence(
     """
 
     narration_durations = narration_durations or {}
+    story_source_window = _source_window_from_story_map(verified_story_map)
+    extra_source_moments_remaining = (
+        MAX_ADDITIONAL_SOURCE_MOMENTS_PER_RECAP if verified_story_map else 0
+    )
     used_ranges: set[tuple[float, float]] = set()
     segments_out: list[dict[str, Any]] = []
     sequence_warnings: list[str] = []
@@ -542,6 +979,21 @@ def assemble_sequence(
             source_list_name,
             use_dialogue_band=use_dialogue_band,
         )
+        shots = _append_moving_coverage(
+            shots,
+            candidates,
+            segment,
+            target_duration,
+            used_ranges,
+            source_list_name,
+            story_source_window,
+        )
+        if extra_source_moments_remaining:
+            shots, added_moment = _add_trailing_evidence_moment(
+                shots, candidates, segment
+            )
+            if added_moment:
+                extra_source_moments_remaining -= 1
 
         # Per-shot, not just per-segment -- a narration_over_source
         # segment that fell back to original_dialogue_candidates (empty
@@ -570,35 +1022,44 @@ def assemble_sequence(
         if shots:
             previous_last_shot_end = shots[-1]["end"]
 
-        shots_total = round(sum(shot["duration"] for shot in shots), 3)
-
-        segments_out.append(
-            {
-                "segment_id": segment["segment_id"],
-                "order": segment["order"],
-                "presentation_hint": hint,
-                "beat_ids": segment["beat_ids"],
-                "narration_duration_seconds": round(target_duration, 3),
-                "narration_duration_source": duration_source,
-                "shots": shots,
-                "shots_total_duration_seconds": shots_total,
-                "has_dialogue_insert": False,
-                "warnings": warnings,
-            }
-        )
+        output_segment = {
+            "segment_id": segment["segment_id"],
+            "order": segment["order"],
+            "presentation_hint": hint,
+            "beat_ids": segment["beat_ids"],
+            "narration_duration_seconds": round(target_duration, 3),
+            "narration_duration_source": duration_source,
+            "shots": shots,
+            "has_dialogue_insert": False,
+            "warnings": warnings,
+        }
+        _refresh_segment_timeline(output_segment)
+        segments_out.append(output_segment)
 
         sequence_warnings.extend(
             f"{segment['segment_id']}: {warning}" for warning in warnings
         )
 
     total_duration = round(
+        sum(segment["timeline_duration_seconds"] for segment in segments_out), 3
+    )
+    raw_source_duration = round(
         sum(segment["shots_total_duration_seconds"] for segment in segments_out), 3
+    )
+    visual_hold_duration = round(
+        sum(segment["visual_hold_duration_seconds"] for segment in segments_out), 3
+    )
+    visual_coverage_shortfall = round(
+        sum(segment["visual_coverage_shortfall_seconds"] for segment in segments_out), 3
     )
 
     return {
         "schema_version": SEQUENCE_SCHEMA_VERSION,
         "target_duration_seconds": recap_script.get("target_duration_seconds"),
         "total_duration_seconds": total_duration,
+        "raw_source_duration_seconds": raw_source_duration,
+        "visual_hold_duration_seconds": visual_hold_duration,
+        "visual_coverage_shortfall_seconds": visual_coverage_shortfall,
         "segments": segments_out,
         "sequence_warnings": sequence_warnings,
     }
@@ -642,17 +1103,27 @@ def _insert_dialogue_shot(
 ) -> list[dict[str, Any]]:
     """
     Splice a dialogue-treatment shot into roughly the middle of an
-    existing shot list, dropping the one illustrative shot it displaces
-    -- keeps the segment's total duration close to what it was rather
-    than strictly adding on top of it. Requires at least 2 shots going
-    in, so at least one illustrative shot survives on each side (the
-    caller enforces this) -- otherwise "VOICEOVER RESUMES" wouldn't mean
-    anything.
+    existing shot list. When the inserted dialogue is shorter than the
+    displaced locally verified shot, retain the unused source remainder so
+    the insert cannot create a visual-coverage shortfall. Requires at least
+    2 shots going in, so at least one illustrative shot survives on each
+    side (the caller enforces this) -- otherwise "VOICEOVER RESUMES" would
+    not mean anything.
     """
 
     insertion_index = len(shots) // 2
+    displaced = shots[insertion_index]
     remaining = shots[:insertion_index] + shots[insertion_index + 1:]
     remaining.insert(insertion_index, insert_shot)
+
+    unused_duration = round(
+        float(displaced["duration"]) - float(insert_shot["duration"]), 3
+    )
+    if unused_duration > 0:
+        retained = dict(displaced)
+        retained["end"] = round(float(retained["start"]) + unused_duration, 3)
+        retained["duration"] = unused_duration
+        remaining.insert(insertion_index + 1, retained)
     return remaining
 
 
@@ -704,7 +1175,7 @@ def interweave_original_dialogue(
         if best["score"] < score_threshold:
             continue
 
-        total_duration = seq_segment["shots_total_duration_seconds"]
+        total_duration = seq_segment["timeline_duration_seconds"]
         max_insert_duration = total_duration * max_fraction_of_segment
         if max_insert_duration < CADENCE_ORIGINAL_DIALOGUE[0]:
             # Segment too short to fit even the minimum dialogue cadence
@@ -735,15 +1206,26 @@ def interweave_original_dialogue(
         }
 
         seq_segment["shots"] = _insert_dialogue_shot(seq_segment["shots"], insert_shot)
-        seq_segment["shots_total_duration_seconds"] = round(
-            sum(shot["duration"] for shot in seq_segment["shots"]), 3
-        )
+        _refresh_segment_timeline(seq_segment)
         seq_segment["has_dialogue_insert"] = True
 
         used_ranges.add(_range_key(best))
 
     sequence["total_duration_seconds"] = round(
+        sum(segment["timeline_duration_seconds"] for segment in sequence["segments"]), 3
+    )
+    sequence["raw_source_duration_seconds"] = round(
         sum(segment["shots_total_duration_seconds"] for segment in sequence["segments"]), 3
+    )
+    sequence["visual_hold_duration_seconds"] = round(
+        sum(segment["visual_hold_duration_seconds"] for segment in sequence["segments"]), 3
+    )
+    sequence["visual_coverage_shortfall_seconds"] = round(
+        sum(
+            segment.get("visual_coverage_shortfall_seconds", 0.0)
+            for segment in sequence["segments"]
+        ),
+        3,
     )
 
     return sequence

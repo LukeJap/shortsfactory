@@ -73,6 +73,11 @@ def test_full_chain_against_real_fixtures(tmp_path):
 
     assert loaded_sequence == sequence
     assert len(loaded_sequence["segments"]) == len(inputs.recap_script["segments"])
+    assert loaded_sequence["total_duration_seconds"] == round(
+        sum(segment["narration_duration_seconds"] for segment in loaded_sequence["segments"]),
+        3,
+    )
+    assert loaded_sequence["raw_source_duration_seconds"] <= loaded_sequence["total_duration_seconds"]
     for segment in loaded_sequence["segments"]:
         assert segment["shots"], f"{segment['segment_id']} got no shots"
         assert segment["narration_duration_source"] == "measured"

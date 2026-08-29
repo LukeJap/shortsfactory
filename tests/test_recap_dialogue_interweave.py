@@ -1,5 +1,7 @@
 import copy
 
+import pytest
+
 from recap_media.sequence import (
     CADENCE_ORIGINAL_DIALOGUE,
     assemble_sequence,
@@ -198,10 +200,9 @@ def test_total_duration_seconds_recomputed_after_insert():
 
     result = interweave_original_dialogue(sequence, _script([segment]))
 
-    expected = round(
-        sum(s["shots_total_duration_seconds"] for s in result["segments"]), 3
-    )
+    expected = round(sum(s["timeline_duration_seconds"] for s in result["segments"]), 3)
     assert result["total_duration_seconds"] == expected
+    assert result["total_duration_seconds"] == pytest.approx(8.0)
 
 
 # ============================================================

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from recap_media.render import (
@@ -7,8 +9,12 @@ from recap_media.render import (
     build_recap_ffmpeg_command,
     build_recap_filter_complex,
     build_source_audio_track_filter,
+    escape_ffmpeg_filter_path,
     build_video_track_filter,
+    final_recap_duration_seconds,
     input_index_for_voiceover_clips,
+    render_recap,
+    resolve_recap_source_video,
 )
 
 
@@ -52,6 +58,14 @@ def test_video_track_filter_uses_custom_labels():
     assert label == "myvideo"
 
 
+def test_video_track_filter_never_uses_clone_frame_holds():
+    shots = [{"start": 10.0, "end": 12.5, "duration": 2.5, "hold_duration_seconds": 3.25}]
+
+    filter_str, _ = build_video_track_filter(shots)
+
+    assert "tpad=" not in filter_str
+
+
 def test_video_track_filter_empty_shots_raises():
     with pytest.raises(RecapRenderError, match="empty shot list"):
         build_video_track_filter([])
@@ -67,6 +81,21 @@ def test_source_audio_track_filter_uses_atrim_and_concat_audio_only():
     assert "asetpts=PTS-STARTPTS" in filter_str
     assert "concat=n=2:v=0:a=1" in filter_str
     assert label == "asource"
+
+
+def test_source_audio_track_filter_never_extends_source_audio_for_holds():
+    shots = [
+        {
+            "start": 10.0,
+            "end": 12.5,
+            "duration": 2.5,
+            "timeline_duration_seconds": 5.75,
+        }
+    ]
+
+    filter_str, _ = build_source_audio_track_filter(shots)
+
+    assert "apad=" not in filter_str
 
 
 def test_source_audio_track_filter_empty_shots_raises():
@@ -175,8 +204,10 @@ def test_filter_complex_assembles_all_pieces_without_captions():
     assert "split=2" in filter_complex and "gblur" in filter_complex  # portrait framing
     assert "amix=" in filter_complex and "alimiter=" in filter_complex  # duck mix
     assert "subtitles=" not in filter_complex
-    assert video_label == "recap_out"
-    assert audio_label == "mixed"
+    assert "setpts=PTS/1.750" in filter_complex
+    assert "atempo=1.750" in filter_complex
+    assert video_label == "recap_playback_video"
+    assert audio_label == "recap_playback_audio"
 
 
 def test_filter_complex_includes_captions_when_path_given(tmp_path):
@@ -188,8 +219,61 @@ def test_filter_complex_includes_captions_when_path_given(tmp_path):
         _sequence(), clips, index_map, _portrait_plan(), _duck_plan(), ass_path
     )
 
-    assert "subtitles=" in filter_complex
-    assert video_label == "recap_captioned"
+    assert f"subtitles=filename={escape_ffmpeg_filter_path(ass_path)}" in filter_complex
+    assert "[recap_captioned]setpts=PTS/1.750" in filter_complex
+    assert video_label == "recap_playback_video"
+
+
+def test_filter_complex_escapes_windows_ass_drive_path_for_subtitles():
+    clips = [_voiceover_clip("VO_001", start=0.0)]
+    index_map = {"VO_001": 1}
+    ass_path = Path(r"C:\Users\lukej\Desktop\ShortsFactory\output\recap\narration.ass")
+
+    filter_complex, _, _ = build_recap_filter_complex(
+        _sequence(), clips, index_map, _portrait_plan(), _duck_plan(), ass_path
+    )
+
+    expected_path = r"C\\:/Users/lukej/Desktop/ShortsFactory/output/recap/narration.ass"
+    assert escape_ffmpeg_filter_path(ass_path) == expected_path
+    assert f"subtitles=filename={expected_path}" in filter_complex
+    assert "original_size=/Users" not in filter_complex
+    assert "[recap_captioned]setpts=PTS/1.750" in filter_complex
+
+
+def test_filter_path_escaping_leaves_posix_paths_valid():
+    assert escape_ffmpeg_filter_path(Path("/tmp/recap/narration.ass")) == "/tmp/recap/narration.ass"
+
+
+def test_final_duration_scales_with_recap_playback_speed():
+    assert final_recap_duration_seconds(83.883) == pytest.approx(47.933, abs=0.001)
+
+
+def test_recap_source_resolves_only_from_identity_provenance(tmp_path):
+    source_name = "accepted_dumped.mkv"
+    accepted = tmp_path / source_name
+    accepted.write_bytes(b"video")
+    identity = {
+        "query": {"source_filename": source_name},
+        "source_video": str(tmp_path / "stale_unrelated.mkv"),
+    }
+
+    assert resolve_recap_source_video(identity, tmp_path) == accepted
+
+
+def test_recap_source_missing_from_identity_fails_clearly(tmp_path):
+    with pytest.raises(RecapRenderError, match="source_filename"):
+        resolve_recap_source_video({"query": {}}, tmp_path)
+
+
+def test_render_requires_caption_ass_path_before_running_ffmpeg(tmp_path):
+    with pytest.raises(RecapRenderError, match="captions are required"):
+        render_recap(
+            {"query": {"source_filename": "accepted.mkv"}},
+            {"segments": [], "visual_coverage_shortfall_seconds": 0.0},
+            [],
+            _portrait_plan(),
+            _duck_plan(),
+        )
 
 
 # ============================================================

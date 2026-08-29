@@ -33,12 +33,12 @@ AUDIO_DUCK_PLAN_SCHEMA_VERSION = 1
 
 # Tunable ranges from SHORTSFACTORY_AI_RECAP_TRACK_B_MEDIA_EDITOR.md's B5.
 VOICEOVER_GAIN_RANGE = (0.85, 1.00)
-SOURCE_DUCKED_GAIN_RANGE = (0.10, 0.30)
+SOURCE_DUCKED_GAIN_RANGE = (0.0, 0.30)
 DUCK_ATTACK_SECONDS_RANGE = (0.10, 0.20)
 DUCK_RELEASE_SECONDS_RANGE = (0.10, 0.25)
 
 DEFAULT_VOICEOVER_GAIN = 0.95
-DEFAULT_SOURCE_DUCKED_GAIN = 0.20
+DEFAULT_SOURCE_DUCKED_GAIN = 0.0
 DEFAULT_SOURCE_RESTORED_GAIN = 1.0
 DEFAULT_DUCK_ATTACK_SECONDS = 0.15
 DEFAULT_DUCK_RELEASE_SECONDS = 0.175
@@ -65,7 +65,7 @@ def shot_output_windows(sequence: dict[str, Any]) -> list[tuple[float, float, st
     """
     Walk every shot across all segments in order, returning
     (output_start, output_end, treatment) -- each shot's position on the
-    OUTPUT recap timeline (cumulative shot durations in cut order), not
+    OUTPUT recap timeline (cumulative timeline durations in cut order), not
     its source-video timestamp.
     """
 
@@ -74,7 +74,7 @@ def shot_output_windows(sequence: dict[str, Any]) -> list[tuple[float, float, st
 
     for segment in sorted(sequence["segments"], key=lambda s: s["order"]):
         for shot in segment["shots"]:
-            duration = float(shot["duration"])
+            duration = float(shot.get("timeline_duration_seconds", shot["duration"]))
             treatment = shot.get("treatment", segment["presentation_hint"])
             windows.append((cursor, cursor + duration, treatment))
             cursor += duration
@@ -173,8 +173,10 @@ def build_duck_plan(
         SOURCE_RESTORED_TREATMENTS,
         high_gain=source_restored_gain,
         low_gain=source_ducked_gain,
-        attack_seconds=attack_seconds,
-        release_seconds=release_seconds,
+        # A recap's source track is intentionally silent under narration.
+        # Do not let a release/attack ramp leak source dialogue beneath VO.
+        attack_seconds=0.0,
+        release_seconds=0.0,
     )
 
     total_duration = windows[-1][1] if windows else 0.0
