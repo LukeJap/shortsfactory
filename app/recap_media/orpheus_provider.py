@@ -55,7 +55,12 @@ KNOWN_VOICES = [
 DEFAULT_VOICE = "tara"
 
 READINESS_TIMEOUT = 4.0
-SPEECH_TIMEOUT = 60.0
+# CPU-only inference for a real multi-sentence segment (no GPU) can take
+# well over a minute -- 60s was cutting off otherwise-successful requests
+# for longer segments (confirmed against a real six-segment recap_script.json
+# acceptance run). 180s leaves comfortable headroom without hiding a truly
+# hung request forever.
+SPEECH_TIMEOUT = 180.0
 
 
 class OrpheusError(Exception):

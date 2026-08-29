@@ -134,7 +134,11 @@ class RecapMixin:
             return
 
         narration_durations = load_voiceover_durations()
-        sequence = assemble_sequence(inputs.recap_script, narration_durations)
+        sequence = assemble_sequence(
+            inputs.recap_script,
+            narration_durations,
+            verified_story_map=inputs.verified_story_map,
+        )
         sequence = interweave_original_dialogue(sequence, inputs.recap_script)
         write_recap_sequence(sequence)
 
