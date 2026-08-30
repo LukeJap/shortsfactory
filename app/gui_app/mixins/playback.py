@@ -37,7 +37,11 @@ class PlaybackMixin:
         self.cancel_paused_seek_refresh()
         self.hide_ai_visual_preview_overlay()
         self.play_request_counter += 1
+        if hasattr(self, "clear_recap_artifact_context"):
+            self.clear_recap_artifact_context()
         self.video_path = path
+        if hasattr(self, "_set_recap_episode_context"):
+            self._set_recap_episode_context()
 
         # Word-wrap alone doesn't help a long underscore-separated filename
         # (Qt only wraps at whitespace) -- elide it instead, keeping the

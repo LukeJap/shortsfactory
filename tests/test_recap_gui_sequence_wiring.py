@@ -23,7 +23,10 @@ verified_candidates_for_segment() run unmodified.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import gui_app.mixins.recap as recap_module
+from recap_media.artifacts import RecapArtifactContext
 from recap_media.loader import RecapInputs
 
 
@@ -38,9 +41,12 @@ class _FakeButton:
 class _FakeRecapWindow(recap_module.RecapMixin):
     """Just enough of ShortsFactoryWindow for generate_recap_sequence()."""
 
-    def __init__(self):
+    def __init__(self, context):
         self.log_lines: list[str] = []
         self.generate_recap_voiceover_button = _FakeButton()
+        self.video_path = context.source_video
+        self.recap_artifact_context = context
+        self.recap_active_inputs = None
 
     def append_recap_log(self, message: str):
         self.log_lines.append(message)
@@ -135,7 +141,7 @@ def test_load_recap_inputs_loads_a_normalized_verified_story_map(monkeypatch, tm
     assert inputs.verified_story_map["beats"][0]["source_evidence"]
 
 
-def test_production_generate_recap_sequence_passes_verified_story_map_through(monkeypatch):
+def test_production_generate_recap_sequence_passes_verified_story_map_through(monkeypatch, tmp_path):
     fake_inputs = RecapInputs(
         episode_identity={"title": "Test Episode"},
         verified_story_map=_verified_story_map(),
@@ -162,12 +168,31 @@ def test_production_generate_recap_sequence_passes_verified_story_map_through(mo
             transcript_cache_dir=transcript_cache_dir,
         )
 
-    monkeypatch.setattr(recap_module, "load_recap_inputs", lambda: fake_inputs)
-    monkeypatch.setattr(recap_module, "load_voiceover_durations", lambda: {})
-    monkeypatch.setattr(recap_module, "assemble_sequence", _spy_assemble_sequence)
-    monkeypatch.setattr(recap_module, "write_recap_sequence", lambda sequence: None)
+    voiceover_dir = tmp_path / "voiceover"
+    context = RecapArtifactContext(
+        root=tmp_path,
+        source_video=(tmp_path / "episode.mkv").resolve(),
+        episode_identity_path=tmp_path / "episode_identity.json",
+        verified_story_map_path=tmp_path / "verified_story_map.json",
+        recap_script_path=tmp_path / "recap_script.json",
+        recap_sequence_path=tmp_path / "recap_sequence.json",
+        voiceover_dir=voiceover_dir,
+        voiceover_manifest_path=voiceover_dir / "voiceover_manifest.json",
+        pasted_script_path=tmp_path / "external_recap_script_paste.json",
+    )
+    captured_manifest_paths = []
+    captured_sequence_paths = []
 
-    window = _FakeRecapWindow()
+    monkeypatch.setattr(recap_module, "load_voiceover_durations", lambda path: captured_manifest_paths.append(path) or {})
+    monkeypatch.setattr(recap_module, "assemble_sequence", _spy_assemble_sequence)
+    monkeypatch.setattr(
+        recap_module,
+        "write_recap_sequence",
+        lambda sequence, path: captured_sequence_paths.append(path),
+    )
+
+    window = _FakeRecapWindow(context)
+    window.recap_active_inputs = fake_inputs
     window.generate_recap_sequence()
 
     # The production call site must pass the real loaded map through --
@@ -184,3 +209,5 @@ def test_production_generate_recap_sequence_passes_verified_story_map_through(mo
     assert verified_shots[0]["beat_id"] == "B001"
 
     assert window.generate_recap_voiceover_button.enabled is True
+    assert captured_manifest_paths == [context.voiceover_manifest_path]
+    assert captured_sequence_paths == [context.recap_sequence_path]

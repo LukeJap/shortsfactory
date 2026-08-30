@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -58,6 +59,8 @@ from .settings_keys import (
     FX_INTENSITY,
     MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
+    RECAP_SCRIPT_SOURCE,
+    RECAP_SPEED,
     RECAP_TARGET_DURATION_SECONDS,
     RECAP_VOICE,
     SFX_MODE,
@@ -511,6 +514,22 @@ class ShortsFactoryWindow(
             )
         except (TypeError, ValueError):
             self.recap_target_duration_seconds = 120
+        self.recap_script_source = str(
+            self.settings.value(RECAP_SCRIPT_SOURCE, "local") or "local"
+        ).strip().lower()
+        if self.recap_script_source not in {"local", "external"}:
+            self.recap_script_source = "local"
+        try:
+            self.recap_speed = float(self.settings.value(RECAP_SPEED, 1.5) or 1.5)
+        except (TypeError, ValueError):
+            self.recap_speed = 1.5
+        if self.recap_speed not in {1.25, 1.5, 1.75}:
+            self.recap_speed = 1.5
+        self.recap_active_script: dict | None = None
+        self.recap_active_inputs = None
+        self.recap_artifact_context = None
+        self.recap_external_script_path: Path | None = None
+        self.recap_script_valid = False
         self.recap_sequence = None
 
         try:
@@ -778,6 +797,7 @@ class ShortsFactoryWindow(
         source_layout = QVBoxLayout(source_frame)
         source_layout.setContentsMargins(16, 16, 16, 16)
         source_layout.setSpacing(12)
+        self.source_layout = source_layout
 
         left_title = QLabel("SOURCE FEED")
         left_title.setObjectName("SectionTitle")
@@ -954,7 +974,7 @@ class ShortsFactoryWindow(
 
         edit_style_layout.addLayout(fx_intensity_row)
 
-        self.recap_button = QPushButton("✦ CREATE AI RECAP")
+        self.recap_button = QPushButton("AI RECAP")
         self.recap_button.setObjectName("QuietButton")
         self.recap_button.setCheckable(True)
         self.recap_button.setToolTip(
@@ -965,9 +985,29 @@ class ShortsFactoryWindow(
         )
         self.recap_button.clicked.connect(self.toggle_recap_panel)
 
+        self.standard_short_button = QPushButton("STANDARD")
+        self.standard_short_button.setObjectName("QuietButton")
+        self.standard_short_button.setCheckable(True)
+        self.standard_short_button.setChecked(True)
+        self.standard_short_button.setToolTip("Use the normal ShortsFactory workflow.")
+        self.standard_short_button.clicked.connect(self.set_standard_short_mode)
+
+        self.recap_mode_buttons = QButtonGroup(self)
+        self.recap_mode_buttons.setExclusive(True)
+        self.recap_mode_buttons.addButton(self.standard_short_button)
+        self.recap_mode_buttons.addButton(self.recap_button)
+
+        recap_mode_row = QHBoxLayout()
+        recap_mode_row.setSpacing(6)
+        recap_mode_row.addWidget(self.standard_short_button)
+        recap_mode_row.addWidget(self.recap_button)
+
         self.recap_frame = QFrame()
         self.recap_frame.setObjectName("EditStylePanel")
-        self.recap_frame.setVisible(False)
+        self.recap_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         recap_layout = QVBoxLayout(self.recap_frame)
         recap_layout.setContentsMargins(10, 9, 10, 10)
         recap_layout.setSpacing(7)
@@ -975,6 +1015,54 @@ class ShortsFactoryWindow(
         recap_title = QLabel("AI RECAP")
         recap_title.setObjectName("TinyLabel")
         recap_layout.addWidget(recap_title)
+
+        recap_source_row = QHBoxLayout()
+        recap_source_row.setSpacing(6)
+        self.recap_source_label = QLabel("Source: current input source")
+        self.recap_source_label.setObjectName("HintLabel")
+        self.recap_source_label.setWordWrap(True)
+        self.recap_browse_source_button = QPushButton("Browse")
+        self.recap_browse_source_button.setObjectName("QuietButton")
+        self.recap_browse_source_button.setToolTip("Choose the episode source for the existing app.")
+        self.recap_browse_source_button.clicked.connect(self.drop_zone.browse_file)
+        recap_source_row.addWidget(self.recap_source_label, 1)
+        recap_source_row.addWidget(self.recap_browse_source_button)
+
+        self.recap_episode_label = QLabel("Episode: not checked")
+        self.recap_episode_label.setObjectName("HintLabel")
+        self.recap_episode_label.setWordWrap(True)
+        recap_layout.addWidget(self.recap_episode_label)
+
+        recap_script_source_row = QHBoxLayout()
+        recap_script_source_row.setSpacing(6)
+        recap_script_source_label = QLabel("SCRIPT SOURCE")
+        recap_script_source_label.setObjectName("TinyLabel")
+        self.recap_script_source_combo = QComboBox()
+        self.recap_script_source_combo.setObjectName("CompactCombo")
+        self.recap_script_source_combo.addItems(
+            ["Local AI", "Import AI Script", "Paste Script"]
+        )
+        self.recap_script_source_combo.setCurrentText(
+            "Import AI Script" if self.recap_script_source == "external" else "Local AI"
+        )
+        self.recap_script_source_combo.currentTextChanged.connect(
+            self.recap_script_source_changed
+        )
+        recap_script_source_row.addWidget(recap_script_source_label)
+        recap_script_source_row.addWidget(self.recap_script_source_combo, 1)
+        recap_layout.addLayout(recap_script_source_row)
+
+        recap_import_row = QHBoxLayout()
+        recap_import_row.setSpacing(6)
+        self.recap_import_script_button = QPushButton("Import JSON")
+        self.recap_import_script_button.setObjectName("QuietButton")
+        self.recap_import_script_button.clicked.connect(self.choose_external_recap_script)
+        self.recap_paste_script_button = QPushButton("Paste JSON")
+        self.recap_paste_script_button.setObjectName("QuietButton")
+        self.recap_paste_script_button.clicked.connect(self.open_recap_paste_dialog)
+        recap_import_row.addWidget(self.recap_import_script_button, 1)
+        recap_import_row.addWidget(self.recap_paste_script_button, 1)
+        recap_layout.addLayout(recap_import_row)
 
         self.recap_status_label = QLabel("Recap Intelligence: not checked.")
         self.recap_status_label.setObjectName("ImageAIStatus")
@@ -1026,14 +1114,38 @@ class ShortsFactoryWindow(
         recap_voice_row.addWidget(self.recap_refresh_voices_button)
         recap_layout.addLayout(recap_voice_row)
 
+        recap_speed_row = QHBoxLayout()
+        recap_speed_row.setSpacing(8)
+        recap_speed_label = QLabel("OVERALL SPEED")
+        recap_speed_label.setObjectName("TinyLabel")
+        self.recap_speed_combo = QComboBox()
+        self.recap_speed_combo.setObjectName("CompactCombo")
+        self.recap_speed_combo.addItems(["1.25x", "1.50x", "1.75x"])
+        self.recap_speed_combo.setCurrentText(f"{self.recap_speed:.2f}x")
+        self.recap_speed_combo.currentTextChanged.connect(self.recap_speed_changed)
+        recap_speed_row.addWidget(recap_speed_label)
+        recap_speed_row.addWidget(self.recap_speed_combo, 1)
+        recap_layout.addLayout(recap_speed_row)
+
+        self.recap_script_preview = QListWidget()
+        self.recap_script_preview.setObjectName("TranscriptList")
+        self.recap_script_preview.setFixedHeight(150)
+        self.recap_script_preview.setToolTip(
+            "Ordered validated recap blocks. Narration text is shown exactly as supplied."
+        )
+        recap_layout.addWidget(self.recap_script_preview)
+
         recap_actions_row = QHBoxLayout()
         recap_actions_row.setSpacing(6)
-        self.generate_recap_sequence_button = QPushButton("Generate Sequence")
+        self.validate_recap_script_button = QPushButton("Validate Script")
+        self.validate_recap_script_button.setObjectName("QuietButton")
+        self.validate_recap_script_button.clicked.connect(self.validate_active_recap_script)
+
+        self.generate_recap_sequence_button = QPushButton("Generate Recap")
         self.generate_recap_sequence_button.setObjectName("QuietButton")
         self.generate_recap_sequence_button.setEnabled(False)
         self.generate_recap_sequence_button.setToolTip(
-            "Load Track A's episode identity/story map/recap script and "
-            "assemble the exact shot sequence."
+            "Use the selected validated script to assemble the recap shot sequence."
         )
         self.generate_recap_sequence_button.clicked.connect(
             self.generate_recap_sequence
@@ -1051,9 +1163,19 @@ class ShortsFactoryWindow(
             self.generate_recap_voiceover
         )
 
-        recap_actions_row.addWidget(self.generate_recap_sequence_button)
-        recap_actions_row.addWidget(self.generate_recap_voiceover_button)
+        recap_actions_row.addWidget(self.validate_recap_script_button, 1)
+        recap_actions_row.addWidget(self.generate_recap_sequence_button, 1)
         recap_layout.addLayout(recap_actions_row)
+
+        recap_followup_actions_row = QHBoxLayout()
+        recap_followup_actions_row.setSpacing(6)
+        self.recap_open_editor_button = QPushButton("Open in Editor")
+        self.recap_open_editor_button.setObjectName("QuietButton")
+        self.recap_open_editor_button.setEnabled(False)
+        self.recap_open_editor_button.clicked.connect(self.open_recap_in_editor)
+        recap_followup_actions_row.addWidget(self.generate_recap_voiceover_button, 1)
+        recap_followup_actions_row.addWidget(self.recap_open_editor_button, 1)
+        recap_layout.addLayout(recap_followup_actions_row)
 
         self.recap_voiceover_list = QListWidget()
         self.recap_voiceover_list.setObjectName("TranscriptList")
@@ -1066,8 +1188,11 @@ class ShortsFactoryWindow(
         )
         recap_layout.addWidget(self.recap_voiceover_list)
 
-        recap_context_row = QHBoxLayout()
+        recap_context_row = QVBoxLayout()
         recap_context_row.setSpacing(6)
+
+        recap_context_volume_row = QHBoxLayout()
+        recap_context_volume_row.setSpacing(6)
 
         self.recap_voiceover_volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.recap_voiceover_volume_slider.setObjectName("MusicVolumeSlider")
@@ -1102,10 +1227,16 @@ class ShortsFactoryWindow(
             self.delete_selected_recap_voiceover_clip
         )
 
-        recap_context_row.addWidget(self.recap_voiceover_volume_slider)
-        recap_context_row.addWidget(self.recap_voiceover_toggle_button)
-        recap_context_row.addWidget(self.recap_voiceover_regenerate_button)
-        recap_context_row.addWidget(self.recap_voiceover_delete_button)
+        recap_context_volume_row.addWidget(self.recap_voiceover_volume_slider, 1)
+        recap_context_volume_row.addWidget(self.recap_voiceover_toggle_button)
+
+        recap_context_actions_row = QHBoxLayout()
+        recap_context_actions_row.setSpacing(6)
+        recap_context_actions_row.addWidget(self.recap_voiceover_regenerate_button, 1)
+        recap_context_actions_row.addWidget(self.recap_voiceover_delete_button, 1)
+
+        recap_context_row.addLayout(recap_context_volume_row)
+        recap_context_row.addLayout(recap_context_actions_row)
         recap_layout.addLayout(recap_context_row)
 
         self.recap_log = QTextEdit()
@@ -1114,16 +1245,45 @@ class ShortsFactoryWindow(
         self.recap_log.setPlaceholderText("Recap generation log will appear here...")
         recap_layout.addWidget(self.recap_log)
 
+        self.standard_short_controls_frame = QWidget()
+        standard_short_mode_layout = QVBoxLayout(self.standard_short_controls_frame)
+        standard_short_mode_layout.setContentsMargins(0, 0, 0, 0)
+        standard_short_mode_layout.setSpacing(12)
+        standard_short_mode_layout.addWidget(self.find_clips_button)
+        standard_short_mode_layout.addWidget(edit_style_frame)
+        standard_short_mode_layout.addStretch()
+
+        self.standard_short_mode_frame = QScrollArea()
+        self.standard_short_mode_frame.setObjectName("PanelScroll")
+        self.standard_short_mode_frame.setWidgetResizable(True)
+        self.standard_short_mode_frame.setFrameShape(QFrame.Shape.NoFrame)
+        self.standard_short_mode_frame.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.standard_short_mode_frame.setWidget(self.standard_short_controls_frame)
+
+        self.recap_scroll_area = QScrollArea()
+        self.recap_scroll_area.setObjectName("PanelScroll")
+        self.recap_scroll_area.setWidgetResizable(True)
+        self.recap_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.recap_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.recap_scroll_area.setWidget(self.recap_frame)
+
+        self.mode_specific_stack = QStackedWidget()
+        self.mode_specific_stack.addWidget(self.standard_short_mode_frame)
+        self.mode_specific_stack.addWidget(self.recap_scroll_area)
+        self.mode_specific_stack.setCurrentWidget(self.standard_short_mode_frame)
+
         source_layout.addWidget(left_title)
         source_layout.addWidget(self.drop_zone, 1)
         source_layout.addWidget(self.file_label)
         source_layout.addWidget(source_hint)
         source_layout.addLayout(transcription_row)
         source_layout.addSpacing(6)
-        source_layout.addWidget(self.find_clips_button)
-        source_layout.addWidget(edit_style_frame)
-        source_layout.addWidget(self.recap_button)
-        source_layout.addWidget(self.recap_frame)
+        source_layout.addLayout(recap_mode_row)
+        source_layout.addWidget(self.mode_specific_stack, 1)
 
         workspace.addWidget(source_frame)
 

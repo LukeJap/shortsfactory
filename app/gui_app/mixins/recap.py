@@ -29,16 +29,31 @@ it does not re-cascade every later segment's cumulative position; run
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QLabel,
+    QMessageBox,
+    QPlainTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from editor_asset_plan import clips_of_kind, replace_kind_clips, upsert_clip
-from pipeline_paths import (
-    EPISODE_IDENTITY_PATH,
-    RECAP_SCRIPT_PATH,
-    VERIFIED_STORY_MAP_PATH,
+from recap_media.artifacts import RecapArtifactContext, resolve_recap_artifact_context
+from recap_media.loader import (
+    RecapInputError,
+    RecapInputs,
+    load_episode_identity,
+    load_external_recap_script,
+    load_recap_inputs,
+    load_verified_story_map,
 )
-from recap_media.loader import RecapInputError, load_recap_inputs
 from recap_media.orpheus_provider import DEFAULT_VOICE, KNOWN_VOICES, OrpheusProvider
 from recap_media.sequence import (
     assemble_sequence,
@@ -48,14 +63,12 @@ from recap_media.sequence import (
 )
 from recap_media.voiceover import load_voiceover_durations, synthesize_segment, synthesize_segments
 
-from ..settings_keys import RECAP_TARGET_DURATION_SECONDS, RECAP_VOICE
-
-TRACK_A_INPUT_PATHS = (
-    EPISODE_IDENTITY_PATH,
-    VERIFIED_STORY_MAP_PATH,
-    RECAP_SCRIPT_PATH,
+from ..settings_keys import (
+    RECAP_SCRIPT_SOURCE,
+    RECAP_SPEED,
+    RECAP_TARGET_DURATION_SECONDS,
+    RECAP_VOICE,
 )
-
 
 def _recap_source_filename(episode_identity: dict) -> str | None:
     query = episode_identity.get("query")
@@ -83,33 +96,407 @@ class RecapMixin:
         # False for every descendant of a QMainWindow that hasn't been
         # shown yet regardless of this frame's own state, which made the
         # very first toggle a no-op until the window had been shown once.
-        visible = self.recap_button.isChecked()
-        self.recap_frame.setVisible(visible)
-        if visible:
+        self.set_recap_mode("recap" if self.recap_button.isChecked() else "standard")
+
+    def set_standard_short_mode(self):
+        self.set_recap_mode("standard")
+
+    def _configure_recap_source_area(self, recap_mode: bool):
+        """Keep the shared source picker useful without crowding recap controls."""
+
+        if not hasattr(self, "drop_zone"):
+            return
+        if recap_mode:
+            self.drop_zone.setMinimumHeight(220)
+            self.drop_zone.setMaximumHeight(240)
+        else:
+            self.drop_zone.setMinimumHeight(360)
+            self.drop_zone.setMaximumHeight(16_777_215)
+        if hasattr(self, "source_layout"):
+            self.source_layout.setStretchFactor(self.drop_zone, 0 if recap_mode else 1)
+
+    def clear_recap_artifact_context(self):
+        """Drop recap state when the editor source changes."""
+
+        self.recap_artifact_context = None
+        self.recap_active_inputs = None
+        self.recap_active_script = None
+        self.recap_external_script_path = None
+        self.recap_script_valid = False
+        self.recap_sequence = None
+        self._refresh_recap_script_preview(None)
+        for attribute in (
+            "generate_recap_sequence_button",
+            "generate_recap_voiceover_button",
+            "recap_open_editor_button",
+        ):
+            if hasattr(self, attribute):
+                getattr(self, attribute).setEnabled(False)
+
+    def _active_recap_artifact_context(self) -> RecapArtifactContext:
+        source = getattr(self, "video_path", None)
+        if not isinstance(source, Path):
+            raise RecapInputError("Load a source video to begin AI Recap.")
+
+        source = source.expanduser().resolve(strict=False)
+        active = getattr(self, "recap_artifact_context", None)
+        if isinstance(active, RecapArtifactContext) and active.source_video == source:
+            return active
+
+        context = resolve_recap_artifact_context(source)
+        self.recap_artifact_context = context
+        return context
+
+    def set_recap_mode(self, mode: str):
+        """Switch workflow pages without resetting normal-short state."""
+
+        recap_mode = mode == "recap"
+        self._configure_recap_source_area(recap_mode)
+        if all(
+            hasattr(self, attribute)
+            for attribute in (
+                "mode_specific_stack",
+                "standard_short_mode_frame",
+                "recap_scroll_area",
+            )
+        ):
+            page = (
+                self.recap_scroll_area
+                if recap_mode
+                else self.standard_short_mode_frame
+            )
+            self.mode_specific_stack.setCurrentWidget(page)
+        elif hasattr(self, "recap_frame"):
+            self.recap_frame.setVisible(recap_mode)
+        if hasattr(self, "recap_button"):
+            self.recap_button.setChecked(recap_mode)
+        if hasattr(self, "standard_short_button"):
+            self.standard_short_button.setChecked(not recap_mode)
+        self.recap_mode = "recap" if recap_mode else "standard"
+        if recap_mode:
             self.refresh_recap_status()
 
-    def refresh_recap_status(self):
-
-        missing = [path.name for path in TRACK_A_INPUT_PATHS if not path.exists()]
-
-        if missing:
-            self.recap_status_label.setText(
-                "Recap Intelligence: not found (" + ", ".join(missing) + ") -- run Track A first."
-            )
-            self.recap_status_label.setProperty("state", "offline")
-            self.generate_recap_sequence_button.setEnabled(False)
-        else:
-            self.recap_status_label.setText("Recap Intelligence: ready.")
-            self.recap_status_label.setProperty("state", "ready")
-            self.generate_recap_sequence_button.setEnabled(True)
-
+    def _set_recap_status(self, message: str, state: str = "ready"):
+        if not hasattr(self, "recap_status_label"):
+            return
+        self.recap_status_label.setText(message)
+        self.recap_status_label.setProperty("state", state)
         style = self.recap_status_label.style()
         style.unpolish(self.recap_status_label)
         style.polish(self.recap_status_label)
 
+    def _set_recap_episode_context(self, episode_identity: dict | None = None):
+        if hasattr(self, "recap_source_label"):
+            source = getattr(self, "video_path", None)
+            source_text = source.name if isinstance(source, Path) else "current input source"
+            self.recap_source_label.setText(f"Source: {source_text}")
+        if not hasattr(self, "recap_episode_label"):
+            return
+        if not episode_identity:
+            self.recap_episode_label.setText("Episode: not checked")
+            return
+        title = str(
+            episode_identity.get("episode_title")
+            or episode_identity.get("title")
+            or "verified"
+        )
+        series = str(episode_identity.get("title") or "").strip()
+        detail = f"Identity verified: {title}"
+        if series and title != series:
+            detail += f" ({series})"
+        self.recap_episode_label.setText(detail)
+
+    @staticmethod
+    def _recap_block_counts(script: dict) -> tuple[int, int]:
+        segments = script.get("segments", [])
+        narration = sum(
+            isinstance(segment, dict)
+            and segment.get("block_type", "narration") == "narration"
+            for segment in segments
+        )
+        source_moments = sum(
+            isinstance(segment, dict)
+            and segment.get("block_type") == "source_moment"
+            for segment in segments
+        )
+        return narration, source_moments
+
+    def _refresh_recap_script_preview(self, script: dict | None):
+        if not hasattr(self, "recap_script_preview"):
+            return
+        self.recap_script_preview.clear()
+        if not script:
+            if hasattr(self.recap_script_preview, "setFixedHeight"):
+                self.recap_script_preview.setFixedHeight(150)
+            return
+        segments = sorted(script.get("segments", []), key=lambda item: item["order"])
+        for segment in segments:
+            block_type = segment.get("block_type", "narration")
+            if block_type == "narration":
+                text = " ".join(str(segment.get("text", "")).split())
+                summary = f"{segment['order']:02d}  {segment['segment_id']}  Narration\n{text}"
+            else:
+                candidate = next(
+                    iter(
+                        segment.get("original_dialogue_candidates", [])
+                        or segment.get("candidate_visuals", [])
+                    ),
+                    {},
+                )
+                start = candidate.get("start", "?")
+                end = candidate.get("end", "?")
+                summary = (
+                    f"{segment['order']:02d}  {segment['segment_id']}  Source Moment\n"
+                    f"Beat {', '.join(segment.get('beat_ids', []))}  {start}-{end}"
+                )
+            self.recap_script_preview.addItem(summary)
+        if hasattr(self.recap_script_preview, "setFixedHeight"):
+            row_height = max(self.recap_script_preview.sizeHintForRow(0), 36)
+            visible_rows = min(len(segments), 15)
+            self.recap_script_preview.setFixedHeight(
+                max(150, row_height * visible_rows + 8)
+            )
+
+    def _set_recap_script_source(self, source: str):
+        if source not in {"local", "external"}:
+            raise ValueError(f"Unsupported recap script source: {source}")
+        self.recap_script_source = source
+        if hasattr(self, "settings"):
+            self.settings.setValue(RECAP_SCRIPT_SOURCE, source)
+        self._sync_recap_script_source_combo()
+
+    def _sync_recap_script_source_combo(self):
+        if hasattr(self, "recap_script_source_combo"):
+            desired = (
+                "Import AI Script"
+                if getattr(self, "recap_script_source", "local") == "external"
+                else "Local AI"
+            )
+            self.recap_script_source_combo.blockSignals(True)
+            self.recap_script_source_combo.setCurrentText(desired)
+            self.recap_script_source_combo.blockSignals(False)
+
+    def select_local_recap_script(self):
+        self._set_recap_script_source("local")
+        self.recap_active_script = None
+        self.recap_active_inputs = None
+        self.recap_script_valid = False
+        self._refresh_recap_script_preview(None)
+        self._set_recap_status(
+            "Script source: Local AI. Validate Script to use the current recap script."
+        )
+        if hasattr(self, "generate_recap_sequence_button"):
+            self.generate_recap_sequence_button.setEnabled(False)
+
+    def recap_script_source_changed(self, label: str):
+        if label == "Local AI":
+            self.select_local_recap_script()
+        elif label == "Import AI Script":
+            self.choose_external_recap_script()
+        elif label == "Paste Script":
+            self.open_recap_paste_dialog()
+
+    def choose_external_recap_script(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import AI Recap Script",
+            "",
+            "JSON files (*.json)",
+        )
+        if path:
+            self.import_external_recap_script(Path(path))
+        else:
+            self._sync_recap_script_source_combo()
+
+    def open_recap_paste_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Paste AI Recap Script")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Schema-v2 recap JSON"))
+        editor = QPlainTextEdit()
+        editor.setPlaceholderText('{"schema_version": 2, "segments": [...]}')
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.import_pasted_recap_script(editor.toPlainText())
+        else:
+            self._sync_recap_script_source_combo()
+
+    def _accepted_recap_context(self) -> tuple[dict, dict]:
+        context = self._active_recap_artifact_context()
+        return (
+            load_episode_identity(context.episode_identity_path),
+            load_verified_story_map(context.verified_story_map_path),
+        )
+
+    def _persist_recap_script(self, script: dict, context: RecapArtifactContext):
+        context.recap_script_path.parent.mkdir(parents=True, exist_ok=True)
+        context.recap_script_path.write_text(json.dumps(script, indent=2), encoding="utf-8")
+
+    def _activate_valid_external_script(
+        self,
+        script: dict,
+        identity: dict,
+        story_map: dict,
+        context: RecapArtifactContext,
+    ):
+        self._persist_recap_script(script, context)
+        self.recap_artifact_context = context
+        self._set_recap_script_source("external")
+        self.recap_active_script = script
+        self.recap_active_inputs = RecapInputs(identity, story_map, script)
+        self.recap_script_valid = True
+        narration, source_moments = self._recap_block_counts(script)
+        block_count = len(script.get("segments", []))
+        self._set_recap_episode_context(identity)
+        self._refresh_recap_script_preview(script)
+        self._set_recap_status(
+            "VALID\n"
+            f"{block_count} blocks\n"
+            f"{narration} narration / {source_moments} source moments\n"
+            "All beat IDs valid. Source moments grounded. Ready to generate."
+        )
+        self.append_recap_log(
+            f"External script selected: {narration} narration block(s), "
+            f"{source_moments} source moment(s)."
+        )
+        if hasattr(self, "generate_recap_sequence_button"):
+            self.generate_recap_sequence_button.setEnabled(True)
+
+    def _show_recap_import_error(self, message: str):
+        self.recap_script_valid = False
+        self._set_recap_status(message, "offline")
+        self.append_recap_log(f"ERROR: {message}")
+        if isinstance(self, QWidget):
+            QMessageBox.warning(self, "AI Recap", message)
+
+    def import_external_recap_script(self, path: Path) -> bool:
+        try:
+            context = self._active_recap_artifact_context()
+            identity, story_map = self._accepted_recap_context()
+            script = load_external_recap_script(
+                Path(path),
+                episode_identity=identity,
+                verified_story_map=story_map,
+            )
+        except RecapInputError as exc:
+            self._show_recap_import_error(str(exc))
+            self._sync_recap_script_source_combo()
+            return False
+        self.recap_external_script_path = Path(path)
+        self._activate_valid_external_script(script, identity, story_map, context)
+        return True
+
+    def import_pasted_recap_script(self, text: str) -> bool:
+        try:
+            context = self._active_recap_artifact_context()
+        except RecapInputError as exc:
+            self._show_recap_import_error(str(exc))
+            return False
+        context.pasted_script_path.parent.mkdir(parents=True, exist_ok=True)
+        context.pasted_script_path.write_text(text, encoding="utf-8")
+        return self.import_external_recap_script(context.pasted_script_path)
+
+    def validate_active_recap_script(self) -> bool:
+        if getattr(self, "recap_script_source", "local") == "external":
+            try:
+                context = self._active_recap_artifact_context()
+            except RecapInputError as exc:
+                self._show_recap_import_error(str(exc))
+                return False
+            path = getattr(self, "recap_external_script_path", None)
+            if path:
+                return self.import_external_recap_script(path)
+            if context.recap_script_path.exists():
+                return self.import_external_recap_script(context.recap_script_path)
+            if getattr(self, "recap_active_script", None):
+                try:
+                    identity, story_map = self._accepted_recap_context()
+                except RecapInputError as exc:
+                    self._show_recap_import_error(str(exc))
+                    return False
+                self._activate_valid_external_script(
+                    self.recap_active_script, identity, story_map, context
+                )
+                return True
+            self._show_recap_import_error("Choose or paste an external recap script first.")
+            return False
+
+        try:
+            context = self._active_recap_artifact_context()
+            inputs = load_recap_inputs(
+                context.episode_identity_path,
+                context.verified_story_map_path,
+                context.recap_script_path,
+            )
+        except RecapInputError as exc:
+            self._show_recap_import_error(str(exc))
+            return False
+        self.recap_active_inputs = inputs
+        self.recap_active_script = inputs.recap_script
+        self.recap_script_valid = True
+        narration, source_moments = self._recap_block_counts(inputs.recap_script)
+        self._set_recap_episode_context(inputs.episode_identity)
+        self._refresh_recap_script_preview(inputs.recap_script)
+        self._set_recap_status(
+            "Local AI script valid\n"
+            f"{narration} narration / {source_moments} source moments\n"
+            "Ready to generate."
+        )
+        if hasattr(self, "generate_recap_sequence_button"):
+            self.generate_recap_sequence_button.setEnabled(True)
+        return True
+
+    def _active_recap_inputs(self):
+        active_inputs = getattr(self, "recap_active_inputs", None)
+        if active_inputs is not None:
+            return active_inputs
+        context = self._active_recap_artifact_context()
+        return load_recap_inputs(
+            context.episode_identity_path,
+            context.verified_story_map_path,
+            context.recap_script_path,
+        )
+
+    def refresh_recap_status(self):
+
+        self._set_recap_episode_context()
+        if not isinstance(getattr(self, "video_path", None), Path):
+            self._set_recap_episode_context(None)
+            self._set_recap_status(
+                "Load a source video to begin AI Recap.",
+                "offline",
+            )
+            if hasattr(self, "generate_recap_sequence_button"):
+                self.generate_recap_sequence_button.setEnabled(False)
+        else:
+            try:
+                identity, _ = self._accepted_recap_context()
+            except RecapInputError as exc:
+                self._set_recap_status(str(exc), "offline")
+                self.generate_recap_sequence_button.setEnabled(False)
+            else:
+                self._set_recap_episode_context(identity)
+                source = "External" if self.recap_script_source == "external" else "Local AI"
+                self._set_recap_status(
+                    f"Identity verified. Script source: {source}. Validate Script to continue."
+                )
+                self.generate_recap_sequence_button.setEnabled(
+                    bool(getattr(self, "recap_script_valid", False))
+                )
+
         self.generate_recap_voiceover_button.setEnabled(
             bool(getattr(self, "recap_sequence", None))
         )
+        if hasattr(self, "recap_open_editor_button"):
+            self.recap_open_editor_button.setEnabled(
+                bool(getattr(self, "recap_sequence", None))
+            )
         self.refresh_recap_voiceover_list()
 
     def refresh_recap_voices(self):
@@ -139,16 +526,25 @@ class RecapMixin:
             RECAP_TARGET_DURATION_SECONDS, self.recap_target_duration_seconds
         )
 
+    def recap_speed_changed(self, value: str):
+        try:
+            speed = float(str(value).strip().removesuffix("x"))
+        except ValueError:
+            speed = 1.5
+        self.recap_speed = speed
+        self.settings.setValue(RECAP_SPEED, speed)
+
     def generate_recap_sequence(self):
 
         try:
-            inputs = load_recap_inputs()
+            context = self._active_recap_artifact_context()
+            inputs = self._active_recap_inputs()
         except RecapInputError as exc:
             self.append_recap_log(f"ERROR: {exc}")
             QMessageBox.warning(self, "Create AI Recap", str(exc))
             return
 
-        narration_durations = load_voiceover_durations()
+        narration_durations = load_voiceover_durations(context.voiceover_manifest_path)
         sequence = assemble_sequence(
             inputs.recap_script,
             narration_durations,
@@ -161,7 +557,7 @@ class RecapMixin:
             verified_story_map=inputs.verified_story_map,
             source_video=_recap_source_filename(inputs.episode_identity),
         )
-        write_recap_sequence(sequence)
+        write_recap_sequence(sequence, context.recap_sequence_path)
 
         self.recap_sequence = sequence
 
@@ -193,6 +589,20 @@ class RecapMixin:
             self.append_recap_log(f"WARNING: {warning}")
 
         self.generate_recap_voiceover_button.setEnabled(True)
+        if hasattr(self, "recap_open_editor_button"):
+            self.recap_open_editor_button.setEnabled(True)
+
+    def open_recap_in_editor(self):
+        if not getattr(self, "recap_sequence", None):
+            self.append_recap_log("Generate a recap sequence first.")
+            if isinstance(self, QWidget):
+                QMessageBox.information(self, "AI Recap", "Generate a recap sequence first.")
+            return
+        if hasattr(self, "refresh_editor_asset_timeline"):
+            self.refresh_editor_asset_timeline()
+        if hasattr(self, "timeline"):
+            self.timeline.setFocus()
+        self.append_recap_log("Recap sequence opened in the existing editor timeline.")
 
     def _rebuild_voiceover_clips(
         self,
@@ -253,7 +663,8 @@ class RecapMixin:
         self.ensure_current_editor_asset_context(clear_on_change=True)
 
         try:
-            inputs = load_recap_inputs()
+            context = self._active_recap_artifact_context()
+            inputs = self._active_recap_inputs()
         except RecapInputError as exc:
             self.append_recap_log(f"ERROR: {exc}")
             return
@@ -278,6 +689,9 @@ class RecapMixin:
             provider,
             inputs.recap_script["segments"],
             voice=self.recap_voice,
+            speed=getattr(self, "recap_speed", 1.5),
+            output_dir=context.voiceover_dir,
+            manifest_path=context.voiceover_manifest_path,
         )
 
         durations = {
@@ -302,7 +716,7 @@ class RecapMixin:
             verified_story_map=inputs.verified_story_map,
             source_video=_recap_source_filename(inputs.episode_identity),
         )
-        write_recap_sequence(sequence)
+        write_recap_sequence(sequence, context.recap_sequence_path)
         self.recap_sequence = sequence
 
         new_clips = self._rebuild_voiceover_clips(inputs, durations, sequence)
@@ -430,7 +844,8 @@ class RecapMixin:
             return
 
         try:
-            inputs = load_recap_inputs()
+            context = self._active_recap_artifact_context()
+            inputs = self._active_recap_inputs()
         except RecapInputError as exc:
             self.append_recap_log(f"ERROR: {exc}")
             return
@@ -459,6 +874,9 @@ class RecapMixin:
             clip["id"],
             segment["text"],
             voice=self.recap_voice,
+            speed=getattr(self, "recap_speed", 1.5),
+            output_dir=context.voiceover_dir,
+            manifest_path=context.voiceover_manifest_path,
             force=True,
         )
 
