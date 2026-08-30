@@ -257,7 +257,7 @@ def build_duck_filter_complex(
         "[narration_gained][source_gained]"
         "amix="
         "inputs=2:"
-        "duration=first:"
+        "duration=longest:"
         "dropout_transition=0:"
         "normalize=0,"
         f"alimiter=limit={limiter_limit}"

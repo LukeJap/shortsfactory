@@ -35,11 +35,12 @@ def _candidate(start, end):
     return {"start": start, "end": end, "score": 0.9, "reason": "Test dialogue."}
 
 
-def _resolve(candidate, cache_dir):
+def _resolve(candidate, cache_dir, *, source_duration_seconds=None):
     return resolve_source_audio_boundary(
         candidate,
         source_video=SOURCE_NAME,
         transcript_cache_dir=cache_dir,
+        source_duration_seconds=source_duration_seconds,
     )
 
 
@@ -53,7 +54,7 @@ def test_end_inside_utterance_extends_to_utterance_end(tmp_path):
     resolved = _resolve(_candidate(100.0, 105.25), cache_dir)
 
     assert resolved["resolved_start"] == 100.0
-    assert resolved["resolved_end"] == 108.0
+    assert resolved["resolved_end"] == pytest.approx(108.2)
     assert resolved["boundary_source"] == "transcript_cache_word_timing"
 
 
@@ -61,7 +62,7 @@ def test_complete_end_is_preserved_and_does_not_absorb_next_utterance(tmp_path):
     cache_dir = _write_cache(
         tmp_path,
         segments=[{"start": 100.0, "end": 104.0, "text": "Complete."}, {"start": 104.1, "end": 108.0, "text": "Unrelated reply."}],
-        words=[{"start": 100.0, "end": 104.0, "word": "Complete."}, {"start": 104.1, "end": 108.0, "word": "Reply."}],
+        words=[{"start": 100.0, "end": 103.8, "word": "Complete."}, {"start": 104.1, "end": 108.0, "word": "Reply."}],
     )
 
     resolved = _resolve(_candidate(100.0, 104.0), cache_dir)
@@ -113,12 +114,12 @@ def test_missing_or_wrong_source_cache_preserves_candidate(tmp_path, source_vide
     assert resolved["boundary_source"] == "candidate"
 
 
-@pytest.mark.parametrize("start,end", [(1376.68, 1389.04), (1416.8, 1420.58)])
+@pytest.mark.parametrize("start,end", [(1376.68, 1389.24), (1416.8, 1420.78)])
 def test_clean_real_style_candidates_remain_unchanged(tmp_path, start, end):
     cache_dir = _write_cache(
         tmp_path,
-        segments=[{"start": start, "end": end, "text": "Complete line."}],
-        words=[{"start": start, "end": end, "word": "Complete."}],
+        segments=[{"start": start, "end": end - 0.2, "text": "Complete line."}],
+        words=[{"start": start, "end": end - 0.2, "word": "Complete."}],
     )
 
     resolved = _resolve(_candidate(start, end), cache_dir)
@@ -168,13 +169,89 @@ def test_resolved_insert_duration_shifts_voiceover_and_caption_timing(tmp_path):
     timing = voiceover_timing_by_segment(resolved)["VO_001"]
 
     assert (insert["candidate_start"], insert["candidate_end"]) == (100.0, 104.0)
-    assert (insert["resolved_start"], insert["resolved_end"]) == (100.0, 108.0)
-    assert insert["duration"] == pytest.approx(8.0)
-    assert timing["dialogue_pauses"][0]["duration_seconds"] == pytest.approx(8.0)
+    assert (insert["resolved_start"], insert["resolved_end"]) == (100.0, 108.2)
+    assert insert["duration"] == pytest.approx(8.2)
+    assert timing["dialogue_pauses"][0]["duration_seconds"] == pytest.approx(8.2)
 
     pause_offset = timing["dialogue_pauses"][0]["narration_offset_seconds"]
     lines = build_narration_ass_dialogue_lines(
         {"words": [{"text": "After", "start": pause_offset + 0.1, "end": pause_offset + 0.6}]},
         dialogue_pauses=timing["dialogue_pauses"],
     )
-    assert ass_time(pause_offset + 8.1) in lines[0]
+    assert ass_time(pause_offset + 8.3) in lines[0]
+
+
+def test_end_inside_word_completes_word_and_adds_natural_tail(tmp_path):
+    cache_dir = _write_cache(
+        tmp_path,
+        segments=[{"start": 100.0, "end": 102.0, "text": "Complete line."}],
+        words=[{"start": 100.0, "end": 101.5, "word": "Complete"}],
+    )
+
+    resolved = _resolve(_candidate(100.0, 101.2), cache_dir)
+
+    assert resolved["resolved_end"] >= 101.7
+    assert "post-speech tail" in resolved["boundary_reason"]
+
+
+def test_end_near_word_completion_still_keeps_the_full_word(tmp_path):
+    cache_dir = _write_cache(
+        tmp_path,
+        segments=[{"start": 100.0, "end": 102.0, "text": "Complete line."}],
+        words=[{"start": 100.0, "end": 101.5, "word": "Complete"}],
+    )
+
+    resolved = _resolve(_candidate(100.0, 101.46), cache_dir)
+
+    assert resolved["resolved_end"] >= 101.7
+
+
+def test_adequate_existing_post_speech_silence_is_not_extended(tmp_path):
+    cache_dir = _write_cache(
+        tmp_path,
+        segments=[{"start": 100.0, "end": 102.0, "text": "Complete line."}],
+        words=[{"start": 100.0, "end": 101.0, "word": "Complete"}],
+    )
+
+    resolved = _resolve(_candidate(100.0, 101.2), cache_dir)
+
+    assert resolved["resolved_end"] == pytest.approx(101.2)
+
+
+def test_start_inside_word_recovers_a_small_speech_preroll(tmp_path):
+    cache_dir = _write_cache(
+        tmp_path,
+        segments=[{"start": 100.0, "end": 102.0, "text": "Complete line."}],
+        words=[{"start": 100.5, "end": 101.5, "word": "Complete"}],
+    )
+
+    resolved = _resolve(_candidate(100.8, 101.8), cache_dir)
+
+    assert resolved["resolved_start"] == pytest.approx(100.38)
+
+
+def test_missing_transcript_preserves_the_requested_range(tmp_path):
+    resolved = resolve_source_audio_boundary(
+        _candidate(100.0, 101.0),
+        source_video=SOURCE_NAME,
+        transcript_cache_dir=tmp_path / "missing",
+    )
+
+    assert (resolved["resolved_start"], resolved["resolved_end"]) == (100.0, 101.0)
+
+
+def test_resolved_range_stays_inside_source_duration_bounds(tmp_path):
+    cache_dir = _write_cache(
+        tmp_path,
+        segments=[{"start": 9.0, "end": 10.0, "text": "Final word."}],
+        words=[{"start": 9.6, "end": 10.0, "word": "Final"}],
+    )
+
+    resolved = _resolve(
+        _candidate(-0.1, 9.95),
+        cache_dir,
+        source_duration_seconds=10.0,
+    )
+
+    assert resolved["resolved_start"] == 0.0
+    assert resolved["resolved_end"] == 10.0

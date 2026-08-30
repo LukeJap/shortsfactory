@@ -123,6 +123,19 @@ def test_narration_timeline_uses_moving_source_coverage_before_any_hold():
     assert result["visual_coverage_shortfall_seconds"] == 0.0
 
 
+def test_measured_narration_duration_extends_visual_coverage_over_the_old_plan():
+    segment = _segment(candidate_visuals=[_candidate(10.0, 20.0)])
+
+    old_plan = assemble_sequence(_script([segment]), {"VO_001": 5.6})
+    measured = assemble_sequence(_script([segment]), {"VO_001": 6.0})
+
+    assert old_plan["segments"][0]["timeline_duration_seconds"] == pytest.approx(5.6)
+    assert measured["segments"][0]["narration_duration_seconds"] == pytest.approx(6.0)
+    assert measured["segments"][0]["timeline_duration_seconds"] >= 6.0
+    assert measured["segments"][0]["shots_total_duration_seconds"] >= 6.0
+    assert measured["segments"][0]["visual_coverage_shortfall_seconds"] == 0.0
+
+
 def test_moving_coverage_extends_only_within_candidate_bounds():
     segment = _segment(
         candidate_visuals=[

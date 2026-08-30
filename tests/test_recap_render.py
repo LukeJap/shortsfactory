@@ -99,6 +99,19 @@ def test_source_audio_track_filter_never_extends_source_audio_for_holds():
     assert "apad=" not in filter_str
 
 
+def test_source_audio_track_uses_tiny_edge_fades_for_original_dialogue_only():
+    shots = [
+        {"start": 10.0, "end": 12.5, "treatment": "original_dialogue"},
+        {"start": 40.0, "end": 43.0, "treatment": "narration_over_source"},
+    ]
+
+    filter_str, _ = build_source_audio_track_filter(shots)
+
+    assert "afade=t=in:st=0:d=0.012" in filter_str
+    assert "afade=t=out:st=2.488:d=0.012" in filter_str
+    assert filter_str.count("afade=") == 2
+
+
 def test_source_audio_track_filter_empty_shots_raises():
     with pytest.raises(RecapRenderError, match="empty shot list"):
         build_source_audio_track_filter([])
@@ -346,7 +359,7 @@ def test_render_requires_caption_ass_path_before_running_ffmpeg(tmp_path):
 # build_recap_ffmpeg_command
 # ============================================================
 
-def test_ffmpeg_command_includes_source_and_voiceover_inputs_and_maps(tmp_path):
+def test_ffmpeg_command_has_no_global_duration_cap_that_can_truncate_narration(tmp_path):
     clips = [_voiceover_clip("VO_001", start=0.0), _voiceover_clip("VO_002", start=3.0)]
     output_path = tmp_path / "final_recap.mp4"
 
@@ -365,8 +378,27 @@ def test_ffmpeg_command_includes_source_and_voiceover_inputs_and_maps(tmp_path):
     # one -i per voiceover clip beyond the source video
     assert command.count("-i") == 1 + len(clips)
     assert "-map" in command and "[recap_out]" in command and "[mixed]" in command
-    assert "-t" in command and "12.345" in command
+    assert "-t" not in command
+    assert command[command.index("-map_metadata") + 1] == "-1"
+    assert command[command.index("-map_chapters") + 1] == "-1"
+    assert "-sn" in command and "-dn" in command
     assert str(output_path) in command
+
+
+def test_ffmpeg_command_uses_the_explicit_source_bound_voiceover_directory(tmp_path):
+    clips = [_voiceover_clip("N_001", start=0.0)]
+    voiceover_dir = tmp_path / "recap_source_bound" / "voiceover"
+    command = build_recap_ffmpeg_command(
+        tmp_path / "source.mp4",
+        clips,
+        "somefilter",
+        "recap_out",
+        "mixed",
+        tmp_path / "recap_source_bound" / "final_recap.mp4",
+        voiceover_dir=voiceover_dir,
+    )
+
+    assert str(voiceover_dir / "N_001.wav") in command
 
 
 def test_ffmpeg_command_adds_shared_sfx_and_emoji_inputs_after_voiceover(tmp_path):

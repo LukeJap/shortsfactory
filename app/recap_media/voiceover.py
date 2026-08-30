@@ -53,26 +53,45 @@ def wav_path_for_segment(segment_id: str, output_dir: Path = VOICEOVER_DIR) -> P
     return output_dir / f"{segment_id}.wav"
 
 
-def load_voiceover_durations(manifest_path: Path = MANIFEST_PATH) -> dict[str, float]:
+def load_voiceover_durations(
+    manifest_path: Path = MANIFEST_PATH,
+    output_dir: Path | None = None,
+) -> dict[str, float]:
     """
-    {segment_id: duration_seconds} for every segment with a cached
-    manifest entry (real Orpheus-measured durations, not estimates) --
-    lets recap_media.sequence.assemble_sequence() use accurate timing
-    for whatever's already been synthesized without requiring every
-    segment to be generated first (falls back to its own word-count
-    estimate for any segment missing here).
+    {segment_id: duration_seconds} for every usable cached WAV. The WAV
+    itself is authoritative: manifest durations are only a cache index and
+    are refreshed here if they have become stale. This lets
+    recap_media.sequence.assemble_sequence() use accurate timing without
+    requiring every segment to be generated first (it falls back to its own
+    word-count estimate for any segment missing here).
     """
 
     manifest = _load_manifest(manifest_path)
     durations: dict[str, float] = {}
+    manifest_changed = False
 
     for segment_id, entry in manifest.items():
-        if not isinstance(entry, dict) or "duration_seconds" not in entry:
+        if not isinstance(entry, dict):
             continue
         try:
-            durations[segment_id] = float(entry["duration_seconds"])
-        except (TypeError, ValueError):
+            wav_path = (
+                wav_path_for_segment(segment_id, output_dir)
+                if output_dir is not None
+                else Path(str(entry.get("wav_path", "")))
+            )
+            if not str(wav_path):
+                continue
+            duration_seconds = _wav_duration_seconds(wav_path)
+        except (OSError, ValueError, wave.Error):
             continue
+
+        durations[segment_id] = duration_seconds
+        if entry.get("duration_seconds") != duration_seconds:
+            entry["duration_seconds"] = duration_seconds
+            manifest_changed = True
+
+    if manifest_changed:
+        _save_manifest(manifest, manifest_path)
 
     return durations
 
@@ -167,12 +186,22 @@ def synthesize_segment(
         and entry.get("content_hash") == content_hash
         and wav_path.exists()
     ):
-        return SegmentSynthesisResult(
-            segment_id=segment_id,
-            wav_path=wav_path,
-            duration_seconds=float(entry.get("duration_seconds", 0.0)),
-            cache_hit=True,
-        )
+        try:
+            duration_seconds = _wav_duration_seconds(wav_path)
+        except (OSError, wave.Error):
+            # A malformed cache entry is not a valid narration asset. Fall
+            # through to synthesis instead of reporting it as a cache hit.
+            duration_seconds = None
+        if duration_seconds is not None:
+            if entry.get("duration_seconds") != duration_seconds:
+                entry["duration_seconds"] = duration_seconds
+                _save_manifest(manifest, manifest_path)
+            return SegmentSynthesisResult(
+                segment_id=segment_id,
+                wav_path=wav_path,
+                duration_seconds=duration_seconds,
+                cache_hit=True,
+            )
 
     try:
         audio_bytes = provider.synthesize_speech(text, voice=voice, speed=speed)

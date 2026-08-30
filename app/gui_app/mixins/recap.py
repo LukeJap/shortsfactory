@@ -32,7 +32,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -46,6 +47,12 @@ from PySide6.QtWidgets import (
 
 from editor_asset_plan import clips_of_kind, replace_kind_clips, upsert_clip
 from recap_media.artifacts import RecapArtifactContext, resolve_recap_artifact_context
+from recap_media.audio_mix import build_duck_plan, write_duck_plan
+from recap_media.caption_alignment import (
+    build_narration_captions,
+    write_narration_captions,
+    write_narration_captions_ass_file,
+)
 from recap_media.loader import (
     RecapInputError,
     RecapInputs,
@@ -55,13 +62,23 @@ from recap_media.loader import (
     load_verified_story_map,
 )
 from recap_media.orpheus_provider import DEFAULT_VOICE, KNOWN_VOICES, OrpheusProvider
+from recap_media.portrait_framing import (
+    build_portrait_framing_plan_for_video,
+    write_portrait_framing_plan,
+)
+from recap_media.render import RecapRenderError, render_recap, resolve_recap_source_video
 from recap_media.sequence import (
     assemble_sequence,
     interweave_original_dialogue,
     voiceover_timing_by_segment,
     write_recap_sequence,
 )
-from recap_media.voiceover import load_voiceover_durations, synthesize_segment, synthesize_segments
+from recap_media.voiceover import (
+    load_voiceover_durations,
+    synthesize_segment,
+    synthesize_segments,
+    wav_path_for_segment,
+)
 
 from ..settings_keys import (
     RECAP_SCRIPT_SOURCE,
@@ -535,12 +552,109 @@ class RecapMixin:
         self.settings.setValue(RECAP_SPEED, speed)
 
     def generate_recap(self) -> bool:
-        """Build the sequence and immediately synthesize its narration."""
+        """Build a recap sequence, narration, and its final media render."""
 
         self.append_recap_log("Generating recap sequence...")
         if not self.generate_recap_sequence():
             return False
-        return self.generate_recap_voiceover()
+        if not self.generate_recap_voiceover():
+            return False
+        return self.generate_recap_final_render()
+
+    def generate_recap_final_render(self) -> bool:
+        """Create source-bound Track B render inputs and render the active recap."""
+
+        if not getattr(self, "recap_sequence", None):
+            message = "Generate the recap sequence and narration before rendering."
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.information(self, "Create AI Recap", message)
+            return False
+
+        try:
+            context = self._active_recap_artifact_context()
+            inputs = self._active_recap_inputs()
+            source_video = resolve_recap_source_video(inputs.episode_identity)
+        except (RecapInputError, RecapRenderError) as exc:
+            message = str(exc)
+            self.append_recap_log(f"ERROR: Recap render setup failed: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            return False
+
+        voiceover_clips = clips_of_kind(self.editor_asset_plan, "VOICEOVER")
+        active_voiceover_clips = [
+            clip
+            for clip in voiceover_clips
+            if clip.get("active", True) and not clip.get("deleted")
+        ]
+        if not active_voiceover_clips:
+            message = "No active narration blocks are available for recap rendering."
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            return False
+
+        self.append_recap_log("Preparing recap render assets...")
+        QCoreApplication.processEvents()
+        try:
+            portrait_plan = build_portrait_framing_plan_for_video(source_video)
+            write_portrait_framing_plan(portrait_plan, context.portrait_framing_plan_path)
+
+            narration_wavs = {
+                clip["id"]: wav_path_for_segment(clip["id"], context.voiceover_dir)
+                for clip in active_voiceover_clips
+            }
+            captions = build_narration_captions(
+                inputs.recap_script["segments"],
+                wav_paths_by_segment=narration_wavs,
+            )
+            write_narration_captions(captions, context.narration_captions_path)
+            write_narration_captions_ass_file(
+                captions,
+                voiceover_clips,
+                context.narration_captions_ass_path,
+                portrait_plan,
+            )
+
+            duck_plan = build_duck_plan(self.recap_sequence)
+            write_duck_plan(duck_plan, context.audio_duck_plan_path)
+
+            self.append_recap_log("Rendering recap video...")
+            for index, segment in enumerate(
+                sorted(self.recap_sequence["segments"], key=lambda item: item["order"]),
+                start=1,
+            ):
+                self.append_recap_log(
+                    f"Assembling block {index}/{len(self.recap_sequence['segments'])}: "
+                    f"{segment['segment_id']}..."
+                )
+            QCoreApplication.processEvents()
+
+            output_path = render_recap(
+                inputs.episode_identity,
+                self.recap_sequence,
+                voiceover_clips,
+                portrait_plan,
+                duck_plan,
+                captions_ass_path=context.narration_captions_ass_path,
+                output_path=context.final_recap_path,
+                recap_effects={},
+                voiceover_dir=context.voiceover_dir,
+            )
+        except (RecapRenderError, RecapInputError, OSError, ValueError) as exc:
+            message = str(exc)
+            self.append_recap_log(f"ERROR: Recap render failed: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            return False
+
+        self.append_recap_log(f"Final recap complete: {output_path}")
+        if hasattr(self, "open_final_video"):
+            self.open_final_video(output_path)
+        elif isinstance(self, QWidget):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_path)))
+        return True
 
     def generate_recap_sequence(self):
 

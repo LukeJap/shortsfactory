@@ -62,6 +62,7 @@ class RecapRenderError(Exception):
 
 RECAP_PLAYBACK_SPEED = 1.5
 MAX_RENDERABLE_VISUAL_SHORTFALL_SECONDS = 0.15
+SOURCE_AUDIO_EDGE_FADE_SECONDS = 0.012
 
 
 def _validated_playback_speed(playback_speed: float) -> float:
@@ -200,10 +201,19 @@ def build_source_audio_track_filter(
 
     for index, shot in enumerate(shots):
         label = f"ashot{index}"
-        parts.append(
+        filter_chain = (
             f"[{audio_label}]atrim=start={float(shot['start']):.3f}:"
-            f"end={float(shot['end']):.3f},asetpts=PTS-STARTPTS[{label}]"
+            f"end={float(shot['end']):.3f},asetpts=PTS-STARTPTS"
         )
+        if shot.get("treatment") == "original_dialogue":
+            duration = max(0.0, float(shot["end"]) - float(shot["start"]))
+            fade_seconds = min(SOURCE_AUDIO_EDGE_FADE_SECONDS, duration / 2.0)
+            if fade_seconds > 0:
+                filter_chain += (
+                    f",afade=t=in:st=0:d={fade_seconds:.3f}"
+                    f",afade=t=out:st={duration - fade_seconds:.3f}:d={fade_seconds:.3f}"
+                )
+        parts.append(f"{filter_chain}[{label}]")
         labels.append(f"[{label}]")
 
     parts.append("".join(labels) + f"concat=n={len(shots)}:v=0:a=1[{output_label}]")
@@ -455,22 +465,28 @@ def build_recap_ffmpeg_command(
     total_duration_seconds: float | None = None,
     sfx_events: list[dict[str, Any]] | None = None,
     emoji_events: list[dict[str, Any]] | None = None,
+    voiceover_dir: Path | None = None,
 ) -> list[str]:
     """
     Build the full ffmpeg CLI argument list: source video as input 0,
     each active VOICEOVER clip's WAV as one subsequent input (in the
     same order build_recap_filter_complex()'s input_index_by_clip_id
     used), the assembled filter_complex, and the final video+audio maps.
-    total_duration_seconds (recap_sequence.json's own total, the
-    authoritative output length) is applied via -t so a track that ran
-    slightly long/short from the trim+concat/amix arithmetic never
-    leaves a dangling silent tail or a truncated final frame.
+    ``total_duration_seconds`` is retained for call compatibility only. The
+    final render deliberately has no global ``-t`` cap: a valid narration
+    WAV is authoritative and must not be cut because an older sequence or
+    rounded metadata window is fractionally shorter.
     """
 
     command = ["ffmpeg", "-y", "-i", str(source_video)]
 
     for clip in active_voiceover_clips:
-        command.extend(["-i", str(wav_path_for_segment(clip["id"]))])
+        wav_path = (
+            wav_path_for_segment(clip["id"], voiceover_dir)
+            if voiceover_dir is not None
+            else wav_path_for_segment(clip["id"])
+        )
+        command.extend(["-i", str(wav_path)])
 
     for event in sfx_events or []:
         command.extend(["-i", str(event["asset_path"])])
@@ -478,9 +494,11 @@ def build_recap_ffmpeg_command(
 
     command.extend(["-filter_complex", filter_complex])
     command.extend(["-map", f"[{final_video_label}]", "-map", f"[{final_audio_label}]"])
-
-    if total_duration_seconds is not None:
-        command.extend(["-t", f"{total_duration_seconds:.3f}"])
+    # The source episode can carry full-length chapter metadata. In MP4,
+    # FFmpeg serializes those chapters as a timed data track, which makes a
+    # short recap appear to run for the entire source episode. The recap's
+    # filtered video and mixed audio are the only intentional output streams.
+    command.extend(["-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"])
 
     command.extend(
         [
@@ -519,6 +537,7 @@ def render_recap(
     output_path: Path = RECAP_FINAL_OUTPUT_PATH,
     playback_speed: float = RECAP_PLAYBACK_SPEED,
     recap_effects: dict[str, Any] | None = None,
+    voiceover_dir: Path | None = None,
 ) -> Path:
     """
     Top-level orchestration: resolve the accepted recap source, build the
@@ -551,7 +570,11 @@ def render_recap(
         )
 
     for clip in active_clips:
-        wav_path = wav_path_for_segment(clip["id"])
+        wav_path = (
+            wav_path_for_segment(clip["id"], voiceover_dir)
+            if voiceover_dir is not None
+            else wav_path_for_segment(clip["id"])
+        )
         if not wav_path.exists():
             raise RecapRenderError(f"Voiceover WAV not found for {clip['id']!r}: {wav_path}")
 
@@ -589,11 +612,9 @@ def render_recap(
         final_video_label,
         final_audio_label,
         output_path,
-        total_duration_seconds=final_recap_duration_seconds(
-            sequence.get("total_duration_seconds", 0.0), speed
-        ),
         sfx_events=recap_effects.get("sfx_events", []),
         emoji_events=recap_effects.get("emoji_events", []),
+        voiceover_dir=voiceover_dir,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

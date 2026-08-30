@@ -288,6 +288,7 @@ def test_filter_complex_includes_amix_and_limiter():
     assert "amix=" in filter_complex
     assert "alimiter=limit=" in filter_complex
     assert "normalize=0" in filter_complex
+    assert "duration=longest" in filter_complex
     assert filter_complex.count(";") == 2  # narration volume; source volume; amix+limiter
 
 

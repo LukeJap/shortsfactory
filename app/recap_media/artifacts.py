@@ -26,6 +26,26 @@ class RecapArtifactContext:
     voiceover_manifest_path: Path
     pasted_script_path: Path
 
+    @property
+    def narration_captions_path(self) -> Path:
+        return self.root / "narration_captions.json"
+
+    @property
+    def narration_captions_ass_path(self) -> Path:
+        return self.root / "narration.ass"
+
+    @property
+    def audio_duck_plan_path(self) -> Path:
+        return self.root / "audio_duck_plan.json"
+
+    @property
+    def portrait_framing_plan_path(self) -> Path:
+        return self.root / "portrait_framing_plan.json"
+
+    @property
+    def final_recap_path(self) -> Path:
+        return self.root / "final_recap.mp4"
+
 
 def _normalized_path(path: Path) -> str:
     return os.path.normcase(os.path.normpath(str(path.expanduser().resolve(strict=False))))

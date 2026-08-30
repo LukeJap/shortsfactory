@@ -1,5 +1,6 @@
 import wave
 from io import BytesIO
+import json
 
 from recap_media.orpheus_provider import DEFAULT_VOICE, OrpheusError
 from recap_media.voiceover import (
@@ -167,6 +168,30 @@ def test_cache_persists_across_separate_invocations(tmp_path):
     assert provider_b.calls == []
 
 
+def test_cache_hit_remeasures_a_stale_manifest_duration(tmp_path):
+    provider = FakeProvider()
+    manifest_path = tmp_path / "manifest.json"
+
+    synthesize_segment(
+        provider, "VO_001", "Hello there.", voice="tara",
+        output_dir=tmp_path, manifest_path=manifest_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["VO_001"]["duration_seconds"] = 0.1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = synthesize_segment(
+        provider, "VO_001", "Hello there.", voice="tara",
+        output_dir=tmp_path, manifest_path=manifest_path,
+    )
+
+    assert result.cache_hit is True
+    assert result.duration_seconds == 0.25
+    assert len(provider.calls) == 1
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert refreshed["VO_001"]["duration_seconds"] == 0.25
+
+
 # ============================================================
 # synthesize_segments: batch behavior
 # ============================================================
@@ -245,6 +270,22 @@ def test_load_voiceover_durations_reflects_synthesized_segments(tmp_path):
     durations = load_voiceover_durations(manifest_path)
     assert set(durations) == {"VO_001", "VO_002"}
     assert all(duration > 0 for duration in durations.values())
+
+
+def test_load_voiceover_durations_prefers_the_wav_over_stale_metadata(tmp_path):
+    provider = FakeProvider()
+    manifest_path = tmp_path / "manifest.json"
+    synthesize_segments(provider, _segments(), output_dir=tmp_path, manifest_path=manifest_path)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["VO_001"]["duration_seconds"] = 99.0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    durations = load_voiceover_durations(manifest_path, output_dir=tmp_path)
+
+    assert durations["VO_001"] == 0.25
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert refreshed["VO_001"]["duration_seconds"] == 0.25
 
 
 def test_load_voiceover_durations_missing_manifest_returns_empty(tmp_path):

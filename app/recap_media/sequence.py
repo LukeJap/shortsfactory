@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -349,7 +350,12 @@ def target_duration_for_segment(
         return (low + high) / 2.0, "visual_only_default"
 
     if segment_id in narration_durations:
-        return float(narration_durations[segment_id]), "measured"
+        # A valid narration WAV owns the block duration. Preserve its entire
+        # waveform by rounding its output window outward to our millisecond
+        # timeline precision rather than shortening it to a visual estimate.
+        measured_duration = max(0.0, float(narration_durations[segment_id]))
+        timeline_duration = math.ceil((measured_duration - 1e-9) * 1000.0) / 1000.0
+        return timeline_duration, "measured"
 
     return estimate_narration_seconds(segment["text"]), "estimated"
 

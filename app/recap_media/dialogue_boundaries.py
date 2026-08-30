@@ -10,9 +10,11 @@ from pipeline_paths import OUTPUT_DIR
 
 
 TRANSCRIPT_CACHE_DIR = OUTPUT_DIR / "transcript_cache"
-END_BOUNDARY_TOLERANCE_SECONDS = 0.15
 START_BOUNDARY_ALIGNMENT_TOLERANCE_SECONDS = 0.15
 SHORT_UTTERANCE_SECONDS = 3.0
+SPEECH_PRE_ROLL_SECONDS = 0.12
+SPEECH_POST_TAIL_SECONDS = 0.20
+MIN_ADEQUATE_POST_SPEECH_TAIL_SECONDS = 0.15
 
 
 def _timed_entries(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -109,24 +111,73 @@ def _neighboring_words(
     return previous, following
 
 
+def _last_relevant_word(
+    words: list[dict[str, Any]],
+    start: float,
+    end: float,
+) -> dict[str, Any] | None:
+    """Return the latest spoken word touched by a candidate's end region."""
+
+    candidates = [
+        word
+        for word in words
+        if word["end"] > start and word["start"] <= end
+    ]
+    return max(candidates, key=lambda word: (word["end"], word["start"]), default=None)
+
+
+def _containing_utterance_for_word(
+    segments: list[dict[str, Any]],
+    word: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if word is None:
+        return None
+    midpoint = (word["start"] + word["end"]) / 2.0
+    return _containing_entry(segments, midpoint)
+
+
+def _bounded_range(
+    start: float,
+    end: float,
+    source_duration_seconds: float | None,
+) -> tuple[float, float]:
+    start = max(0.0, start)
+    end = max(start, end)
+    if source_duration_seconds is None:
+        return start, end
+    try:
+        source_duration = max(0.0, float(source_duration_seconds))
+    except (TypeError, ValueError):
+        return start, end
+    return min(start, source_duration), min(end, source_duration)
+
+
 def resolve_source_audio_boundary(
     candidate: dict[str, Any],
     *,
     source_video: str | Path | None,
     transcript_cache_dir: Path | None = None,
+    source_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Resolve only clearly clipped source-audio candidate boundaries.
+    """Resolve source-moment boundaries to complete speech safely.
 
-    A missing, malformed, or wrong-source cache deliberately leaves the
-    candidate untouched. The resolver never enters a following utterance: it
-    can only complete the utterance already intersected by a candidate edge.
+    Word timing is preferred whenever it is available: starts recover the
+    initial attack of a word with a small pre-roll, while ends complete the
+    current utterance and preserve a short natural tail. The resolver never
+    reaches into a following utterance. Missing or wrong-source timing keeps
+    the requested candidate range, apart from deterministic source bounds.
     """
 
-    candidate_start = float(candidate["start"])
-    candidate_end = float(candidate["end"])
+    requested_start = float(candidate["start"])
+    requested_end = float(candidate["end"])
+    candidate_start, candidate_end = _bounded_range(
+        requested_start,
+        requested_end,
+        source_duration_seconds,
+    )
     result = {
-        "candidate_start": candidate_start,
-        "candidate_end": candidate_end,
+        "candidate_start": requested_start,
+        "candidate_end": requested_end,
         "resolved_start": candidate_start,
         "resolved_end": candidate_end,
         "boundary_source": "candidate",
@@ -144,15 +195,17 @@ def resolve_source_audio_boundary(
     reasons: list[str] = []
     used_word_timing = False
 
-    # A start is intentionally conservative. Preserve starts that are close
-    # to a word boundary, even inside a longer Whisper segment. Only recover
-    # a preceding short utterance when the candidate is stranded in its
-    # interior silence or begins inside a timed word.
+    # Preserve an intentional internal phrase start unless the request cuts
+    # through a spoken word. In that case, recover its attack and a tiny
+    # pre-roll without pulling in the preceding sentence.
     if start_utterance is not None and candidate_start > start_utterance["start"]:
         active_word = _containing_entry(words, candidate_start)
         if active_word is not None:
-            result["resolved_start"] = start_utterance["start"]
-            reasons.append("Candidate start intersects a timed word; restored its utterance start.")
+            result["resolved_start"] = max(
+                start_utterance["start"],
+                active_word["start"] - SPEECH_PRE_ROLL_SECONDS,
+            )
+            reasons.append("Candidate start intersects a timed word; restored its word attack and pre-roll.")
             used_word_timing = True
         elif start_utterance["end"] - start_utterance["start"] <= SHORT_UTTERANCE_SECONDS:
             previous, following = _neighboring_words(words, candidate_start, start_utterance)
@@ -169,17 +222,48 @@ def resolve_source_audio_boundary(
                 )
                 used_word_timing = bool(previous or following)
 
-    # An end inside a word is an audible cut even when Whisper's word timing
-    # is close to the candidate end. Otherwise, use a small tolerance around
-    # an utterance end to avoid turning harmless cache jitter into a rewrite.
-    if end_utterance is not None and candidate_end < end_utterance["end"]:
-        active_word = _containing_entry(words, candidate_end)
-        if active_word is not None or (
-            end_utterance["end"] - candidate_end > END_BOUNDARY_TOLERANCE_SECONDS
-        ):
-            result["resolved_end"] = end_utterance["end"]
+    active_end_word = _containing_entry(words, candidate_end)
+    final_word = _last_relevant_word(words, candidate_start, candidate_end)
+    final_word_utterance = _containing_utterance_for_word(segments, final_word)
+    if end_utterance is None:
+        end_utterance = final_word_utterance
+
+    # A requested end with adequate silence after its final spoken word is
+    # already natural. Otherwise finish the current utterance first, then add
+    # a short tail. We intentionally do not consult a following utterance.
+    post_speech_tail = (
+        candidate_end - final_word["end"]
+        if final_word is not None and candidate_end >= final_word["end"]
+        else 0.0
+    )
+    needs_speech_tail = final_word is not None and (
+        active_end_word is not None
+        or post_speech_tail < MIN_ADEQUATE_POST_SPEECH_TAIL_SECONDS
+    )
+    if needs_speech_tail:
+        complete_through = candidate_end
+        if end_utterance is not None and candidate_end < end_utterance["end"]:
+            complete_through = end_utterance["end"]
             reasons.append("Candidate end intersects an unfinished timed utterance; extended to its end.")
-            used_word_timing = used_word_timing or active_word is not None
+        complete_through = max(complete_through, final_word["end"])
+        result["resolved_end"] = max(
+            result["resolved_end"],
+            complete_through + SPEECH_POST_TAIL_SECONDS,
+        )
+        reasons.append("Added a natural post-speech tail after the final timed word.")
+        used_word_timing = True
+    elif end_utterance is not None and candidate_end < end_utterance["end"] and not words:
+        # Segment timing remains the conservative fallback for legacy/weak
+        # transcripts. Without word timing, completing the known utterance is
+        # safer than clipping its final syllable.
+        result["resolved_end"] = end_utterance["end"]
+        reasons.append("Candidate end intersects an unfinished timed utterance; extended to its end.")
+
+    result["resolved_start"], result["resolved_end"] = _bounded_range(
+        float(result["resolved_start"]),
+        float(result["resolved_end"]),
+        source_duration_seconds,
+    )
 
     result["transcript_cache_path"] = str(cache_path)
     if reasons:
