@@ -534,6 +534,14 @@ class RecapMixin:
         self.recap_speed = speed
         self.settings.setValue(RECAP_SPEED, speed)
 
+    def generate_recap(self) -> bool:
+        """Build the sequence and immediately synthesize its narration."""
+
+        self.append_recap_log("Generating recap sequence...")
+        if not self.generate_recap_sequence():
+            return False
+        return self.generate_recap_voiceover()
+
     def generate_recap_sequence(self):
 
         try:
@@ -542,7 +550,7 @@ class RecapMixin:
         except RecapInputError as exc:
             self.append_recap_log(f"ERROR: {exc}")
             QMessageBox.warning(self, "Create AI Recap", str(exc))
-            return
+            return False
 
         narration_durations = load_voiceover_durations(context.voiceover_manifest_path)
         sequence = assemble_sequence(
@@ -591,6 +599,7 @@ class RecapMixin:
         self.generate_recap_voiceover_button.setEnabled(True)
         if hasattr(self, "recap_open_editor_button"):
             self.recap_open_editor_button.setEnabled(True)
+        return True
 
     def open_recap_in_editor(self):
         if not getattr(self, "recap_sequence", None):
@@ -645,13 +654,14 @@ class RecapMixin:
 
         return clips
 
-    def generate_recap_voiceover(self):
+    def generate_recap_voiceover(self) -> bool:
 
         if not getattr(self, "recap_sequence", None):
-            QMessageBox.information(
-                self, "Create AI Recap", "Generate the recap sequence first."
-            )
-            return
+            message = "Generate the recap sequence first."
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.information(self, "Create AI Recap", message)
+            return False
 
         # Same context-sync step generate_sfx()/generate_visual_assets()
         # already do before writing clips -- without it, the plan's
@@ -666,9 +676,28 @@ class RecapMixin:
             context = self._active_recap_artifact_context()
             inputs = self._active_recap_inputs()
         except RecapInputError as exc:
-            self.append_recap_log(f"ERROR: {exc}")
-            return
+            message = str(exc)
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            return False
 
+        narration_segments = [
+            segment
+            for segment in inputs.recap_script["segments"]
+            if not (
+                segment.get("block_type") == "source_moment"
+                or segment.get("presentation_hint") == "visual_only"
+            )
+        ]
+        if not narration_segments:
+            message = "The recap script has no narration blocks to synthesize."
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            return False
+
+        self.append_recap_log("Checking Orpheus...")
         provider = OrpheusProvider()
         readiness = provider.readiness()
         if readiness.get("state") != "online":
@@ -678,21 +707,58 @@ class RecapMixin:
                 "Start the local Orpheus server and try again."
             )
             self.append_recap_log(f"ERROR: {message}")
-            QMessageBox.warning(self, "Create AI Recap", message)
-            return
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            return False
 
+        self.append_recap_log("Orpheus ready.")
         self.generate_recap_voiceover_button.setEnabled(False)
-        self.append_recap_log("Generating narration voiceover...")
+        if hasattr(self, "generate_recap_sequence_button"):
+            self.generate_recap_sequence_button.setEnabled(False)
+        self.append_recap_log(
+            f"Generating narration for {len(narration_segments)} block(s)..."
+        )
         QCoreApplication.processEvents()
 
-        results = synthesize_segments(
-            provider,
-            inputs.recap_script["segments"],
-            voice=self.recap_voice,
-            speed=getattr(self, "recap_speed", 1.5),
-            output_dir=context.voiceover_dir,
-            manifest_path=context.voiceover_manifest_path,
-        )
+        def report_segment_start(segment_id: str, index: int, total: int):
+            self.append_recap_log(f"Narration {index}/{total}: {segment_id} processing...")
+            QCoreApplication.processEvents()
+
+        def report_segment_complete(result, index: int, total: int):
+            if result.error:
+                message = f"ERROR: Narration {index}/{total}: {result.segment_id}: {result.error}"
+            elif result.cache_hit:
+                message = f"Narration {index}/{total}: {result.segment_id} cached, reusing."
+            else:
+                message = (
+                    f"Narration {index}/{total}: {result.segment_id} complete "
+                    f"({result.duration_seconds:.1f}s audio)."
+                )
+            self.append_recap_log(message)
+            QCoreApplication.processEvents()
+
+        try:
+            results = synthesize_segments(
+                provider,
+                inputs.recap_script["segments"],
+                voice=self.recap_voice,
+                speed=getattr(self, "recap_speed", 1.5),
+                output_dir=context.voiceover_dir,
+                manifest_path=context.voiceover_manifest_path,
+                on_segment_start=report_segment_start,
+                on_segment_complete=report_segment_complete,
+            )
+        except Exception as exc:
+            message = f"Voiceover synthesis failed: {exc}"
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Create AI Recap", message)
+            self.generate_recap_voiceover_button.setEnabled(True)
+            if hasattr(self, "generate_recap_sequence_button"):
+                self.generate_recap_sequence_button.setEnabled(
+                    bool(getattr(self, "recap_script_valid", False))
+                )
+            return False
 
         durations = {
             result.segment_id: result.duration_seconds
@@ -728,13 +794,25 @@ class RecapMixin:
         self.refresh_recap_voiceover_list()
 
         self.generate_recap_voiceover_button.setEnabled(True)
+        if hasattr(self, "generate_recap_sequence_button"):
+            self.generate_recap_sequence_button.setEnabled(
+                bool(getattr(self, "recap_script_valid", False))
+            )
 
         ready_count = sum(1 for clip in new_clips if clip["active"])
+        if errors:
+            self.append_recap_log(
+                f"ERROR: Voiceover incomplete: {ready_count}/{len(new_clips)} narration block(s) ready."
+            )
+            if any(result.fatal for result in results):
+                self.append_recap_log(
+                    "ERROR: Stopped after a fatal Orpheus failure; completed narration remains cached."
+                )
+            return False
         self.append_recap_log(
-            f"Voiceover ready: {ready_count}/{len(new_clips)} segment(s)."
+            f"Voiceover complete: {ready_count}/{len(new_clips)} narration block(s)."
         )
-        for error in errors:
-            self.append_recap_log(f"WARNING: {error}")
+        return True
 
     def refresh_recap_voiceover_list(self):
 

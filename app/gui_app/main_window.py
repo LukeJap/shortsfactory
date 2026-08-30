@@ -1145,10 +1145,10 @@ class ShortsFactoryWindow(
         self.generate_recap_sequence_button.setObjectName("QuietButton")
         self.generate_recap_sequence_button.setEnabled(False)
         self.generate_recap_sequence_button.setToolTip(
-            "Use the selected validated script to assemble the recap shot sequence."
+            "Assemble the recap sequence and synthesize narration through the local Orpheus server."
         )
         self.generate_recap_sequence_button.clicked.connect(
-            self.generate_recap_sequence
+            self.generate_recap
         )
 
         self.generate_recap_voiceover_button = QPushButton("Generate Voiceover")

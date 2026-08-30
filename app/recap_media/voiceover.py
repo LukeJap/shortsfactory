@@ -26,7 +26,7 @@ import wave
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pipeline_paths import RECAP_DIR
 from recap_media.orpheus_provider import (
@@ -46,6 +46,7 @@ class SegmentSynthesisResult:
     duration_seconds: float
     cache_hit: bool
     error: str | None = None
+    fatal: bool = False
 
 
 def wav_path_for_segment(segment_id: str, output_dir: Path = VOICEOVER_DIR) -> Path:
@@ -110,6 +111,22 @@ def _wav_duration_seconds(path: Path) -> float:
         return frames / float(rate)
 
 
+def _is_fatal_provider_error(message: str) -> bool:
+    """Whether another local Orpheus request would only worsen the failure."""
+
+    normalized = message.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "timed out",
+            "could not reach orpheus",
+            "returned http",
+            "did not return valid wav",
+            "returned empty audio",
+        )
+    )
+
+
 def synthesize_segment(
     provider: OrpheusProvider,
     segment_id: str,
@@ -160,12 +177,14 @@ def synthesize_segment(
     try:
         audio_bytes = provider.synthesize_speech(text, voice=voice, speed=speed)
     except OrpheusError as exc:
+        message = str(exc)
         return SegmentSynthesisResult(
             segment_id=segment_id,
             wav_path=None,
             duration_seconds=0.0,
             cache_hit=False,
-            error=str(exc),
+            error=message,
+            fatal=_is_fatal_provider_error(message),
         )
 
     wav_path.write_bytes(audio_bytes)
@@ -196,6 +215,8 @@ def synthesize_segments(
     output_dir: Path = VOICEOVER_DIR,
     manifest_path: Path = MANIFEST_PATH,
     force_segment_ids: frozenset[str] = frozenset(),
+    on_segment_start: Callable[[str, int, int], None] | None = None,
+    on_segment_complete: Callable[[SegmentSynthesisResult, int, int], None] | None = None,
 ) -> list[SegmentSynthesisResult]:
     """
     Synthesize every narration-bearing segment from a loaded
@@ -204,33 +225,43 @@ def synthesize_segments(
     blocks are source audio, not narration, and are skipped. Schema-v1
     keeps its existing visual_only behavior.
 
-    One Orpheus-FastAPI failure does not abort the batch: each segment's
-    outcome (including any error) is independent, so one offline/failed
-    segment still lets every other segment synthesize or reuse its cache
-    normally.
+    Segments are intentionally dispatched one at a time for the local
+    single-worker Orpheus backend. Each success reaches the WAV and manifest
+    before the next request begins. A fatal provider failure, including a
+    timeout that can leave the backend busy, stops the batch so we do not add
+    doomed requests to its queue. Cached segments remain reusable next time.
     """
 
-    results = []
-
-    for segment in segments:
-        if (
+    narration_segments = [
+        segment
+        for segment in segments
+        if not (
             segment.get("block_type") == "source_moment"
             or segment.get("presentation_hint") == "visual_only"
-        ):
-            continue
+        )
+    ]
+    results = []
+    total = len(narration_segments)
+
+    for index, segment in enumerate(narration_segments, start=1):
 
         segment_id = segment["segment_id"]
-        results.append(
-            synthesize_segment(
-                provider,
-                segment_id,
-                segment["text"],
-                voice=voice,
-                speed=speed,
-                output_dir=output_dir,
-                manifest_path=manifest_path,
-                force=segment_id in force_segment_ids,
-            )
+        if on_segment_start is not None:
+            on_segment_start(segment_id, index, total)
+        result = synthesize_segment(
+            provider,
+            segment_id,
+            segment["text"],
+            voice=voice,
+            speed=speed,
+            output_dir=output_dir,
+            manifest_path=manifest_path,
+            force=segment_id in force_segment_ids,
         )
+        results.append(result)
+        if on_segment_complete is not None:
+            on_segment_complete(result, index, total)
+        if result.fatal:
+            break
 
     return results

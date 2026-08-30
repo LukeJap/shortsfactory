@@ -8,6 +8,7 @@ from recap_media.orpheus_provider import (
     KNOWN_VOICES,
     OrpheusError,
     OrpheusProvider,
+    SPEECH_TIMEOUT,
     validate_wav_bytes,
 )
 
@@ -170,6 +171,21 @@ def test_synthesize_speech_success_returns_wav_bytes(monkeypatch):
     )
     result = OrpheusProvider().synthesize_speech("Hello there.", voice="tara")
     assert result == wav_bytes
+
+
+def test_synthesize_speech_uses_the_configured_per_request_timeout(monkeypatch):
+    wav_bytes = _make_wav_bytes()
+    observed = {}
+
+    def fake_post(*args, **kwargs):
+        observed["timeout"] = kwargs["timeout"]
+        return FakeResponse(200, content=wav_bytes)
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    OrpheusProvider().synthesize_speech("One request at a time.")
+
+    assert observed["timeout"] == SPEECH_TIMEOUT
 
 
 def test_synthesize_speech_non_200_raises(monkeypatch):

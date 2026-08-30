@@ -34,6 +34,16 @@ DEFAULT_API = os.getenv(
     "http://127.0.0.1:5005",
 ).rstrip("/")
 
+
+def _positive_timeout_from_environment(name: str, default: float) -> float:
+    """Read a per-request timeout without allowing an invalid value to break TTS."""
+
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
 HEALTH_ENDPOINT = "/health"
 VOICES_ENDPOINT = "/v1/audio/voices"
 SPEECH_ENDPOINT = "/v1/audio/speech"
@@ -55,12 +65,12 @@ KNOWN_VOICES = [
 DEFAULT_VOICE = "tara"
 
 READINESS_TIMEOUT = 4.0
-# CPU-only inference for a real multi-sentence segment (no GPU) can take
-# well over a minute -- 60s was cutting off otherwise-successful requests
-# for longer segments (confirmed against a real six-segment recap_script.json
-# acceptance run). 180s leaves comfortable headroom without hiding a truly
-# hung request forever.
-SPEECH_TIMEOUT = 180.0
+# CPU-only inference can take several minutes for one narration block. This
+# remains a per-request ceiling, not a deadline for the whole recap batch.
+SPEECH_TIMEOUT = _positive_timeout_from_environment(
+    "SHORTSFACTORY_ORPHEUS_SPEECH_TIMEOUT",
+    600.0,
+)
 
 
 class OrpheusError(Exception):
@@ -184,7 +194,7 @@ class OrpheusProvider:
             )
         except requests.Timeout as exc:
             raise OrpheusError(
-                f"Orpheus-FastAPI timed out after {timeout:.0f}s generating speech."
+                f"Orpheus-FastAPI timed out after {timeout:.0f}s of active synthesis."
             ) from exc
         except requests.RequestException as exc:
             raise OrpheusError(f"Could not reach Orpheus-FastAPI: {exc}") from exc
