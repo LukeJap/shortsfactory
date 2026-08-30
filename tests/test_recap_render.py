@@ -242,6 +242,23 @@ def test_filter_complex_assembles_all_pieces_without_captions():
     assert audio_label == "recap_playback_audio"
 
 
+def test_filter_complex_applies_a_detected_active_picture_crop_to_all_recap_blocks():
+    portrait = {
+        **_portrait_plan(),
+        "content_y": 555,
+        "content_height": 810,
+        "active_rect": {"x": 240, "y": 0, "width": 1440, "height": 1080},
+        "pillarbox_detection": {"pillarbox_detected": True},
+    }
+
+    filter_complex, _, _ = build_recap_filter_complex(
+        _sequence(), [_voiceover_clip("VO_001", start=0.0)], {"VO_001": 1}, portrait, _duck_plan()
+    )
+
+    assert "[vconcat]crop=1440:1080:240:0[recap_active_src]" in filter_complex
+    assert filter_complex.index("crop=1440:1080:240:0") < filter_complex.index("split=2")
+
+
 def test_filter_complex_includes_captions_when_path_given(tmp_path):
     clips = [_voiceover_clip("VO_001", start=0.0)]
     index_map = {"VO_001": 1}

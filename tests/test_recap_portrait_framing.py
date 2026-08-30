@@ -1,10 +1,14 @@
+import numpy as np
 import pytest
 
+import recap_media.portrait_framing as portrait_framing
 from recap_media.loader import RecapInputError
 from recap_media.portrait_framing import (
     DEFAULT_BLUR_SIGMA,
     build_portrait_filter_chain,
     build_portrait_framing_plan,
+    build_portrait_framing_plan_for_video,
+    detect_pillarbox_active_rect_from_frames,
     load_portrait_framing_plan,
     write_portrait_framing_plan,
 )
@@ -54,6 +58,20 @@ def test_filter_chain_output_label_is_recap_out():
     assert chain.startswith("[0:v]split=2")
 
 
+def test_filter_chain_crops_active_picture_before_background_and_foreground_split():
+    chain = build_portrait_filter_chain(
+        0,
+        555,
+        1080,
+        810,
+        active_rect={"x": 240, "y": 0, "width": 1440, "height": 1080},
+    )
+
+    assert chain.startswith("[0:v]crop=1440:1080:240:0[recap_active_src];")
+    assert chain.index("crop=1440:1080:240:0") < chain.index("split=2")
+    assert "[recap_active_src]split=2" in chain
+
+
 # ============================================================
 # build_portrait_framing_plan: geometry correctness
 # ============================================================
@@ -75,6 +93,93 @@ def test_16_9_source_pillarboxes_left_and_right():
     assert plan["content_height"] == 608  # round(1080 * (1080/1920))
     assert plan["content_width"] == 1080
     assert plan["content_y"] == 656  # (1920 - 608) // 2
+
+
+def test_detects_consistent_baked_pillarboxes_from_multiple_frames():
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    frame[:, 240:1680] = (90, 150, 210)
+
+    detection = detect_pillarbox_active_rect_from_frames([frame] * 6, 1920, 1080)
+
+    assert detection["pillarbox_detected"] is True
+    assert detection["active_rect"] == {"x": 240, "y": 0, "width": 1440, "height": 1080}
+    assert detection["consensus_count"] == 6
+
+
+def test_no_pillarbox_keeps_the_full_frame_active():
+    frame = np.full((180, 320, 3), (80, 110, 140), dtype=np.uint8)
+
+    detection = detect_pillarbox_active_rect_from_frames([frame] * 4, 320, 180)
+
+    assert detection["pillarbox_detected"] is False
+    assert detection["active_rect"] == {"x": 0, "y": 0, "width": 320, "height": 180}
+
+
+def test_dark_full_frame_scene_does_not_be_mistaken_for_pillarboxing():
+    frame = np.full((180, 320, 3), 10, dtype=np.uint8)
+    frame[:, :8] = 30
+    frame[:, -8:] = 30
+
+    detection = detect_pillarbox_active_rect_from_frames([frame] * 4, 320, 180)
+
+    assert detection["pillarbox_detected"] is False
+    assert detection["active_rect"] == {"x": 0, "y": 0, "width": 320, "height": 180}
+
+
+def test_inconsistent_side_boundaries_fall_back_to_the_full_frame():
+    frame_a = np.zeros((180, 320, 3), dtype=np.uint8)
+    frame_b = np.zeros((180, 320, 3), dtype=np.uint8)
+    frame_a[:, 30:290] = (100, 160, 220)
+    frame_b[:, 54:266] = (100, 160, 220)
+
+    detection = detect_pillarbox_active_rect_from_frames(
+        [frame_a, frame_a, frame_b, frame_b], 320, 180
+    )
+
+    assert detection["pillarbox_detected"] is False
+    assert detection["active_rect"] == {"x": 0, "y": 0, "width": 320, "height": 180}
+
+
+def test_active_picture_geometry_fills_width_without_aspect_distortion():
+    plan = build_portrait_framing_plan(
+        1920,
+        1080,
+        active_rect={"x": 240, "y": 0, "width": 1440, "height": 1080},
+    )
+
+    assert plan["content_width"] == 1080
+    assert plan["content_height"] == 810
+    assert plan["content_y"] == 555
+    assert "crop=1440:1080:240:0" in plan["filter_chain"]
+
+
+def test_source_bound_plan_cache_reuses_matching_source_analysis(monkeypatch, tmp_path):
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"source")
+    cache_path = tmp_path / "portrait_framing_plan.json"
+    detection = {
+        "active_rect": {"x": 24, "y": 0, "width": 272, "height": 180},
+        "pillarbox_detected": True,
+        "confidence": 1.0,
+        "method": "test",
+        "sample_count": 4,
+        "candidate_count": 4,
+        "consensus_count": 4,
+    }
+    monkeypatch.setattr(portrait_framing, "ffprobe_source_dimensions", lambda _path: (320, 180))
+    monkeypatch.setattr(
+        portrait_framing, "detect_pillarbox_active_rect_for_video", lambda *_args: detection
+    )
+
+    first = build_portrait_framing_plan_for_video(source, cache_path=cache_path)
+    write_portrait_framing_plan(first, cache_path)
+    monkeypatch.setattr(
+        portrait_framing,
+        "detect_pillarbox_active_rect_for_video",
+        lambda *_args: pytest.fail("matching source should reuse its cached plan"),
+    )
+
+    assert build_portrait_framing_plan_for_video(source, cache_path=cache_path) == first
 
 
 def test_content_rect_never_exceeds_canvas():

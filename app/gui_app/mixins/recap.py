@@ -598,7 +598,10 @@ class RecapMixin:
         self.append_recap_log("Preparing recap render assets...")
         QCoreApplication.processEvents()
         try:
-            portrait_plan = build_portrait_framing_plan_for_video(source_video)
+            portrait_plan = build_portrait_framing_plan_for_video(
+                source_video,
+                cache_path=context.portrait_framing_plan_path,
+            )
             write_portrait_framing_plan(portrait_plan, context.portrait_framing_plan_path)
 
             narration_wavs = {

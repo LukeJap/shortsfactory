@@ -338,6 +338,13 @@ def build_recap_filter_complex(
         active_voiceover_clips, input_index_by_clip_id
     )
 
+    pillarbox_detection = portrait_plan.get("pillarbox_detection")
+    active_rect = (
+        portrait_plan.get("active_rect")
+        if isinstance(pillarbox_detection, dict)
+        and pillarbox_detection.get("pillarbox_detected") is True
+        else None
+    )
     portrait_filter = build_portrait_filter_chain(
         portrait_plan["content_x"],
         portrait_plan["content_y"],
@@ -348,6 +355,7 @@ def build_recap_filter_complex(
         blur_sigma=portrait_plan.get("blur_sigma", 25.0),
         background_dim=portrait_plan.get("background_dim", 0.0),
         input_label=video_label,
+        active_rect=active_rect,
     )
     final_video_label = "recap_out"
     recap_effects = recap_effects or {}

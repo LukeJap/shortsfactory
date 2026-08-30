@@ -146,7 +146,9 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(recap_module, "resolve_recap_source_video", lambda identity: context.source_video)
-    monkeypatch.setattr(recap_module, "build_portrait_framing_plan_for_video", lambda path: {"source": path})
+    monkeypatch.setattr(
+        recap_module, "build_portrait_framing_plan_for_video", lambda path, **_kwargs: {"source": path}
+    )
     monkeypatch.setattr(recap_module, "write_portrait_framing_plan", lambda plan, path: captured.setdefault("portrait_path", path))
 
     def _captions(segments, **kwargs):
@@ -200,7 +202,9 @@ def test_final_render_failure_is_logged_without_touching_cached_voiceover(monkey
     }
 
     monkeypatch.setattr(recap_module, "resolve_recap_source_video", lambda identity: context.source_video)
-    monkeypatch.setattr(recap_module, "build_portrait_framing_plan_for_video", lambda path: {})
+    monkeypatch.setattr(
+        recap_module, "build_portrait_framing_plan_for_video", lambda path, **_kwargs: {}
+    )
     monkeypatch.setattr(recap_module, "write_portrait_framing_plan", lambda *args: None)
     monkeypatch.setattr(recap_module, "build_narration_captions", lambda *args, **kwargs: {"segments": []})
     monkeypatch.setattr(recap_module, "write_narration_captions", lambda *args: None)
