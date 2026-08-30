@@ -5,6 +5,17 @@ writing output/edit_plan.json. This is a preview pass -- apply_smart_edit.py
 (STEP 5) re-derives the authoritative cut list (merging in semantic +
 manual cuts and a pacing safety budget) and re-encodes again, reusing
 this stage's output only when the two cut lists end up identical.
+
+That reuse only fires if this stage's own cut list already reflects
+apply_smart_edit.py's "natural pacing guard" (its removal-budget/minimum-
+spacing cap) -- otherwise a render with no approved semantic/manual cuts
+still ends up computing two different cut lists (this stage's raw pause
+cuts vs. STEP 5's capped ones) and pays for a fully redundant second
+re-encode of the same clip. So this stage applies the exact same guard
+(apply_smart_edit.apply_automatic_cut_safety(), with an empty semantic
+list -- semantic_edit.py hasn't run yet at this point in the pipeline)
+to its own pause cuts before rendering, so the common case (no approved
+semantic/manual cuts) reliably matches and STEP 5 can skip its re-encode.
 """
 
 from __future__ import annotations
@@ -31,6 +42,11 @@ try:
     from .pipeline_paths import EDIT_PLAN_PATH, SUBTITLES_PATH
 except ImportError:
     from pipeline_paths import EDIT_PLAN_PATH, SUBTITLES_PATH
+
+try:
+    from .apply_smart_edit import apply_automatic_cut_safety, extract_pause_cuts
+except ImportError:
+    from apply_smart_edit import apply_automatic_cut_safety, extract_pause_cuts
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -381,6 +397,32 @@ def main() -> int:
         min_gap_to_edit=min_gap_to_edit,
         keep_gap_seconds=keep_gap_seconds,
     )
+
+    # Apply the same natural pacing guard STEP 5 (apply_smart_edit.py)
+    # will apply -- see the module docstring. No semantic cuts exist yet
+    # at this point in the pipeline, so this only ever trims pause cuts
+    # for spacing/removal-budget reasons, the same as STEP 5 will when it
+    # has no approved semantic/manual cuts to merge in either.
+    guarded_pause_cuts, _, pacing_warning = apply_automatic_cut_safety(
+        extract_pause_cuts({"cuts": cuts}),
+        [],
+        duration,
+        profile=profile,
+        energy=energy,
+    )
+    kept_ranges = {
+        (round(float(cut["start"]), 3), round(float(cut["end"]), 3))
+        for cut in guarded_pause_cuts
+    }
+    cuts = [
+        cut
+        for cut in cuts
+        if (round(float(cut["start"]), 3), round(float(cut["end"]), 3)) in kept_ranges
+    ]
+
+    if pacing_warning:
+        print(pacing_warning)
+        print()
 
     keep_ranges = cuts_to_keep_ranges(
         cuts,
