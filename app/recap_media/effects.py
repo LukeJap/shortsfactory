@@ -7,6 +7,7 @@ it does not define a parallel effects vocabulary or renderer.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +26,12 @@ from emoji_planner import build_emoji_candidates
 from make_captions import choose_emoji_events
 from pipeline_paths import RECAP_EDITOR_ASSET_PLAN_PATH, RECAP_EFFECTS_PLAN_PATH
 from recap_media.sequence import voiceover_timing_by_segment
+from recap_media.timeline import (
+    RECAP_PLAYBACK_SPEED,
+    recap_base_to_final_time,
+    recap_final_duration_seconds,
+    recap_final_to_base_time,
+)
 from sfx_engine import (
     candidate_for_event,
     collapse_stacks,
@@ -39,8 +46,10 @@ from visual_fx import build_semantic_moments, expand_moments_to_events, motion_e
 
 
 RECAP_EFFECTS_SCHEMA_VERSION = 1
-RECAP_TIME_BASIS = "recap_base_timeline"
+RECAP_TIME_BASIS = "recap_final_timeline"
+RECAP_BASE_TIME_BASIS = "recap_base_timeline"
 AI_RECAP_ORIGIN = "ai_recap"
+RECAP_EMOJI_TARGET_COUNT = 4
 
 
 class RecapEffectsError(Exception):
@@ -54,11 +63,40 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _convert_event_times(
+    event: dict[str, Any],
+    converter,
+) -> dict[str, Any]:
+    """Copy a timed effect event into another explicit Recap time domain."""
+
+    item = dict(event)
+    start = _as_float(item.get("start"))
+    has_end = "end" in item
+    duration = max(0.0, _as_float(item.get("duration")))
+    end = _as_float(item.get("end"), start + duration)
+    converted_start = converter(start)
+    converted_end = converter(end)
+    item["start"] = converted_start
+    if has_end:
+        item["end"] = max(converted_start, converted_end)
+    if "duration" in item:
+        item["duration"] = round(max(0.0, converted_end - converted_start), 3)
+    return item
+
+
+def _events_in_final_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_convert_event_times(event, recap_base_to_final_time) for event in events]
+
+
+def _events_in_base_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_convert_event_times(event, recap_final_to_base_time) for event in events]
+
+
 def recap_timeline_blocks(
     sequence: dict[str, Any],
     recap_script: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Authoritative final-assembly block windows with story provenance."""
+    """Authoritative final-output block windows with story provenance."""
 
     script_by_id = {
         str(segment.get("segment_id", "") or ""): segment
@@ -84,8 +122,8 @@ def recap_timeline_blocks(
             {
                 "block_id": block_id,
                 "block_type": str(segment.get("block_type", source.get("block_type", "")) or ""),
-                "start": round(start, 3),
-                "end": round(end, 3),
+                "start": recap_base_to_final_time(start),
+                "end": recap_base_to_final_time(end),
                 "beat_ids": [str(beat_id) for beat_id in raw_beat_ids if str(beat_id)],
             }
         )
@@ -220,8 +258,24 @@ def recap_base_timeline_words(
     return sorted(words, key=lambda item: (item["start"], item["end"]))
 
 
-def source_audio_insert_windows(sequence: dict[str, Any]) -> list[tuple[float, float]]:
-    """Output-timeline windows where automatic SFX must stay silent."""
+def recap_final_timeline_words(
+    sequence: dict[str, Any],
+    narration_captions: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Caption words mapped onto the authoritative final Recap timeline."""
+
+    return [
+        {
+            **word,
+            "start": recap_base_to_final_time(_as_float(word.get("start"))),
+            "end": recap_base_to_final_time(_as_float(word.get("end"))),
+        }
+        for word in recap_base_timeline_words(sequence, narration_captions)
+    ]
+
+
+def _base_source_audio_insert_windows(sequence: dict[str, Any]) -> list[tuple[float, float]]:
+    """Assembly-time windows where automatic effects must stay silent."""
 
     windows: list[tuple[float, float]] = []
     cursor = 0.0
@@ -234,6 +288,15 @@ def source_audio_insert_windows(sequence: dict[str, Any]) -> list[tuple[float, f
                 windows.append((start, end))
             cursor = max(cursor, end)
     return windows
+
+
+def source_audio_insert_windows(sequence: dict[str, Any]) -> list[tuple[float, float]]:
+    """Final-output windows where automatic effects must stay silent."""
+
+    return [
+        (recap_base_to_final_time(start), recap_base_to_final_time(end))
+        for start, end in _base_source_audio_insert_windows(sequence)
+    ]
 
 
 def _overlaps_protected_window(event: dict[str, Any], windows: list[tuple[float, float]]) -> bool:
@@ -305,6 +368,75 @@ def _emoji_clips(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clips
 
 
+def recap_emoji_events(
+    sequence: dict[str, Any],
+    narration_captions: dict[str, Any],
+    portrait_plan: dict[str, Any],
+    recap_script: dict[str, Any] | None = None,
+    *,
+    energy: str = DEFAULT_ENERGY,
+    target_count: int = RECAP_EMOJI_TARGET_COUNT,
+) -> list[dict[str, Any]]:
+    """Plan local, caption-safe Recap emoji reactions without changing FX.
+
+    The shared chooser remains responsible for semantic ranking, spacing, and
+    placement. Recap filters its input to already-resolvable local reaction
+    assets before selection, so the planning pass stays offline and every
+    selected entity is renderable without a glyph download.
+    """
+
+    # Preserve existing semantic selection exactly in assembly time, then
+    # publish the selected entities in editor/output time.
+    words = recap_base_timeline_words(sequence, narration_captions)
+    blocks = recap_timeline_blocks(sequence, recap_script)
+    protected_windows = _base_source_audio_insert_windows(sequence)
+    candidates = [
+        candidate
+        for candidate in build_emoji_candidates(words)
+        if resolve_event_asset(candidate) is not None
+    ]
+    events = choose_emoji_events(
+        candidates,
+        words,
+        normalize_energy(energy),
+        min_events=max(1, int(target_count)),
+        caption_anchor_y=_caption_anchor_y(portrait_plan),
+    )
+    events = [
+        event for event in events if not _overlaps_protected_window(event, protected_windows)
+    ]
+    return _annotate_recap_events(_events_in_final_timeline(events), blocks, "emoji")
+
+
+def retune_recap_emoji_plan(
+    effects_plan: dict[str, Any],
+    sequence: dict[str, Any],
+    narration_captions: dict[str, Any],
+    portrait_plan: dict[str, Any],
+    recap_script: dict[str, Any] | None = None,
+    *,
+    target_count: int = RECAP_EMOJI_TARGET_COUNT,
+) -> dict[str, Any]:
+    """Replace only automatic Recap emoji clips in an accepted effect plan."""
+
+    if effects_plan.get("schema_version") != RECAP_EFFECTS_SCHEMA_VERSION:
+        raise RecapEffectsError("recap effects plan has an unsupported schema")
+
+    retuned = copy.deepcopy(effects_plan)
+    energy = normalize_energy(retuned.get("edit_energy", DEFAULT_ENERGY))
+    emoji_events = recap_emoji_events(
+        sequence,
+        narration_captions,
+        portrait_plan,
+        recap_script,
+        energy=energy,
+        target_count=target_count,
+    )
+    automatic = retuned.setdefault("automatic_editor_clips", {})
+    automatic["EMOJI"] = _emoji_clips(emoji_events)
+    return retuned
+
+
 def _sfx_candidates(
     fx_events: list[dict[str, Any]],
     motion_events: list[dict[str, Any]],
@@ -362,41 +494,58 @@ def build_recap_effects_plan(
     """Create automatic shared-effect proposals for a recap base timeline."""
 
     energy = normalize_energy(energy)
+    # Semantic planners retain the existing pre-speed assembly domain so their
+    # selections do not move when the authoritative entity domain changes.
     words = recap_base_timeline_words(sequence, narration_captions)
     duration = max(0.0, _as_float(sequence.get("total_duration_seconds")))
     blocks = recap_timeline_blocks(sequence, recap_script)
-    moments, intensity_curve = build_semantic_moments(words, energy)
-    moments = _annotate_recap_events(moments, blocks, "moment")
-    fx_events = _annotate_recap_events(expand_moments_to_events(moments, energy), blocks, "fx")
-    protected_windows = source_audio_insert_windows(sequence)
-    fx_events = [
-        event for event in fx_events if not _overlaps_protected_window(event, protected_windows)
+    base_moments, base_intensity_curve = build_semantic_moments(words, energy)
+    base_fx_events = expand_moments_to_events(base_moments, energy)
+    base_protected_windows = _base_source_audio_insert_windows(sequence)
+    base_fx_events = [
+        event for event in base_fx_events if not _overlaps_protected_window(event, base_protected_windows)
     ]
+    base_motion_events = motion_events_for_moments(base_moments, duration, energy)
+    base_motion_events = [
+        event
+        for event in base_motion_events
+        if not _overlaps_protected_window(event, base_protected_windows)
+    ]
+    moments = _annotate_recap_events(_events_in_final_timeline(base_moments), blocks, "moment")
+    intensity_curve = _events_in_final_timeline(base_intensity_curve)
+    fx_events = _annotate_recap_events(_events_in_final_timeline(base_fx_events), blocks, "fx")
     motion_events = _annotate_recap_events(
-        motion_events_for_moments(moments, duration, energy), blocks, "motion"
+        _events_in_final_timeline(base_motion_events), blocks, "motion"
     )
-    motion_events = [
-        event for event in motion_events if not _overlaps_protected_window(event, protected_windows)
-    ]
-    emoji_events = choose_emoji_events(
+    # Keep the established SFX selection input unchanged.  Emoji density is
+    # Recap-only and must not cause the seven accepted SFX choices to move.
+    emoji_events_for_sfx = choose_emoji_events(
         build_emoji_candidates(words),
         words,
         energy,
         caption_anchor_y=_caption_anchor_y(portrait_plan),
     )
-    emoji_events = [
-        event for event in emoji_events if not _overlaps_protected_window(event, protected_windows)
+    emoji_events_for_sfx = [
+        event
+        for event in emoji_events_for_sfx
+        if not _overlaps_protected_window(event, base_protected_windows)
     ]
-    emoji_events = _annotate_recap_events(emoji_events, blocks, "emoji")
+    emoji_events = recap_emoji_events(
+        sequence,
+        narration_captions,
+        portrait_plan,
+        recap_script,
+        energy=energy,
+    )
 
     selected_sfx = select_events(
-        _sfx_candidates(fx_events, motion_events, emoji_events),
+        _sfx_candidates(base_fx_events, base_motion_events, emoji_events_for_sfx),
         energy,
         selection_start=0.0,
         selection_end=duration,
     )
     selected_sfx = [
-        event for event in selected_sfx if not _overlaps_protected_window(event, protected_windows)
+        event for event in selected_sfx if not _overlaps_protected_window(event, base_protected_windows)
     ]
     warnings: list[str] = []
     prepared_sfx, skipped_sfx = prepare_events(
@@ -405,7 +554,7 @@ def build_recap_effects_plan(
         index_local_assets(),
         warnings,
     )
-    prepared_sfx = _annotate_recap_events(prepared_sfx, blocks, "sfx")
+    prepared_sfx = _annotate_recap_events(_events_in_final_timeline(prepared_sfx), blocks, "sfx")
     sfx_clips = []
     for event in prepared_sfx:
         clip = sfx_clip_from_event(event)
@@ -425,10 +574,11 @@ def build_recap_effects_plan(
         "render_enabled": False,
         "edit_energy": energy,
         "base_timeline_duration_seconds": round(duration, 3),
+        "final_timeline_duration_seconds": recap_final_duration_seconds(duration),
         "timeline_blocks": blocks,
         "source_audio_insert_windows": [
             {"start": round(start, 3), "end": round(end, 3)}
-            for start, end in protected_windows
+            for start, end in source_audio_insert_windows(sequence)
         ],
         "visual_fx": {
             "moments": moments,
@@ -536,6 +686,39 @@ def create_recap_effects_plan(
         effects_path=effects_path,
         editor_plan_path=editor_plan_path,
     )
+
+
+def recap_effects_for_render(
+    recap_effects: dict[str, Any],
+    *,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
+) -> dict[str, Any]:
+    """Adapt final editor entities to the renderer's pre-speed filter time.
+
+    Older persisted Phase 6 plans explicitly identify the former base domain;
+    retain that input unchanged so an existing plan can still be rendered.
+    Direct callers without a time basis also retain the historical base-time
+    default for compatibility.
+    """
+
+    basis = str(recap_effects.get("time_basis", RECAP_BASE_TIME_BASIS) or RECAP_BASE_TIME_BASIS)
+    if basis == RECAP_BASE_TIME_BASIS:
+        return dict(recap_effects)
+    if basis != RECAP_TIME_BASIS:
+        raise RecapEffectsError(f"Unsupported recap effects time basis: {basis!r}")
+
+    def to_base(event: dict[str, Any]) -> dict[str, Any]:
+        return _convert_event_times(
+            event,
+            lambda value: recap_final_to_base_time(value, playback_speed),
+        )
+
+    adapted = dict(recap_effects)
+    for field in ("visual_fx_events", "motion_events", "sfx_events", "emoji_events"):
+        events = recap_effects.get(field, [])
+        adapted[field] = [to_base(event) for event in events if isinstance(event, dict)]
+    adapted["time_basis"] = RECAP_BASE_TIME_BASIS
+    return adapted
 
 
 def load_recap_effects(

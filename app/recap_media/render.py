@@ -50,8 +50,10 @@ from recap_media.effects import (
     RecapEffectsError,
     create_recap_effects_plan,
     load_recap_effects,
+    recap_effects_for_render,
 )
 from recap_media.portrait_framing import build_portrait_filter_chain
+from recap_media.timeline import RECAP_PLAYBACK_SPEED, recap_final_duration_seconds
 from recap_media.voiceover import wav_path_for_segment
 from smart_motion import x_expression, y_expression, zoom_expression
 from sfx_engine import build_sfx_mix_filter_complex
@@ -62,7 +64,6 @@ class RecapRenderError(Exception):
     """The recap render command could not be built or failed to run."""
 
 
-RECAP_PLAYBACK_SPEED = 1.5
 DEFAULT_RECAP_TIMELINE_FPS = 24000 / 1001
 DEFAULT_NARRATION_PITCH_SEMITONES = 1.8
 DEFAULT_SOURCE_PITCH_SEMITONES = 1.8
@@ -142,7 +143,10 @@ def final_recap_duration_seconds(
 ) -> float:
     """Output duration after the final composite speed transform."""
 
-    return round(max(0.0, float(base_duration_seconds)) / _validated_playback_speed(playback_speed), 3)
+    return recap_final_duration_seconds(
+        base_duration_seconds,
+        _validated_playback_speed(playback_speed),
+    )
 
 
 def recap_timeline_fps(source_video: Path) -> float:
@@ -503,7 +507,10 @@ def build_recap_filter_complex(
         pre_split_filters=polish_filters(PRODUCTION_POLISH_PRESET),
     )
     final_video_label = "recap_out"
-    recap_effects = recap_effects or {}
+    recap_effects = recap_effects_for_render(
+        recap_effects or {},
+        playback_speed=playback_speed,
+    )
     visual_fx_events = recap_effects.get("visual_fx_events", [])
     if not isinstance(visual_fx_events, list):
         visual_fx_events = []

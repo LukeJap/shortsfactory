@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from editor_asset_plan import load_editor_asset_plan, save_editor_asset_plan
 from recap_media.effects import (
     AI_RECAP_ORIGIN,
@@ -9,10 +11,14 @@ from recap_media.effects import (
     build_recap_effects_plan,
     load_recap_effects,
     recap_base_timeline_words,
+    recap_effects_for_render,
+    recap_emoji_events,
     recap_timeline_blocks,
+    retune_recap_emoji_plan,
     source_audio_insert_windows,
     write_recap_effects_plan,
 )
+from recap_media.timeline import recap_base_to_final_time, recap_final_duration_seconds
 
 
 def _sequence():
@@ -78,6 +84,46 @@ def _recap_script():
     }
 
 
+def _emoji_density_sequence():
+    return {
+        "total_duration_seconds": 32.0,
+        "segments": [
+            {
+                "segment_id": "VO_001",
+                "order": 1,
+                "narration_duration_seconds": 32.0,
+                "timeline_duration_seconds": 32.0,
+                "presentation_hint": "narration_over_source",
+                "beat_ids": ["B001"],
+                "shots": [
+                    {
+                        "timeline_start_seconds": 0.0,
+                        "timeline_end_seconds": 32.0,
+                        "timeline_duration_seconds": 32.0,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _emoji_density_captions():
+    return {
+        "schema_version": 1,
+        "segments": [
+            {
+                "segment_id": "VO_001",
+                "words": [
+                    {"text": "first", "start": 0.0, "end": 0.3},
+                    {"text": "second", "start": 8.0, "end": 8.3},
+                    {"text": "third", "start": 16.0, "end": 16.3},
+                    {"text": "fourth", "start": 24.0, "end": 24.3},
+                ],
+            }
+        ],
+    }
+
+
 def _prepared_emoji(events):
     return [
         {
@@ -112,10 +158,55 @@ def test_recap_timeline_blocks_uses_sequence_windows_and_script_beats():
             "block_id": "VO_001",
             "block_type": "narration",
             "start": 0.0,
-            "end": 6.0,
+            "end": 4.0,
             "beat_ids": ["B001", "B002"],
         }
     ]
+
+
+def test_recap_effect_entities_use_final_output_timeline_and_stay_in_bounds(monkeypatch):
+    monkeypatch.setattr("recap_media.effects.prepare_emoji_events", _prepared_emoji)
+    monkeypatch.setattr(
+        "recap_media.effects.prepare_events",
+        lambda events, _energy, _assets, _warnings: (
+            [{**event, "duration": 0.2, "asset_path": "assets/sfx/ding.mp3"} for event in events],
+            [],
+        ),
+    )
+    plan = build_recap_effects_plan(_sequence(), _captions(), _portrait_plan(), _recap_script())
+    final_duration = recap_final_duration_seconds(_sequence()["total_duration_seconds"])
+
+    assert plan["time_basis"] == RECAP_TIME_BASIS
+    assert plan["final_timeline_duration_seconds"] == final_duration
+    timed_families = [
+        plan["visual_fx"]["events"],
+        plan["visual_fx"]["motion_events"],
+        plan["sfx"]["events"],
+        plan["automatic_editor_clips"]["EMOJI"],
+    ]
+    for events in timed_families:
+        for event in events:
+            start = float(event["start"])
+            end = float(event.get("end", start + event.get("duration", 0.0)))
+            assert 0.0 <= start < end <= final_duration + 0.001
+
+
+def test_final_timeline_effects_round_trip_to_existing_base_render_domain():
+    final_start = recap_base_to_final_time(84.0)
+    authoritative = {
+        "time_basis": RECAP_TIME_BASIS,
+        "visual_fx_events": [{"start": final_start, "end": final_start + 0.4}],
+        "motion_events": [{"start": final_start, "end": final_start + 0.4}],
+        "sfx_events": [{"start": final_start, "duration": 0.2}],
+        "emoji_events": [{"start": final_start, "end": final_start + 1.0}],
+    }
+
+    render_effects = recap_effects_for_render(authoritative)
+
+    assert final_start == pytest.approx(56.0)
+    for family in ("visual_fx_events", "motion_events", "sfx_events", "emoji_events"):
+        assert render_effects[family][0]["start"] == pytest.approx(84.0)
+    assert render_effects["sfx_events"][0]["duration"] == pytest.approx(0.3)
 
 
 def test_recap_adapter_reuses_shared_entity_schemas_and_protects_dialogue(monkeypatch):
@@ -340,3 +431,113 @@ def test_explicit_render_opt_in_uses_shared_entities_without_promoting_plan(tmp_
     assert [event["id"] for event in renderable["emoji_events"]] == ["emoji_01"]
     assert renderable["sfx_events"][0]["start"] == 1.25
     assert renderable["emoji_events"][0]["start"] == 1.25
+
+
+def test_recap_emoji_retune_targets_four_local_events_without_replanning_other_families(
+    monkeypatch, tmp_path
+):
+    local_assets = [tmp_path / f"reaction_{index}.png" for index in range(4)]
+    for asset in local_assets:
+        asset.write_bytes(b"asset")
+    candidates = [
+        {
+            "start": index * 8.0,
+            "end": index * 8.0 + 0.3,
+            "emoji": f"reaction {index}",
+            "matched_word": f"moment_{index}",
+            "asset_path": str(asset),
+            "asset_description": f"reaction {index}",
+        }
+        for index, asset in enumerate(local_assets)
+    ]
+    candidates.append({"start": 28.0, "end": 28.3, "emoji": "network glyph"})
+    monkeypatch.setattr("recap_media.effects.build_emoji_candidates", lambda _words: candidates)
+    monkeypatch.setattr(
+        "recap_media.effects.resolve_event_asset",
+        lambda event: Path(event["asset_path"]) if event.get("asset_path") else None,
+    )
+
+    sequence = _emoji_density_sequence()
+    captions = _emoji_density_captions()
+    emoji_events = recap_emoji_events(sequence, captions, _portrait_plan(), _recap_script())
+    assert len(emoji_events) == 4
+    assert [event["matched_word"] for event in emoji_events] == [
+        "moment_0",
+        "moment_1",
+        "moment_2",
+        "moment_3",
+    ]
+    for event in emoji_events:
+        assert event["origin"] == AI_RECAP_ORIGIN
+        assert event["block_id"] == "VO_001"
+        assert event["beat_ids"] == ["B001"]
+        assert event["reason"] == "ai_recap_emoji"
+
+    base_plan = build_recap_effects_plan(
+        sequence, captions, _portrait_plan(), _recap_script(), energy="PUNCHY"
+    )
+    assert len(base_plan["automatic_editor_clips"]["EMOJI"]) == 4
+    base_plan["sfx"] = {"events": [{"id": "sfx_keep"}], "skipped": [], "warnings": []}
+    base_plan["automatic_editor_clips"]["SFX"] = [{"id": "sfx_clip_keep", "kind": "SFX"}]
+    base_plan["visual_fx"] = {
+        "events": [{"id": "fx_keep"}],
+        "motion_events": [{"id": "motion_keep"}],
+    }
+
+    first = retune_recap_emoji_plan(base_plan, sequence, captions, _portrait_plan(), _recap_script())
+    second = retune_recap_emoji_plan(base_plan, sequence, captions, _portrait_plan(), _recap_script())
+
+    assert first["automatic_editor_clips"]["EMOJI"] == second["automatic_editor_clips"]["EMOJI"]
+    assert len(first["automatic_editor_clips"]["EMOJI"]) == 4
+    assert first["sfx"] == base_plan["sfx"]
+    assert first["automatic_editor_clips"]["SFX"] == base_plan["automatic_editor_clips"]["SFX"]
+    assert first["visual_fx"] == base_plan["visual_fx"]
+    assert base_plan["automatic_editor_clips"]["EMOJI"] == first["automatic_editor_clips"]["EMOJI"]
+
+
+def test_recap_emoji_retune_preserves_manual_emoji_clips(tmp_path, monkeypatch):
+    asset = tmp_path / "reaction.png"
+    asset.write_bytes(b"asset")
+    monkeypatch.setattr(
+        "recap_media.effects.build_emoji_candidates",
+        lambda _words: [
+            {
+                "start": index * 8.0,
+                "end": index * 8.0 + 0.3,
+                "emoji": f"reaction {index}",
+                "matched_word": f"moment_{index}",
+                "asset_path": str(asset),
+                "asset_description": "reaction",
+            }
+            for index in range(4)
+        ],
+    )
+    monkeypatch.setattr("recap_media.effects.resolve_event_asset", lambda _event: asset)
+
+    sequence = _emoji_density_sequence()
+    captions = _emoji_density_captions()
+    base_plan = build_recap_effects_plan(sequence, captions, _portrait_plan(), _recap_script())
+    retuned = retune_recap_emoji_plan(base_plan, sequence, captions, _portrait_plan(), _recap_script())
+    effects_path = tmp_path / "effects_plan.json"
+    editor_plan_path = tmp_path / "editor_asset_plan.json"
+    write_recap_effects_plan(retuned, effects_path=effects_path, editor_plan_path=editor_plan_path)
+
+    editor_plan = load_editor_asset_plan(editor_plan_path)
+    editor_plan["clips"].append(
+        {
+            "id": "manual_emoji_keep",
+            "kind": "EMOJI",
+            "time_basis": RECAP_TIME_BASIS,
+            "start": 30.0,
+            "end": 31.0,
+            "asset_path": str(asset),
+            "active": True,
+            "manual_override": True,
+            "origin": "manual",
+        }
+    )
+    save_editor_asset_plan(editor_plan, editor_plan_path)
+
+    write_recap_effects_plan(retuned, effects_path=effects_path, editor_plan_path=editor_plan_path)
+    persisted = load_editor_asset_plan(editor_plan_path)
+    assert any(clip["id"] == "manual_emoji_keep" for clip in persisted["clips"])

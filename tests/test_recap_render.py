@@ -8,6 +8,7 @@ import wave
 import pytest
 
 from base_video_polish import PRODUCTION_POLISH_PRESET, polish_filters
+from recap_media.effects import RECAP_TIME_BASIS
 from recap_media.render import (
     DEFAULT_RECAP_TIMELINE_FPS,
     DEFAULT_NARRATION_PITCH_SEMITONES,
@@ -32,6 +33,7 @@ from recap_media.render import (
     render_recap,
     resolve_recap_source_video,
 )
+from recap_media.timeline import recap_base_to_final_time
 
 
 def _shots():
@@ -500,6 +502,57 @@ def test_shared_effect_timestamps_stay_on_the_recap_base_timeline(tmp_path):
     assert "between(t,11.65,13.15)" in filter_complex
     assert "adelay=11570|11570" in filter_complex
     assert filter_complex.index("between(t,11.65,13.15)") < filter_complex.index("setpts=PTS/1.500")
+
+
+def test_final_editor_effect_timestamps_are_adapted_before_the_speed_filter(tmp_path):
+    clips = [_voiceover_clip("VO_001", start=0.0)]
+    ass_path = tmp_path / "narration.ass"
+    effects = {
+        "time_basis": RECAP_TIME_BASIS,
+        "visual_fx_events": [
+            {
+                "type": "filter",
+                "effect": "impact_punch",
+                "start": recap_base_to_final_time(11.65),
+                "end": recap_base_to_final_time(12.15),
+            }
+        ],
+        "motion_events": [
+            {
+                "start": recap_base_to_final_time(11.57),
+                "end": recap_base_to_final_time(12.33),
+                "zoom": 1.08,
+                "movement": "punch_in",
+            }
+        ],
+        "sfx_events": [
+            {
+                "start": recap_base_to_final_time(11.57),
+                "duration": recap_base_to_final_time(0.2),
+                "volume": 0.2,
+                "trim_in": 0.0,
+                "asset_path": str(tmp_path / "ding.mp3"),
+            }
+        ],
+        "emoji_events": [
+            {
+                "path": tmp_path / "emoji.png",
+                "start": recap_base_to_final_time(11.65),
+                "end": recap_base_to_final_time(13.15),
+                "position_x": 0.2,
+                "position_y": 0.3,
+            }
+        ],
+    }
+
+    filter_complex, _, _ = build_recap_filter_complex(
+        _sequence(), clips, {"VO_001": 1}, _portrait_plan(), _duck_plan(), ass_path,
+        recap_effects=effects,
+    )
+
+    assert "between(t,11.651,13.15)" in filter_complex
+    assert "adelay=11569|11569" in filter_complex
+    assert filter_complex.index("between(t,11.651,13.15)") < filter_complex.index("setpts=PTS/1.500")
 
 
 def test_motion_adapter_preserves_two_source_moments_in_the_assembled_video(tmp_path):
