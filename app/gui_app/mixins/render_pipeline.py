@@ -53,6 +53,15 @@ def strip_ffmpeg_banner(text: str) -> str:
 
 class RenderPipelineMixin:
 
+    def is_recap_editor_export(self) -> bool:
+        """An explicit editor context, never a filename heuristic, controls routing."""
+
+        return bool(
+            getattr(self, "recap_editor_mode", False)
+            and getattr(self, "recap_editor_effects_path", None)
+            and getattr(self, "recap_editor_asset_plan_path", None)
+        )
+
     def reset_render_log_file(self):
         """
         Start a fresh output/render_log.txt for this render. Overwritten
@@ -725,6 +734,10 @@ class RenderPipelineMixin:
         if not self.video_path:
             return
 
+        if self.is_recap_editor_export():
+            self.start_recap_editor_export()
+            return
+
         if self.end_ms <= self.start_ms:
             self.render_log.append(
                 "ERROR: Please select a valid start and end point."
@@ -1070,6 +1083,12 @@ class RenderPipelineMixin:
         exit_code: int,
         exit_status,
     ):
+
+        if getattr(self, "recap_export_in_progress", False):
+            self.recap_export_in_progress = False
+            if exit_code == 0:
+                self.finish_recap_editor_export()
+                return
 
         if exit_code == 0:
 

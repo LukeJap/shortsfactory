@@ -239,6 +239,46 @@ def _patch_external_context(monkeypatch, tmp_path, script=None):
     return calls
 
 
+def _write_editor_ready_artifacts(context: RecapArtifactContext, script: dict):
+    context.root.mkdir(parents=True, exist_ok=True)
+    context.final_recap_path.write_bytes(b"existing recap")
+    context.recap_sequence_path.write_text(
+        json.dumps(
+            {
+                "total_duration_seconds": 9.0,
+                "segments": [
+                    {"segment_id": segment["segment_id"], "order": segment["order"]}
+                    for segment in script["segments"]
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    context.effects_plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "time_basis": "recap_final_timeline",
+                "editor_asset_plan_path": str(context.editor_asset_plan_path),
+                "visual_fx": {"events": [], "motion_events": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    context.editor_asset_plan_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_video": str(context.final_recap_path),
+                "selection_start": 0.0,
+                "selection_end": 6.0,
+                "clips": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_standard_short_and_recap_switch_preserve_normal_short_state():
     window = _RecapWindow()
 
@@ -328,6 +368,29 @@ def test_valid_external_import_reports_block_counts_and_ordered_preview(monkeypa
         "N_002",
     ]
     assert "The letter changes everything." in window.recap_script_preview.items[0]
+
+
+def test_valid_external_import_enables_editor_for_existing_source_bound_recap(monkeypatch, tmp_path):
+    _patch_external_context(monkeypatch, tmp_path)
+    window = _RecapWindow()
+    context = recap_module.resolve_recap_artifact_context(window.video_path)
+    _write_editor_ready_artifacts(context, _external_script())
+
+    assert window.import_external_recap_script(tmp_path / "external.json") is True
+
+    assert window.recap_open_editor_button.enabled is True
+    assert [item["segment_id"] for item in window.recap_sequence["segments"]] == [
+        item["segment_id"] for item in _external_script()["segments"]
+    ]
+
+
+def test_valid_external_import_does_not_enable_editor_without_ready_artifacts(monkeypatch, tmp_path):
+    _patch_external_context(monkeypatch, tmp_path)
+    window = _RecapWindow()
+
+    assert window.import_external_recap_script(tmp_path / "external.json") is True
+
+    assert window.recap_open_editor_button.enabled is False
 
 
 def test_invalid_external_import_surfaces_readable_error(monkeypatch, tmp_path):

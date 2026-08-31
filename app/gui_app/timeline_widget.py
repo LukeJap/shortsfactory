@@ -1388,7 +1388,7 @@ class SuggestionSlider(QSlider):
                 max_rows=2,
             )
 
-        if kind == "AI_VISUAL":
+        if kind in {"AI_VISUAL", "RECAP_VISUAL_FX", "RECAP_MOTION"}:
             return self._stacked_asset_lane(
                 clip,
                 kind,

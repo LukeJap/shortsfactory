@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from editor_asset_plan import save_editor_asset_plan
 import gui_app.mixins.recap as recap_module
 from recap_media.artifacts import RecapArtifactContext
 from recap_media.loader import RecapInputs
@@ -125,6 +127,204 @@ def test_generate_recap_continues_from_voiceover_to_final_render():
     assert calls == ["Generating recap sequence...", "sequence", "voiceover", "render"]
 
 
+def test_open_recap_in_editor_loads_the_recap_owned_shared_asset_plan(tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    context.final_recap_path.write_bytes(b"preview")
+    context.editor_base_recap_path.write_bytes(b"caption-free preview")
+    context.editor_base_metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": recap_module.RECAP_EDITOR_BASE_SCHEMA_VERSION,
+                "kind": "ai_recap_clean_editor_base",
+                "time_basis": "recap_final_timeline",
+                "editable_overlays_baked": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_editor_asset_plan(
+        {
+            "version": 1,
+            "source_video": str(context.final_recap_path),
+            "selection_start": 0.0,
+            "selection_end": 6.0,
+            "clips": [
+                {"id": "sfx", "kind": "SFX", "start": 1.0, "end": 1.2},
+                {"id": "emoji", "kind": "EMOJI", "start": 2.0, "end": 3.0},
+                {"id": "motion", "kind": "RECAP_MOTION", "start": 3.0, "end": 3.5},
+                {"id": "fx", "kind": "RECAP_VISUAL_FX", "start": 4.0, "end": 4.5},
+            ],
+        },
+        context.editor_asset_plan_path,
+    )
+    window = _RecapWindow(context, _inputs())
+    window.recap_sequence = {"total_duration_seconds": 9.0, "segments": [{"segment_id": "N_001"}]}
+    opened: list[Path] = []
+    window.load_video = lambda path: opened.append(path)
+
+    recap_module.RecapMixin.open_recap_in_editor(window)
+
+    assert opened == [context.editor_base_recap_path]
+    assert window.recap_editor_asset_context == (str(context.final_recap_path), 0.0, 6.0)
+    assert {clip["kind"] for clip in window.editor_asset_plan["clips"]} == {
+        "SFX", "EMOJI", "RECAP_MOTION", "RECAP_VISUAL_FX"
+    }
+
+
+def test_open_recap_in_editor_builds_missing_caption_free_base_before_switching_media(
+    monkeypatch,
+    tmp_path,
+):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    context.final_recap_path.write_bytes(b"captioned recap")
+    save_editor_asset_plan(
+        {
+            "version": 1,
+            "source_video": str(context.final_recap_path),
+            "selection_start": 0.0,
+            "selection_end": 6.0,
+            "clips": [],
+        },
+        context.editor_asset_plan_path,
+    )
+    window = _RecapWindow(context, _inputs())
+    window.recap_sequence = {
+        "total_duration_seconds": 9.0,
+        "segments": [
+            {"segment_id": "N_001"},
+            {"segment_id": "S_001"},
+            {"segment_id": "N_002"},
+        ],
+    }
+    ensured: list[tuple[dict, Path]] = []
+
+    def _ensure(_self, received_context, sequence, *_args):
+        ensured.append((sequence, received_context.editor_base_recap_path))
+        received_context.editor_base_recap_path.write_bytes(b"caption-free recap")
+        return received_context.editor_base_recap_path
+
+    monkeypatch.setattr(recap_module.RecapMixin, "_ensure_recap_editor_base", _ensure)
+    opened: list[Path] = []
+    window.load_video = lambda path: opened.append(Path(path))
+
+    recap_module.RecapMixin.open_recap_in_editor(window)
+
+    assert ensured == [(window.recap_sequence, context.editor_base_recap_path)]
+    assert opened == [context.editor_base_recap_path]
+    assert opened[0] != context.source_video
+    assert [item["segment_id"] for item in ensured[0][0]["segments"]] == [
+        "N_001",
+        "S_001",
+        "N_002",
+    ]
+
+
+def test_missing_editor_base_render_uses_persisted_assembled_inputs_without_captions(
+    monkeypatch,
+    tmp_path,
+):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+    sequence = {
+        "total_duration_seconds": 9.0,
+        "segments": [
+            {"segment_id": "N_001", "order": 1, "shots": []},
+            {"segment_id": "S_001", "order": 2, "shots": []},
+            {"segment_id": "N_002", "order": 3, "shots": []},
+        ],
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(recap_module, "load_portrait_framing_plan", lambda _path: {"filter_chain": "portrait"})
+    monkeypatch.setattr(recap_module, "load_duck_plan", lambda _path: {"narration_keyframes": []})
+    monkeypatch.setattr(
+        window,
+        "_editor_base_voiceover_clips",
+        lambda *_args: [{"id": "N_001", "kind": "VOICEOVER", "active": True}],
+    )
+
+    def _render(identity, received_sequence, clips, portrait, duck, **kwargs):
+        captured.update(
+            identity=identity,
+            sequence=received_sequence,
+            clips=clips,
+            portrait=portrait,
+            duck=duck,
+            kwargs=kwargs,
+        )
+        kwargs["output_path"].write_bytes(b"caption-free recap")
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(recap_module, "render_recap", _render)
+
+    result = window._ensure_recap_editor_base(
+        context,
+        sequence,
+        context.effects_plan_path,
+        context.editor_asset_plan_path,
+    )
+
+    assert result == context.editor_base_recap_path
+    assert [item["segment_id"] for item in captured["sequence"]["segments"]] == [
+        "N_001",
+        "S_001",
+        "N_002",
+    ]
+    assert captured["kwargs"] == {
+        "output_path": context.editor_base_recap_path,
+        "captions_ass_path": None,
+        "allow_captionless": True,
+        "recap_effects": recap_module._clean_recap_editor_effects(),
+        "voiceover_dir": context.voiceover_dir,
+        "narration_pitch_semitones": 1.8,
+        "source_pitch_semitones": 1.8,
+    }
+
+
+def test_empty_editor_base_is_rebuilt_instead_of_being_loaded(monkeypatch, tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    context.editor_base_recap_path.write_bytes(b"")
+    window = _RecapWindow(context, _inputs())
+    sequence = {"segments": []}
+
+    monkeypatch.setattr(recap_module, "load_portrait_framing_plan", lambda _path: {"filter_chain": "portrait"})
+    monkeypatch.setattr(recap_module, "load_duck_plan", lambda _path: {"narration_keyframes": []})
+    monkeypatch.setattr(window, "_editor_base_voiceover_clips", lambda *_args: [])
+    monkeypatch.setattr(recap_module, "load_recap_effects", lambda **_kwargs: {})
+    calls: list[Path] = []
+
+    def _render(*_args, **kwargs):
+        calls.append(kwargs["output_path"])
+        kwargs["output_path"].write_bytes(b"rebuilt recap")
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(recap_module, "render_recap", _render)
+
+    assert window._ensure_recap_editor_base(
+        context,
+        sequence,
+        context.effects_plan_path,
+        context.editor_asset_plan_path,
+    ) == context.editor_base_recap_path
+    assert calls == [context.editor_base_recap_path]
+
+
+def test_editor_base_media_keeps_its_source_bound_recap_context(tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    context.editor_base_recap_path.write_bytes(b"caption-free recap")
+    window = _RecapWindow(context, _inputs())
+    window.video_path = context.editor_base_recap_path
+    window.recap_editor_mode = True
+
+    assert window._active_recap_artifact_context() is context
+
+
 def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, tmp_path):
     context = _context(tmp_path)
     inputs = _inputs()
@@ -157,7 +357,8 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
 
     monkeypatch.setattr(recap_module, "build_narration_captions", _captions)
     monkeypatch.setattr(recap_module, "write_narration_captions", lambda captions, path: captured.setdefault("captions_path", path))
-    monkeypatch.setattr(recap_module, "write_narration_captions_ass_file", lambda captions, clips, path, portrait: captured.setdefault("ass_path", path))
+    monkeypatch.setattr(recap_module, "write_combined_recap_caption_plan", lambda plan, path: captured.setdefault("combined_path", path))
+    monkeypatch.setattr(recap_module, "write_combined_recap_caption_ass", lambda plan, path: captured.setdefault("ass_path", path))
     monkeypatch.setattr(recap_module, "build_duck_plan", lambda sequence: {"narration_keyframes": []})
     monkeypatch.setattr(recap_module, "write_duck_plan", lambda plan, path: captured.setdefault("duck_path", path))
 
@@ -179,7 +380,13 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
     assert captured["render_kwargs"] == {
         "captions_ass_path": context.narration_captions_ass_path,
         "output_path": context.final_recap_path,
-        "recap_effects": {},
+        "recap_effects": {
+            "visual_fx_events": [],
+            "motion_events": [],
+            "sfx_events": [],
+            "emoji_events": [],
+            "time_basis": "recap_final_timeline",
+        },
         "voiceover_dir": context.voiceover_dir,
         "narration_pitch_semitones": 1.8,
         "source_pitch_semitones": 1.8,

@@ -30,6 +30,7 @@ it does not re-cascade every later segment's cumulative position; run
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QUrl
@@ -45,14 +46,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from editor_asset_plan import clips_of_kind, replace_kind_clips, upsert_clip
-from recap_media.artifacts import RecapArtifactContext, resolve_recap_artifact_context
-from recap_media.audio_mix import build_duck_plan, write_duck_plan
+from editor_asset_plan import clips_of_kind, load_editor_asset_plan, replace_kind_clips, upsert_clip
+from recap_media.artifacts import (
+    RecapArtifactContext,
+    resolve_recap_artifact_context,
+    resolve_recap_editor_plan_paths,
+)
+from recap_media.audio_mix import build_duck_plan, load_duck_plan, write_duck_plan
 from recap_media.caption_alignment import (
     build_narration_captions,
     write_narration_captions,
     write_narration_captions_ass_file,
 )
+from recap_media.combined_captions import (
+    build_combined_recap_caption_plan,
+    load_combined_recap_caption_plan,
+    write_combined_recap_caption_ass,
+    write_combined_recap_caption_plan,
+)
+from recap_media.effects import (
+    RecapEffectsError,
+    create_recap_effects_plan,
+    load_recap_effects,
+    write_recap_effects_plan,
+)
+from recap_media.timeline import recap_final_duration_seconds
 from recap_media.loader import (
     RecapInputError,
     RecapInputs,
@@ -64,6 +82,7 @@ from recap_media.loader import (
 from recap_media.orpheus_provider import DEFAULT_VOICE, KNOWN_VOICES, OrpheusProvider
 from recap_media.portrait_framing import (
     build_portrait_framing_plan_for_video,
+    load_portrait_framing_plan,
     write_portrait_framing_plan,
 )
 from recap_media.render import (
@@ -87,6 +106,21 @@ from recap_media.voiceover import (
     wav_path_for_segment,
 )
 
+
+RECAP_EDITOR_BASE_SCHEMA_VERSION = 1
+
+
+def _clean_recap_editor_effects() -> dict:
+    """The editor base intentionally excludes every editable overlay."""
+
+    return {
+        "visual_fx_events": [],
+        "motion_events": [],
+        "sfx_events": [],
+        "emoji_events": [],
+        "time_basis": "recap_final_timeline",
+    }
+
 from ..settings_keys import (
     RECAP_NARRATION_PITCH_SEMITONES,
     RECAP_SOURCE_PITCH_SEMITONES,
@@ -95,6 +129,7 @@ from ..settings_keys import (
     RECAP_TARGET_DURATION_SECONDS,
     RECAP_VOICE,
 )
+from ..constants import ROOT
 
 def _recap_source_filename(episode_identity: dict) -> str | None:
     query = episode_identity.get("query")
@@ -145,6 +180,11 @@ class RecapMixin:
         """Drop recap state when the editor source changes."""
 
         self.recap_artifact_context = None
+        self.recap_existing_editor_assets = None
+        self.recap_editor_mode = False
+        self.recap_editor_effects_path = None
+        self.recap_editor_asset_plan_path = None
+        self.recap_editor_asset_context = None
         self.recap_active_inputs = None
         self.recap_active_script = None
         self.recap_external_script_path = None
@@ -166,7 +206,16 @@ class RecapMixin:
 
         source = source.expanduser().resolve(strict=False)
         active = getattr(self, "recap_artifact_context", None)
-        if isinstance(active, RecapArtifactContext) and active.source_video == source:
+        if isinstance(active, RecapArtifactContext) and (
+            active.source_video == source
+            or (
+                getattr(self, "recap_editor_mode", False)
+                and source in {
+                    active.final_recap_path,
+                    active.editor_base_recap_path,
+                }
+            )
+        ):
             return active
 
         context = resolve_recap_artifact_context(source)
@@ -393,9 +442,11 @@ class RecapMixin:
         )
         if hasattr(self, "generate_recap_sequence_button"):
             self.generate_recap_sequence_button.setEnabled(True)
+        self.refresh_recap_editor_readiness()
 
     def _show_recap_import_error(self, message: str):
         self.recap_script_valid = False
+        self.refresh_recap_editor_readiness()
         self._set_recap_status(message, "offline")
         self.append_recap_log(f"ERROR: {message}")
         if isinstance(self, QWidget):
@@ -476,6 +527,7 @@ class RecapMixin:
         )
         if hasattr(self, "generate_recap_sequence_button"):
             self.generate_recap_sequence_button.setEnabled(True)
+        self.refresh_recap_editor_readiness()
         return True
 
     def _active_recap_inputs(self):
@@ -488,6 +540,152 @@ class RecapMixin:
             context.verified_story_map_path,
             context.recap_script_path,
         )
+
+    def _existing_recap_editor_assets(self) -> tuple[RecapArtifactContext, dict, Path, Path] | None:
+        """Hydrate one compatible persisted Recap without regenerating it."""
+
+        if not bool(getattr(self, "recap_script_valid", False)):
+            return None
+        try:
+            context = self._active_recap_artifact_context()
+            if not context.final_recap_path.exists() or not context.recap_sequence_path.exists():
+                return None
+            sequence = json.loads(context.recap_sequence_path.read_text(encoding="utf-8"))
+            script = self._active_recap_inputs().recap_script
+            sequence_ids = [str(item.get("segment_id", "")) for item in sequence.get("segments", []) if isinstance(item, dict)]
+            script_ids = [str(item.get("segment_id", "")) for item in script.get("segments", []) if isinstance(item, dict)]
+            if not sequence_ids or sequence_ids != script_ids:
+                return None
+            effects_path, editor_plan_path = resolve_recap_editor_plan_paths(context)
+        except (OSError, ValueError, RecapInputError):
+            return None
+        return context, sequence, effects_path, editor_plan_path
+
+    def refresh_recap_editor_readiness(self) -> bool:
+        """Enable opening only for a source-bound, compatible persisted Recap."""
+
+        ready = self._existing_recap_editor_assets()
+        self.recap_existing_editor_assets = ready
+        if ready is not None:
+            _context, sequence, _effects_path, _editor_plan_path = ready
+            self.recap_sequence = sequence
+        if hasattr(self, "recap_open_editor_button"):
+            self.recap_open_editor_button.setEnabled(ready is not None or bool(getattr(self, "recap_sequence", None)))
+        return ready is not None
+
+    def _editor_base_voiceover_clips(
+        self,
+        inputs: RecapInputs,
+        sequence: dict,
+        editor_plan_path: Path,
+        context: RecapArtifactContext,
+    ) -> list[dict]:
+        """Return the persisted narration clips needed to rebuild an editor base."""
+
+        expected_ids = {
+            str(segment.get("segment_id", ""))
+            for segment in inputs.recap_script.get("segments", [])
+            if isinstance(segment, dict)
+            and segment.get("block_type") != "source_moment"
+            and segment.get("presentation_hint") != "visual_only"
+        }
+        editor_plan = load_editor_asset_plan(editor_plan_path)
+        planned_clips = clips_of_kind(editor_plan, "VOICEOVER")
+        planned_ids = {str(clip.get("id", "")) for clip in planned_clips if isinstance(clip, dict)}
+        if expected_ids and expected_ids.issubset(planned_ids):
+            return planned_clips
+
+        durations = load_voiceover_durations(context.voiceover_manifest_path)
+        return self._rebuild_voiceover_clips(inputs, durations, sequence)
+
+    def _ensure_recap_editor_base(
+        self,
+        context: RecapArtifactContext,
+        sequence: dict,
+        effects_path: Path,
+        editor_plan_path: Path,
+    ) -> Path:
+        """Return the caption-free assembled Recap used by the editor.
+
+        Older accepted Recaps predate this artifact. Rebuild only their base
+        render from persisted Track B inputs; narration, sequence, and effects
+        plans remain unchanged.
+        """
+
+        try:
+            metadata = json.loads(
+                context.editor_base_metadata_path.read_text(encoding="utf-8")
+            )
+            if (
+                context.editor_base_recap_path.is_file()
+                and context.editor_base_recap_path.stat().st_size > 0
+                and metadata.get("schema_version") == RECAP_EDITOR_BASE_SCHEMA_VERSION
+                and metadata.get("kind") == "ai_recap_clean_editor_base"
+            ):
+                return context.editor_base_recap_path
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+
+        inputs = self._active_recap_inputs()
+        try:
+            portrait_plan = load_portrait_framing_plan(context.portrait_framing_plan_path)
+        except RecapInputError:
+            source_video = resolve_recap_source_video(inputs.episode_identity)
+            portrait_plan = build_portrait_framing_plan_for_video(
+                source_video,
+                cache_path=context.portrait_framing_plan_path,
+            )
+            write_portrait_framing_plan(portrait_plan, context.portrait_framing_plan_path)
+
+        try:
+            duck_plan = load_duck_plan(context.audio_duck_plan_path)
+        except RecapInputError:
+            duck_plan = build_duck_plan(sequence)
+            write_duck_plan(duck_plan, context.audio_duck_plan_path)
+
+        voiceover_clips = self._editor_base_voiceover_clips(
+            inputs,
+            sequence,
+            editor_plan_path,
+            context,
+        )
+        self.append_recap_log("Creating caption-free Recap editor base...")
+        output_path = render_recap(
+            inputs.episode_identity,
+            sequence,
+            voiceover_clips,
+            portrait_plan,
+            duck_plan,
+            output_path=context.editor_base_recap_path,
+            captions_ass_path=None,
+            allow_captionless=True,
+            recap_effects=_clean_recap_editor_effects(),
+            voiceover_dir=context.voiceover_dir,
+            narration_pitch_semitones=getattr(
+                self,
+                "recap_narration_pitch_semitones",
+                DEFAULT_NARRATION_PITCH_SEMITONES,
+            ),
+            source_pitch_semitones=getattr(
+                self,
+                "recap_source_pitch_semitones",
+                DEFAULT_SOURCE_PITCH_SEMITONES,
+            ),
+        )
+        context.editor_base_metadata_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": RECAP_EDITOR_BASE_SCHEMA_VERSION,
+                    "kind": "ai_recap_clean_editor_base",
+                    "time_basis": "recap_final_timeline",
+                    "editable_overlays_baked": False,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return output_path
 
     def refresh_recap_status(self):
 
@@ -519,10 +717,7 @@ class RecapMixin:
         self.generate_recap_voiceover_button.setEnabled(
             bool(getattr(self, "recap_sequence", None))
         )
-        if hasattr(self, "recap_open_editor_button"):
-            self.recap_open_editor_button.setEnabled(
-                bool(getattr(self, "recap_sequence", None))
-            )
+        self.refresh_recap_editor_readiness()
         self.refresh_recap_voiceover_list()
 
     def refresh_recap_voices(self):
@@ -646,12 +841,13 @@ class RecapMixin:
                 wav_paths_by_segment=narration_wavs,
             )
             write_narration_captions(captions, context.narration_captions_path)
-            write_narration_captions_ass_file(
+            combined_captions = build_combined_recap_caption_plan(
+                self.recap_sequence,
                 captions,
                 voiceover_clips,
-                context.narration_captions_ass_path,
-                portrait_plan,
             )
+            write_combined_recap_caption_plan(combined_captions, context.recap_caption_plan_path)
+            write_combined_recap_caption_ass(combined_captions, context.narration_captions_ass_path)
 
             duck_plan = build_duck_plan(self.recap_sequence)
             write_duck_plan(duck_plan, context.audio_duck_plan_path)
@@ -667,6 +863,61 @@ class RecapMixin:
                 )
             QCoreApplication.processEvents()
 
+            if not context.effects_plan_path.exists():
+                create_recap_effects_plan(
+                    self.recap_sequence,
+                    captions,
+                    portrait_plan,
+                    inputs.recap_script,
+                    source_key=str(context.final_recap_path),
+                    effects_path=context.effects_plan_path,
+                    editor_plan_path=context.editor_asset_plan_path,
+                )
+            try:
+                recap_effects = load_recap_effects(
+                    effects_path=context.effects_plan_path,
+                    editor_plan_path=context.editor_asset_plan_path,
+                    render_planned_effects=True,
+                )
+            except RecapEffectsError:
+                recap_effects = {}
+
+            base_metadata = {
+                "schema_version": RECAP_EDITOR_BASE_SCHEMA_VERSION,
+                "kind": "ai_recap_clean_editor_base",
+                "time_basis": "recap_final_timeline",
+                "editable_overlays_baked": False,
+            }
+            existing_base_metadata = {}
+            try:
+                existing_base_metadata = json.loads(
+                    context.editor_base_metadata_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                pass
+            if (
+                not context.editor_base_recap_path.exists()
+                or existing_base_metadata != base_metadata
+            ):
+                render_recap(
+                    inputs.episode_identity,
+                    self.recap_sequence,
+                    voiceover_clips,
+                    portrait_plan,
+                    duck_plan,
+                    output_path=context.editor_base_recap_path,
+                    captions_ass_path=None,
+                    allow_captionless=True,
+                    recap_effects=_clean_recap_editor_effects(),
+                    voiceover_dir=context.voiceover_dir,
+                    narration_pitch_semitones=getattr(self, "recap_narration_pitch_semitones", DEFAULT_NARRATION_PITCH_SEMITONES),
+                    source_pitch_semitones=getattr(self, "recap_source_pitch_semitones", DEFAULT_SOURCE_PITCH_SEMITONES),
+                )
+                context.editor_base_metadata_path.write_text(
+                    json.dumps(base_metadata, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
             output_path = render_recap(
                 inputs.episode_identity,
                 self.recap_sequence,
@@ -675,7 +926,7 @@ class RecapMixin:
                 duck_plan,
                 captions_ass_path=context.narration_captions_ass_path,
                 output_path=context.final_recap_path,
-                recap_effects={},
+                recap_effects=recap_effects,
                 voiceover_dir=context.voiceover_dir,
                 narration_pitch_semitones=getattr(
                     self,
@@ -767,11 +1018,181 @@ class RecapMixin:
             if isinstance(self, QWidget):
                 QMessageBox.information(self, "AI Recap", "Generate a recap sequence first.")
             return
+        try:
+            context = self._active_recap_artifact_context()
+        except RecapInputError as exc:
+            # Keep the existing editor entry point usable for an in-memory
+            # sequence while its artifact root is still being established.
+            if hasattr(self, "refresh_editor_asset_timeline"):
+                self.refresh_editor_asset_timeline()
+            if hasattr(self, "timeline"):
+                self.timeline.setFocus()
+            self.append_recap_log(f"Recap sequence opened in the existing editor timeline. ({exc})")
+            return
+
+        ready = getattr(self, "recap_existing_editor_assets", None)
+        if ready is None or ready[0] != context:
+            ready = self._existing_recap_editor_assets()
+        if ready is not None:
+            _context, sequence, effects_path, editor_plan_path = ready
+            self.recap_sequence = sequence
+        else:
+            effects_path, editor_plan_path = context.effects_plan_path, context.editor_asset_plan_path
+
+        try:
+            editor_media = self._ensure_recap_editor_base(
+                context,
+                self.recap_sequence,
+                effects_path,
+                editor_plan_path,
+            )
+        except (OSError, ValueError, RecapInputError, RecapRenderError, RecapEffectsError) as exc:
+            message = f"Caption-free Recap editor base is unavailable: {exc}"
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Open in Editor", message)
+            return
+
+        duration = recap_final_duration_seconds(
+            float(self.recap_sequence.get("total_duration_seconds", 0.0) or 0.0)
+        )
+        self.recap_editor_mode = True
+        self.recap_editor_effects_path = effects_path
+        self.recap_editor_asset_plan_path = editor_plan_path
+        self.editor_asset_plan = load_editor_asset_plan(editor_plan_path)
+        if effects_path.exists():
+            # This is a schema projection for legacy accepted plans, not a
+            # new effects pass: it makes existing motion/FX visible as shared
+            # editor clips before the timeline is opened.
+            payload = json.loads(effects_path.read_text(encoding="utf-8"))
+            write_recap_effects_plan(
+                payload,
+                source_key=str(self.editor_asset_plan.get("source_video", "recap")),
+                effects_path=effects_path,
+                editor_plan_path=editor_plan_path,
+            )
+            self.editor_asset_plan = load_editor_asset_plan(editor_plan_path)
+        try:
+            if context.recap_caption_plan_path.exists():
+                caption_plan = load_combined_recap_caption_plan(context.recap_caption_plan_path)
+            else:
+                narration = json.loads(context.narration_captions_path.read_text(encoding="utf-8"))
+                caption_plan = build_combined_recap_caption_plan(
+                    self.recap_sequence,
+                    narration,
+                    clips_of_kind(self.editor_asset_plan, "VOICEOVER"),
+                )
+                write_combined_recap_caption_plan(caption_plan, context.recap_caption_plan_path)
+            self.recap_editor_caption_plan = caption_plan
+            self.recap_editor_caption_segments = [
+                {
+                    "start_ms": int(round(float(cue["start"]) * 1000)),
+                    "end_ms": int(round(float(cue["end"]) * 1000)),
+                    "text": str(cue["text"]),
+                    "caption_id": cue["id"],
+                    "block_id": cue["block_id"],
+                    "speaker_domain": cue["speaker_domain"],
+                }
+                for cue in caption_plan.get("cues", [])
+                if isinstance(cue, dict)
+            ]
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.append_recap_log(f"WARNING: Recap caption plan unavailable: {exc}")
+            self.recap_editor_caption_plan = None
+            self.recap_editor_caption_segments = []
+        self.recap_editor_asset_context = (
+            str(self.editor_asset_plan.get("source_video") or context.final_recap_path),
+            float(self.editor_asset_plan.get("selection_start", 0.0) or 0.0),
+            float(self.editor_asset_plan.get("selection_end", duration) or duration),
+        )
+
+        # The assembled, caption-free Recap is the editor's media source. The
+        # original episode remains artifact provenance only.
+        if hasattr(self, "load_video"):
+            self._preserve_recap_artifact_context = True
+            try:
+                self.load_video(editor_media)
+            finally:
+                self._preserve_recap_artifact_context = False
+
         if hasattr(self, "refresh_editor_asset_timeline"):
             self.refresh_editor_asset_timeline()
         if hasattr(self, "timeline"):
             self.timeline.setFocus()
         self.append_recap_log("Recap sequence opened in the existing editor timeline.")
+
+    def start_recap_editor_export(self) -> bool:
+        """Launch the no-replanning export path for an AI Recap editor session."""
+
+        try:
+            context = self._active_recap_artifact_context()
+            effects_path = Path(self.recap_editor_effects_path)
+            editor_plan_path = Path(self.recap_editor_asset_plan_path)
+            if not context.editor_base_recap_path.is_file():
+                raise RecapInputError("Open the AI Recap in Editor before exporting it.")
+            self.save_editor_asset_plan_state()
+            caption_plan = getattr(self, "recap_editor_caption_plan", None)
+            if isinstance(caption_plan, dict):
+                write_combined_recap_caption_plan(caption_plan, context.recap_caption_plan_path)
+        except (OSError, TypeError, RecapInputError) as exc:
+            self.render_log.append(f"ERROR: AI Recap export setup failed: {exc}")
+            return False
+
+        duration = recap_final_duration_seconds(
+            float(self.recap_sequence.get("total_duration_seconds", 0.0) or 0.0)
+        )
+        self.recap_export_in_progress = True
+        self.pending_render_duration_seconds = duration
+        self.start_render_progress(duration, bool(getattr(self, "music_path", None)), False)
+        self.render_log.clear()
+        self.reset_render_log_file()
+        self.render_log.append("=== AI RECAP EDITOR EXPORT ===")
+        self.render_log.append("Consuming current Recap editor entities; no Standard Short planning will run.")
+        self.generate_button.setEnabled(False)
+        self.generate_button.setText("Rendering Recap...")
+        self.find_clips_button.setEnabled(False)
+        self.music_button.setEnabled(False)
+
+        arguments = [
+            str(ROOT / "app" / "recap_editor_export.py"),
+            "--editor-base", str(context.editor_base_recap_path),
+            "--effects-plan", str(effects_path),
+            "--editor-plan", str(editor_plan_path),
+            "--caption-plan", str(context.recap_caption_plan_path),
+            "--caption-ass", str(context.narration_captions_ass_path),
+            "--output", str(context.final_recap_path),
+        ]
+        for option, value in (
+            ("--caption-position-x", getattr(self, "caption_position_x", None)),
+            ("--caption-position-y", getattr(self, "caption_position_y", None)),
+            ("--caption-scale", getattr(self, "caption_scale", None)),
+        ):
+            if value is not None:
+                arguments.extend([option, str(value)])
+        music_path = getattr(self, "music_path", None)
+        if music_path:
+            arguments.extend([
+                "--music", str(music_path),
+                "--music-volume", str(float(getattr(self, "music_volume", 0)) / 100.0),
+            ])
+        self.set_render_progress_stage("rendering")
+        self.render_process.start(sys.executable, arguments)
+        return True
+
+    def finish_recap_editor_export(self):
+        """Complete a source-bound Recap export without Standard archiving."""
+
+        context = self._active_recap_artifact_context()
+        self.generate_button.setEnabled(True)
+        self.generate_button.setText("Generate Again")
+        self.find_clips_button.setEnabled(self.video_path is not None)
+        self.music_button.setEnabled(True)
+        self.finish_render_progress(True)
+        self.render_log.append("")
+        self.render_log.append("AI RECAP EXPORT COMPLETE")
+        self.render_log.append(f"Final Recap: {context.final_recap_path}")
+        self.open_final_video(context.final_recap_path)
+        self.write_render_log_snapshot()
 
     def _rebuild_voiceover_clips(
         self,

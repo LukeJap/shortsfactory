@@ -37,6 +37,12 @@ from editor_asset_plan import (
     set_editor_plan_context,
     upsert_clip,
 )
+from recap_media.effects import (
+    RECAP_MOTION_CLIP_KIND,
+    RECAP_TIME_BASIS,
+    RECAP_VISUAL_FX_CLIP_KIND,
+    sync_recap_effects_from_editor_plan,
+)
 from emoji_overlay import normalize_emoji
 from make_captions import load_local_reaction_assets
 from sfx_engine import asset_metadata_for_path
@@ -49,6 +55,10 @@ SFX_DIR = ROOT / "assets" / "sfx"
 class EditorAssetsMixin:
 
     def current_editor_asset_context(self) -> tuple[str, float, float]:
+
+        recap_context = getattr(self, "recap_editor_asset_context", None)
+        if isinstance(recap_context, tuple) and len(recap_context) == 3:
+            return recap_context
 
         return (
             str(self.video_path) if self.video_path else "",
@@ -123,15 +133,27 @@ class EditorAssetsMixin:
 
     def load_editor_asset_plan_state(self):
 
-        self.editor_asset_plan = load_editor_asset_plan()
+        path = getattr(self, "recap_editor_asset_plan_path", None)
+        self.editor_asset_plan = (
+            load_editor_asset_plan(Path(path)) if path else load_editor_asset_plan()
+        )
         self.refresh_editor_asset_timeline()
 
 
     def save_editor_asset_plan_state(self):
 
-        save_editor_asset_plan(
-            self.editor_asset_plan
-        )
+        path = getattr(self, "recap_editor_asset_plan_path", None)
+        if path:
+            save_editor_asset_plan(self.editor_asset_plan, Path(path))
+        else:
+            save_editor_asset_plan(self.editor_asset_plan)
+        effects_path = getattr(self, "recap_editor_effects_path", None)
+        editor_path = getattr(self, "recap_editor_asset_plan_path", None)
+        if effects_path and editor_path:
+            sync_recap_effects_from_editor_plan(
+                effects_path=Path(effects_path),
+                editor_plan_path=Path(editor_path),
+            )
 
 
     def visible_editor_asset_clips(self) -> list[dict]:
@@ -189,6 +211,8 @@ class EditorAssetsMixin:
                 "AI_VISUAL",
                 "EMOJI",
                 "VOICEOVER",
+                RECAP_VISUAL_FX_CLIP_KIND,
+                RECAP_MOTION_CLIP_KIND,
             }:
                 continue
 
@@ -465,6 +489,20 @@ class EditorAssetsMixin:
 
             return
 
+        if normalized_kind in {RECAP_VISUAL_FX_CLIP_KIND, RECAP_MOTION_CLIP_KIND}:
+            self.selected_visual_slot_index = None
+            self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
+            self.timeline.set_selected_asset_clip(normalized_id)
+            clip = self.find_editor_clip(normalized_kind, normalized_id)
+            if clip is not None:
+                start_ms = int(round(float(clip.get("start", 0.0) or 0.0) * 1000))
+                end_ms = int(round(float(clip.get("end", clip.get("start", 0.0)) or 0.0) * 1000))
+                self.player.setPosition(start_ms)
+                self.timeline.setValue(start_ms)
+                self.reveal_timeline_range(start_ms, end_ms)
+            return
+
         if normalized_kind != "SFX":
             return
 
@@ -665,6 +703,16 @@ class EditorAssetsMixin:
                 )
             return
 
+        if normalized_kind in {RECAP_VISUAL_FX_CLIP_KIND, RECAP_MOTION_CLIP_KIND}:
+            clip["kind"] = normalized_kind
+            clip["time_basis"] = RECAP_TIME_BASIS
+            clip["manual_override"] = True
+            clip["locked"] = True
+            self.editor_asset_plan = upsert_clip(self.editor_asset_plan, clip)
+            self.save_editor_asset_plan_state()
+            self.refresh_editor_asset_timeline()
+            return
+
         if normalized_kind != "SFX":
             return
 
@@ -714,6 +762,18 @@ class EditorAssetsMixin:
             )
             self.update_emoji_inspector()
             self.swap_selected_emoji_clip()
+            return
+
+        if normalized_kind in {RECAP_VISUAL_FX_CLIP_KIND, RECAP_MOTION_CLIP_KIND}:
+            clip = self.find_editor_clip(normalized_kind, clip_id)
+            if clip is None:
+                return
+            clip["active"] = not bool(clip.get("active", True))
+            clip["manual_override"] = True
+            clip["locked"] = True
+            self.editor_asset_plan = upsert_clip(self.editor_asset_plan, clip)
+            self.save_editor_asset_plan_state()
+            self.refresh_editor_asset_timeline()
             return
 
         if normalized_kind != "SFX":

@@ -37,7 +37,10 @@ class PlaybackMixin:
         self.cancel_paused_seek_refresh()
         self.hide_ai_visual_preview_overlay()
         self.play_request_counter += 1
-        if hasattr(self, "clear_recap_artifact_context"):
+        if (
+            hasattr(self, "clear_recap_artifact_context")
+            and not getattr(self, "_preserve_recap_artifact_context", False)
+        ):
             self.clear_recap_artifact_context()
         self.video_path = path
         if hasattr(self, "_set_recap_episode_context"):
@@ -168,7 +171,14 @@ class PlaybackMixin:
         self.set_selection_loop_enabled(
             False
         )
-        self.start_transcript_preload()
+        if getattr(self, "recap_editor_caption_plan", None):
+            self.source_transcript_segments = list(
+                getattr(self, "recap_editor_caption_segments", [])
+            )
+            if hasattr(self, "transcript_status_label"):
+                self.transcript_status_label.setText("RECAP CAPTION PLAN READY")
+        else:
+            self.start_transcript_preload()
 
     def prime_preview_frame(self):
 

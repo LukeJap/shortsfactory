@@ -58,6 +58,7 @@ from recap_media.voiceover import wav_path_for_segment
 from smart_motion import x_expression, y_expression, zoom_expression
 from sfx_engine import build_sfx_mix_filter_complex
 from visual_fx import build_semantic_filter_chain
+from music_overlay import music_volume_expression
 
 
 class RecapRenderError(Exception):
@@ -670,6 +671,219 @@ def build_recap_ffmpeg_command(
     return command
 
 
+def build_recap_editor_export_filter_complex(
+    recap_effects: dict[str, Any],
+    *,
+    captions_ass_path: Path,
+    timeline_fps: float,
+    emoji_first_input_index: int | None = None,
+    music_input_index: int | None = None,
+    music_volume: float = 0.0,
+) -> tuple[str, str, str]:
+    """Apply current editor entities to an already assembled Recap base.
+
+    The base is final-timeline 1080x1920 media. This deliberately avoids
+    source trimming, portrait framing, speed changes, and production polish.
+    """
+
+    visual_fx_events = list(recap_effects.get("visual_fx_events", []) or [])
+    motion_events = list(recap_effects.get("motion_events", []) or [])
+    sfx_events = list(recap_effects.get("sfx_events", []) or [])
+    emoji_events = list(recap_effects.get("emoji_events", []) or [])
+
+    fragments: list[str] = []
+    video_label = "0:v"
+    if motion_events:
+        fragments.append(
+            build_recap_motion_filter(
+                motion_events,
+                input_label=video_label,
+                output_label="recap_editor_motion",
+                timeline_fps=timeline_fps,
+            )
+        )
+        video_label = "recap_editor_motion"
+    if visual_fx_events:
+        fragments.append(
+            f"[{video_label}]{build_semantic_filter_chain(visual_fx_events)}"
+            "[recap_editor_fx]"
+        )
+        video_label = "recap_editor_fx"
+    if emoji_events and emoji_first_input_index is not None:
+        emoji_filter, emoji_label = build_emoji_filter_complex(
+            emoji_events,
+            f"[{video_label}]",
+            first_input_index=emoji_first_input_index,
+        )
+        fragments.append(emoji_filter)
+        video_label = emoji_label.strip("[]")
+    fragments.append(
+        f"[{video_label}]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
+        "[recap_editor_captioned]"
+    )
+    video_label = "recap_editor_captioned"
+
+    audio_label = "0:a"
+    if sfx_events:
+        fragments.append(
+            build_sfx_mix_filter_complex(
+                "[0:a]",
+                sfx_events,
+                first_input_index=1,
+                output_label="[recap_editor_sfx]",
+            )
+        )
+        audio_label = "recap_editor_sfx"
+    if music_input_index is not None:
+        gain = max(0.0, min(1.0, float(music_volume)))
+        music_expression = music_volume_expression(gain, sfx_events)
+        fragments.append(
+            f"[{audio_label}]volume=1.0[recap_editor_program];"
+            f"[{music_input_index}:a]volume='{music_expression}':eval=frame[recap_editor_music];"
+            "[recap_editor_program][recap_editor_music]"
+            "amix=inputs=2:duration=first:dropout_transition=2:normalize=0"
+            "[recap_editor_audio]"
+        )
+        audio_label = "recap_editor_audio"
+
+    return ";".join(fragments), video_label, audio_label
+
+
+def bind_recap_editor_export_inputs(
+    editor_base_path: Path,
+    recap_effects: dict[str, Any],
+    *,
+    music_path: Path | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Append only usable optional inputs and record their actual indexes."""
+
+    command = ["ffmpeg", "-y", "-i", str(editor_base_path)]
+    next_index = 1
+    sfx_events: list[dict[str, Any]] = []
+    for event in recap_effects.get("sfx_events", []) or []:
+        if not isinstance(event, dict):
+            continue
+        path = Path(str(event.get("asset_path", "")))
+        if not path.is_file():
+            print(f"WARNING: Recap SFX asset not found; skipping: {path}")
+            continue
+        bound = dict(event)
+        bound["asset_path"] = str(path)
+        bound["input_index"] = next_index
+        sfx_events.append(bound)
+        command.extend(["-i", str(path)])
+        next_index += 1
+
+    emoji_events: list[dict[str, Any]] = []
+    for event in recap_effects.get("emoji_events", []) or []:
+        if not isinstance(event, dict):
+            continue
+        path = _recap_local_emoji_path(event)
+        if path is None:
+            print(f"WARNING: Recap emoji asset unavailable; skipping: {event.get('emoji', '')}")
+            continue
+        bound = dict(event)
+        bound["path"] = path
+        bound["input_index"] = next_index
+        emoji_events.append(bound)
+        command.extend(emoji_input_arguments([bound]))
+        next_index += 1
+
+    music_input_index = None
+    if music_path is not None:
+        command.extend(["-stream_loop", "-1", "-i", str(music_path)])
+        music_input_index = next_index
+        next_index += 1
+    return command, {
+        "sfx_events": sfx_events,
+        "emoji_events": emoji_events,
+        "emoji_first_input_index": emoji_events[0]["input_index"] if emoji_events else None,
+        "music_input_index": music_input_index,
+        "input_count": next_index,
+    }
+
+
+def _recap_local_emoji_path(event: dict[str, Any]) -> Path | None:
+    """Return an already-resolved local Recap emoji asset without network fallback."""
+
+    for field in ("path", "asset_path", "asset"):
+        value = event.get(field)
+        if not value:
+            continue
+        path = Path(str(value))
+        if not path.is_absolute():
+            path = ROOT / path
+        if path.is_file():
+            return path
+    return None
+
+
+def build_recap_editor_export_command(
+    input_arguments: list[str],
+    filter_complex: str,
+    video_label: str,
+    audio_label: str,
+    output_path: Path,
+) -> list[str]:
+    command = list(input_arguments)
+    command.extend(["-filter_complex", filter_complex, "-map", f"[{video_label}]"])
+    command.extend(["-map", f"[{audio_label}]" if ":" not in audio_label else audio_label])
+    command.extend(["-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"])
+    command.extend([
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-movflags", "+faststart", str(output_path),
+    ])
+    return command
+
+
+def render_recap_editor_export(
+    editor_base_path: Path,
+    recap_effects: dict[str, Any],
+    captions_ass_path: Path,
+    output_path: Path,
+    *,
+    music_path: Path | None = None,
+    music_volume: float = 0.0,
+) -> Path:
+    """Render one AI Recap export from editor state without any replanning."""
+
+    if not editor_base_path.is_file() or editor_base_path.stat().st_size <= 0:
+        raise RecapRenderError(f"Clean Recap editor base not found: {editor_base_path}")
+    if not captions_ass_path.is_file():
+        raise RecapRenderError(f"Combined Recap captions not found: {captions_ass_path}")
+    if music_path is not None and not music_path.is_file():
+        raise RecapRenderError(f"Background music not found: {music_path}")
+    input_arguments, bindings = bind_recap_editor_export_inputs(
+        editor_base_path,
+        recap_effects,
+        music_path=music_path,
+    )
+    effects = dict(recap_effects)
+    effects["sfx_events"] = bindings["sfx_events"]
+    effects["emoji_events"] = bindings["emoji_events"]
+    fps = recap_timeline_fps(editor_base_path)
+    filters, video_label, audio_label = build_recap_editor_export_filter_complex(
+        effects,
+        captions_ass_path=captions_ass_path,
+        timeline_fps=fps,
+        emoji_first_input_index=bindings["emoji_first_input_index"],
+        music_input_index=bindings["music_input_index"],
+        music_volume=music_volume,
+    )
+    command = build_recap_editor_export_command(
+        input_arguments,
+        filters,
+        video_label,
+        audio_label,
+        output_path,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RecapRenderError(f"Recap editor export failed with exit code {result.returncode}:\n{result.stderr[-2000:]}")
+    return output_path
+
+
 def input_index_for_voiceover_clips(
     active_voiceover_clips: list[dict[str, Any]],
     first_index: int = 1,
@@ -696,6 +910,7 @@ def render_recap(
     voiceover_dir: Path | None = None,
     narration_pitch_semitones: float = DEFAULT_NARRATION_PITCH_SEMITONES,
     source_pitch_semitones: float = DEFAULT_SOURCE_PITCH_SEMITONES,
+    allow_captionless: bool = False,
 ) -> Path:
     """
     Top-level orchestration: resolve the accepted recap source, build the
@@ -704,11 +919,11 @@ def render_recap(
     different short or episode.
     """
 
-    if captions_ass_path is None:
+    if captions_ass_path is None and not allow_captionless:
         raise RecapRenderError(
             "Narration captions are required for a recap render; build the recap ASS file first."
         )
-    if not captions_ass_path.is_file():
+    if captions_ass_path is not None and not captions_ass_path.is_file():
         raise RecapRenderError(f"Narration caption ASS file not found: {captions_ass_path}")
 
     shortfall = float(sequence.get("visual_coverage_shortfall_seconds", 0.0) or 0.0)

@@ -15,7 +15,6 @@ from typing import Any
 
 from editor_asset_plan import (
     clips_of_kind,
-    editor_plan_context_matches,
     load_editor_asset_plan,
     replace_kind_clips,
     save_editor_asset_plan,
@@ -50,6 +49,8 @@ RECAP_TIME_BASIS = "recap_final_timeline"
 RECAP_BASE_TIME_BASIS = "recap_base_timeline"
 AI_RECAP_ORIGIN = "ai_recap"
 RECAP_EMOJI_TARGET_COUNT = 4
+RECAP_VISUAL_FX_CLIP_KIND = "RECAP_VISUAL_FX"
+RECAP_MOTION_CLIP_KIND = "RECAP_MOTION"
 
 
 class RecapEffectsError(Exception):
@@ -620,6 +621,84 @@ def _merge_manual_visual_events(
     return sorted(merged.values(), key=lambda event: (_as_float(event.get("start")), str(event.get("id", ""))))
 
 
+def _recap_event_clip(event: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Expose a shared visual event in the existing timeline clip contract.
+
+    The event fields remain on the clip so moving, disabling, and regenerating
+    it never needs a second Recap-only event representation.
+    """
+
+    clip = dict(event)
+    had_duration = "duration" in clip
+    had_time_basis = "time_basis" in clip
+    start = _as_float(clip.get("start"))
+    end = max(start, _as_float(clip.get("end"), start + _as_float(clip.get("duration"))))
+    clip.update(
+        {
+            "kind": kind,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(end - start, 3),
+            "active": clip.get("active", True) is not False,
+            "time_basis": RECAP_TIME_BASIS,
+            "label": str(clip.get("effect") or clip.get("movement") or "Recap effect"),
+        }
+    )
+    if not had_duration:
+        clip["_recap_adapter_added_duration"] = True
+    if not had_time_basis:
+        clip["_recap_adapter_added_time_basis"] = True
+    return clip
+
+
+def _event_from_recap_clip(clip: dict[str, Any]) -> dict[str, Any]:
+    """Return the renderer-facing event while retaining all semantic fields."""
+
+    event = dict(clip)
+    for key in ("kind", "label"):
+        event.pop(key, None)
+    if event.pop("_recap_adapter_added_duration", False):
+        event.pop("duration", None)
+    if event.pop("_recap_adapter_added_time_basis", False):
+        event.pop("time_basis", None)
+    return event
+
+
+def _events_from_editor_clips(editor_plan: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+    return [
+        _event_from_recap_clip(clip)
+        for clip in clips_of_kind(editor_plan, kind)
+        if not clip.get("deleted")
+    ]
+
+
+def sync_recap_effects_from_editor_plan(
+    *,
+    effects_path: Path = RECAP_EFFECTS_PLAN_PATH,
+    editor_plan_path: Path = RECAP_EDITOR_ASSET_PLAN_PATH,
+) -> None:
+    """Persist visual-lane edits back to the Recap-owned effects artifact."""
+
+    try:
+        payload = json.loads(effects_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict) or payload.get("schema_version") != RECAP_EFFECTS_SCHEMA_VERSION:
+        return
+
+    editor_plan = load_editor_asset_plan(editor_plan_path)
+    visual = dict(payload.get("visual_fx", {}))
+    for field, kind in (
+        ("events", RECAP_VISUAL_FX_CLIP_KIND),
+        ("motion_events", RECAP_MOTION_CLIP_KIND),
+    ):
+        clips = clips_of_kind(editor_plan, kind)
+        if clips:
+            visual[field] = _events_from_editor_clips(editor_plan, kind)
+    payload["visual_fx"] = visual
+    effects_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def write_recap_effects_plan(
     effects_plan: dict[str, Any],
     *,
@@ -630,6 +709,10 @@ def write_recap_effects_plan(
     """Persist automatic clips while retaining authoritative manual recap edits."""
 
     duration = _as_float(effects_plan.get("base_timeline_duration_seconds"))
+    final_duration = _as_float(
+        effects_plan.get("final_timeline_duration_seconds"),
+        recap_final_duration_seconds(duration),
+    )
     try:
         existing_payload = json.loads(effects_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -643,19 +726,42 @@ def write_recap_effects_plan(
         )
     payload["visual_fx"] = visual
     editor_plan = load_editor_asset_plan(editor_plan_path)
-    context_matches = editor_plan_context_matches(editor_plan, source_key, 0.0, duration)
     editor_plan = set_editor_plan_context(
         editor_plan,
         source_key,
         0.0,
-        duration,
-        clear_clips_on_change=not context_matches,
+        final_duration,
+        # Every Recap owns its own plan path. Preserve manual entities while
+        # migrating older base-time context metadata to final output time.
+        clear_clips_on_change=False,
     )
     automatic = payload.get("automatic_editor_clips", {})
-    for kind in ("SFX", "EMOJI"):
+    visual_event_clips = [
+        _recap_event_clip(event, RECAP_VISUAL_FX_CLIP_KIND)
+        for event in visual.get("events", [])
+        if isinstance(event, dict)
+    ]
+    motion_event_clips = [
+        _recap_event_clip(event, RECAP_MOTION_CLIP_KIND)
+        for event in visual.get("motion_events", [])
+        if isinstance(event, dict)
+    ]
+    if not isinstance(automatic, dict):
+        automatic = {}
+    automatic = dict(automatic)
+    automatic[RECAP_VISUAL_FX_CLIP_KIND] = visual_event_clips
+    automatic[RECAP_MOTION_CLIP_KIND] = motion_event_clips
+    payload["automatic_editor_clips"] = automatic
+    for kind in ("SFX", "EMOJI", RECAP_VISUAL_FX_CLIP_KIND, RECAP_MOTION_CLIP_KIND):
         clips = automatic.get(kind, []) if isinstance(automatic, dict) else []
         editor_plan = replace_kind_clips(editor_plan, kind, clips, preserve_manual=True)
     save_editor_asset_plan(editor_plan, editor_plan_path)
+
+    # The persisted effects artifact mirrors the shared clip plan, including
+    # retained manual overrides, so either consumer sees the same event state.
+    visual["events"] = _events_from_editor_clips(editor_plan, RECAP_VISUAL_FX_CLIP_KIND)
+    visual["motion_events"] = _events_from_editor_clips(editor_plan, RECAP_MOTION_CLIP_KIND)
+    payload["visual_fx"] = visual
 
     payload["editor_asset_plan_path"] = str(editor_plan_path)
     effects_path.parent.mkdir(parents=True, exist_ok=True)
@@ -778,14 +884,19 @@ def load_recap_effects(
         )
 
     visual = data.get("visual_fx", {})
-    raw_events = visual.get("events", []) if isinstance(visual, dict) else []
+    raw_events = _events_from_editor_clips(editor_plan, RECAP_VISUAL_FX_CLIP_KIND)
+    raw_motion_events = _events_from_editor_clips(editor_plan, RECAP_MOTION_CLIP_KIND)
+    if not raw_events:
+        raw_events = visual.get("events", []) if isinstance(visual, dict) else []
+    if not raw_motion_events:
+        raw_motion_events = visual.get("motion_events", []) if isinstance(visual, dict) else []
     return {
         "visual_fx_events": [
             event for event in raw_events
             if isinstance(event, dict) and event.get("active", True) and not event.get("deleted")
         ],
         "motion_events": [
-            event for event in (visual.get("motion_events", []) if isinstance(visual, dict) else [])
+            event for event in raw_motion_events
             if isinstance(event, dict) and event.get("active", True) and not event.get("deleted")
         ],
         "sfx_events": sorted(sfx_events, key=lambda event: _as_float(event.get("start"))),

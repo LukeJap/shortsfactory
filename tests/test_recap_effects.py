@@ -7,7 +7,9 @@ from editor_asset_plan import load_editor_asset_plan, save_editor_asset_plan
 from recap_media.effects import (
     AI_RECAP_ORIGIN,
     RECAP_EFFECTS_SCHEMA_VERSION,
+    RECAP_MOTION_CLIP_KIND,
     RECAP_TIME_BASIS,
+    RECAP_VISUAL_FX_CLIP_KIND,
     build_recap_effects_plan,
     load_recap_effects,
     recap_base_timeline_words,
@@ -16,6 +18,7 @@ from recap_media.effects import (
     recap_timeline_blocks,
     retune_recap_emoji_plan,
     source_audio_insert_windows,
+    sync_recap_effects_from_editor_plan,
     write_recap_effects_plan,
 )
 from recap_media.timeline import recap_base_to_final_time, recap_final_duration_seconds
@@ -541,3 +544,95 @@ def test_recap_emoji_retune_preserves_manual_emoji_clips(tmp_path, monkeypatch):
     write_recap_effects_plan(retuned, effects_path=effects_path, editor_plan_path=editor_plan_path)
     persisted = load_editor_asset_plan(editor_plan_path)
     assert any(clip["id"] == "manual_emoji_keep" for clip in persisted["clips"])
+
+
+def _phase_6c_effects_plan(fx_events, motion_events):
+    return {
+        "schema_version": RECAP_EFFECTS_SCHEMA_VERSION,
+        "time_basis": RECAP_TIME_BASIS,
+        "render_enabled": False,
+        "base_timeline_duration_seconds": 12.0,
+        "final_timeline_duration_seconds": 8.0,
+        "visual_fx": {"events": fx_events, "motion_events": motion_events},
+        "automatic_editor_clips": {"SFX": [], "EMOJI": []},
+    }
+
+
+def test_phase_6c_projects_visual_events_into_shared_final_timeline_clips(tmp_path):
+    effects_path = tmp_path / "effects_plan.json"
+    editor_plan_path = tmp_path / "editor_asset_plan.json"
+    effects = _phase_6c_effects_plan(
+        [{"id": "fx_ai", "effect": "bloom_glow", "start": 2.0, "end": 2.5,
+          "origin": AI_RECAP_ORIGIN, "block_id": "N_002", "beat_ids": ["B004"],
+          "reason": "payoff", "active": True, "time_basis": RECAP_TIME_BASIS}],
+        [{"id": "motion_ai", "movement": "punch_in", "start": 3.0, "end": 3.4,
+          "origin": AI_RECAP_ORIGIN, "block_id": "N_003", "beat_ids": ["B005"],
+          "reason": "reaction", "active": True, "time_basis": RECAP_TIME_BASIS}],
+    )
+
+    write_recap_effects_plan(effects, effects_path=effects_path, editor_plan_path=editor_plan_path)
+    clips = load_editor_asset_plan(editor_plan_path)["clips"]
+    fx = next(clip for clip in clips if clip["kind"] == RECAP_VISUAL_FX_CLIP_KIND)
+    motion = next(clip for clip in clips if clip["kind"] == RECAP_MOTION_CLIP_KIND)
+
+    assert (fx["start"], fx["end"], fx["time_basis"]) == (2.0, 2.5, RECAP_TIME_BASIS)
+    assert fx["origin"] == AI_RECAP_ORIGIN
+    assert fx["block_id"] == "N_002"
+    assert fx["beat_ids"] == ["B004"]
+    assert motion["reason"] == "reaction"
+
+
+def test_phase_6c_manual_visual_clip_edits_sync_rendering_and_survive_regeneration(tmp_path):
+    effects_path = tmp_path / "effects_plan.json"
+    editor_plan_path = tmp_path / "editor_asset_plan.json"
+    first = _phase_6c_effects_plan(
+        [
+            {"id": "fx_override", "effect": "bloom_glow", "start": 1.0, "end": 1.5,
+             "origin": AI_RECAP_ORIGIN, "active": True, "time_basis": RECAP_TIME_BASIS},
+            {"id": "fx_removed", "effect": "reaction_push_in", "start": 2.0, "end": 2.5,
+             "origin": AI_RECAP_ORIGIN, "active": True, "time_basis": RECAP_TIME_BASIS},
+        ],
+        [{"id": "motion_update", "movement": "punch_in", "start": 3.0, "end": 3.4,
+          "origin": AI_RECAP_ORIGIN, "active": True, "time_basis": RECAP_TIME_BASIS}],
+    )
+    write_recap_effects_plan(first, effects_path=effects_path, editor_plan_path=editor_plan_path)
+
+    editor_plan = load_editor_asset_plan(editor_plan_path)
+    override = next(clip for clip in editor_plan["clips"] if clip["id"] == "fx_override")
+    override.update({"start": 4.0, "end": 4.5, "active": False, "manual_override": True, "locked": True})
+    editor_plan["clips"].append(
+        {"id": "manual_motion", "kind": RECAP_MOTION_CLIP_KIND, "movement": "slow_push",
+         "start": 5.0, "end": 5.5, "active": True, "manual_override": True,
+         "origin": "manual", "time_basis": RECAP_TIME_BASIS}
+    )
+    save_editor_asset_plan(editor_plan, editor_plan_path)
+    sync_recap_effects_from_editor_plan(effects_path=effects_path, editor_plan_path=editor_plan_path)
+
+    regenerated = _phase_6c_effects_plan(
+        [
+            {"id": "fx_override", "effect": "bloom_glow", "start": 1.2, "end": 1.7,
+             "origin": AI_RECAP_ORIGIN, "active": True, "time_basis": RECAP_TIME_BASIS},
+            {"id": "fx_new", "effect": "cinematic_push", "start": 6.0, "end": 6.5,
+             "origin": AI_RECAP_ORIGIN, "active": True, "time_basis": RECAP_TIME_BASIS},
+        ],
+        [{"id": "motion_update", "movement": "punch_in", "start": 3.5, "end": 3.9,
+          "origin": AI_RECAP_ORIGIN, "active": True, "time_basis": RECAP_TIME_BASIS}],
+    )
+    write_recap_effects_plan(regenerated, effects_path=effects_path, editor_plan_path=editor_plan_path)
+
+    persisted = load_editor_asset_plan(editor_plan_path)
+    clips = {clip["id"]: clip for clip in persisted["clips"]}
+    assert (clips["fx_override"]["start"], clips["fx_override"]["active"]) == (4.0, False)
+    assert "fx_removed" not in clips
+    assert clips["fx_new"]["start"] == 6.0
+    assert clips["motion_update"]["start"] == 3.5
+    assert clips["manual_motion"]["origin"] == "manual"
+
+    renderable = load_recap_effects(
+        effects_path=effects_path, editor_plan_path=editor_plan_path, render_planned_effects=True
+    )
+    assert "fx_override" not in {event["id"] for event in renderable["visual_fx_events"]}
+    assert {event["id"] for event in renderable["visual_fx_events"]} == {"fx_new"}
+    assert {event["id"] for event in renderable["motion_events"]} == {
+        "motion_update", "manual_motion"
+    }

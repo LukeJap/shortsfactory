@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,18 @@ class RecapArtifactContext:
         return self.root / "narration.ass"
 
     @property
+    def recap_caption_plan_path(self) -> Path:
+        return self.root / "recap_captions.json"
+
+    @property
+    def editor_base_recap_path(self) -> Path:
+        return self.root / "final_recap_editor_base.mp4"
+
+    @property
+    def editor_base_metadata_path(self) -> Path:
+        return self.root / "final_recap_editor_base.json"
+
+    @property
     def audio_duck_plan_path(self) -> Path:
         return self.root / "audio_duck_plan.json"
 
@@ -45,6 +58,53 @@ class RecapArtifactContext:
     @property
     def final_recap_path(self) -> Path:
         return self.root / "final_recap.mp4"
+
+    @property
+    def effects_plan_path(self) -> Path:
+        return self.root / "effects_plan.json"
+
+    @property
+    def editor_asset_plan_path(self) -> Path:
+        return self.root / "editor_asset_plan.json"
+
+
+def resolve_recap_editor_plan_paths(context: RecapArtifactContext) -> tuple[Path, Path]:
+    """Return the one final-timeline effects/editor-plan pair for a Recap.
+
+    Older accepted Recaps kept phase-named candidate plan files beside their
+    source-bound artifacts. Their effects payload records the paired editor
+    plan path, so discover that self-described pair rather than falling back
+    to the unrelated global Standard Short editor plan.
+    """
+
+    canonical = (context.effects_plan_path, context.editor_asset_plan_path)
+    if all(path.exists() for path in canonical):
+        return canonical
+
+    candidates: list[tuple[Path, Path]] = []
+    for effects_path in context.root.glob("effects_plan*.json"):
+        try:
+            payload = json.loads(effects_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("time_basis") != "recap_final_timeline":
+            continue
+        declared = payload.get("editor_asset_plan_path")
+        if not isinstance(declared, str) or not declared.strip():
+            continue
+        editor_path = Path(declared)
+        if not editor_path.is_absolute():
+            editor_path = Path.cwd() / editor_path
+        editor_path = editor_path.resolve(strict=False)
+        if not editor_path.exists() or editor_path.parent != context.root.resolve(strict=False):
+            continue
+        candidates.append((effects_path, editor_path))
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise RecapInputError("No final-timeline Recap effects/editor plan is available.")
+    raise RecapInputError("Multiple final-timeline Recap editor plans are available; resolve the active artifact plan first.")
 
 
 def _normalized_path(path: Path) -> str:
