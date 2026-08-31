@@ -1,12 +1,15 @@
+import json
 from pathlib import Path
 
 from editor_asset_plan import load_editor_asset_plan, save_editor_asset_plan
 from recap_media.effects import (
+    AI_RECAP_ORIGIN,
     RECAP_EFFECTS_SCHEMA_VERSION,
     RECAP_TIME_BASIS,
     build_recap_effects_plan,
     load_recap_effects,
     recap_base_timeline_words,
+    recap_timeline_blocks,
     source_audio_insert_windows,
     write_recap_effects_plan,
 )
@@ -67,6 +70,14 @@ def _portrait_plan():
     return {"content_y": 656, "content_height": 608}
 
 
+def _recap_script():
+    return {
+        "segments": [
+            {"segment_id": "VO_001", "block_type": "narration", "beat_ids": ["B001", "B002"]},
+        ]
+    }
+
+
 def _prepared_emoji(events):
     return [
         {
@@ -95,6 +106,18 @@ def test_recap_words_use_base_timeline_and_pause_for_source_dialogue():
     ]
 
 
+def test_recap_timeline_blocks_uses_sequence_windows_and_script_beats():
+    assert recap_timeline_blocks(_sequence(), _recap_script()) == [
+        {
+            "block_id": "VO_001",
+            "block_type": "narration",
+            "start": 0.0,
+            "end": 6.0,
+            "beat_ids": ["B001", "B002"],
+        }
+    ]
+
+
 def test_recap_adapter_reuses_shared_entity_schemas_and_protects_dialogue(monkeypatch):
     monkeypatch.setattr("recap_media.effects.prepare_emoji_events", _prepared_emoji)
     monkeypatch.setattr(
@@ -114,7 +137,7 @@ def test_recap_adapter_reuses_shared_entity_schemas_and_protects_dialogue(monkey
     )
 
     plan = build_recap_effects_plan(
-        _sequence(), _captions(), _portrait_plan(), energy="PUNCHY"
+        _sequence(), _captions(), _portrait_plan(), _recap_script(), energy="PUNCHY"
     )
 
     assert plan["schema_version"] == RECAP_EFFECTS_SCHEMA_VERSION
@@ -125,7 +148,15 @@ def test_recap_adapter_reuses_shared_entity_schemas_and_protects_dialogue(monkey
         for clip in plan["automatic_editor_clips"][kind]:
             assert clip["kind"] == kind
             assert clip["time_basis"] == RECAP_TIME_BASIS
-            assert clip["origin"] == "automatic"
+            assert clip["origin"] == AI_RECAP_ORIGIN
+            assert clip["block_id"] == "VO_001"
+            assert clip["beat_ids"] == ["B001", "B002"]
+
+    for event in plan["visual_fx"]["events"] + plan["visual_fx"]["motion_events"]:
+        assert event["origin"] == AI_RECAP_ORIGIN
+        assert event["id"]
+        assert event["block_id"] == "VO_001"
+        assert event["beat_ids"] == ["B001", "B002"]
 
     protected = source_audio_insert_windows(_sequence())
     for event in plan["visual_fx"]["events"] + plan["visual_fx"]["motion_events"]:
@@ -191,3 +222,45 @@ def test_recap_plan_keeps_manual_entities_and_disabled_entities_do_not_render(tm
     assert renderable["visual_fx_events"] == []
     assert renderable["sfx_events"] == []
     assert normal_plan_path.read_text(encoding="utf-8") == normal_before
+
+
+def test_recap_plan_is_deterministic_and_preserves_manual_visual_events(tmp_path, monkeypatch):
+    monkeypatch.setattr("recap_media.effects.prepare_emoji_events", _prepared_emoji)
+    first = build_recap_effects_plan(_sequence(), _captions(), _portrait_plan(), _recap_script())
+    second = build_recap_effects_plan(_sequence(), _captions(), _portrait_plan(), _recap_script())
+    assert first["visual_fx"]["events"] == second["visual_fx"]["events"]
+    assert first["visual_fx"]["motion_events"] == second["visual_fx"]["motion_events"]
+    assert first["automatic_editor_clips"] == second["automatic_editor_clips"]
+
+    effects_path = tmp_path / "effects_plan.json"
+    editor_plan_path = tmp_path / "editor_asset_plan.json"
+    manual_motion = {
+        "id": "manual_motion",
+        "start": 5.0,
+        "end": 5.4,
+        "movement": "punch_in",
+        "active": False,
+        "manual_override": True,
+        "origin": "manual",
+    }
+    first["visual_fx"]["motion_events"].append(manual_motion)
+    write_recap_effects_plan(first, effects_path=effects_path, editor_plan_path=editor_plan_path)
+    write_recap_effects_plan(second, effects_path=effects_path, editor_plan_path=editor_plan_path)
+
+    persisted = json.loads(effects_path.read_text(encoding="utf-8"))
+    assert manual_motion in persisted["visual_fx"]["motion_events"]
+
+
+def test_phase_6a_plan_is_not_loaded_for_rendering(tmp_path):
+    effects_path = tmp_path / "effects_plan.json"
+    editor_plan_path = tmp_path / "editor_asset_plan.json"
+    plan = build_recap_effects_plan(_sequence(), _captions(), _portrait_plan(), _recap_script())
+    write_recap_effects_plan(plan, effects_path=effects_path, editor_plan_path=editor_plan_path)
+
+    assert load_recap_effects(effects_path=effects_path, editor_plan_path=editor_plan_path) == {
+        "visual_fx_events": [],
+        "motion_events": [],
+        "sfx_events": [],
+        "emoji_events": [],
+        "time_basis": RECAP_TIME_BASIS,
+    }

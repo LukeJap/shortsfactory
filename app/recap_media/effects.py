@@ -7,6 +7,7 @@ it does not define a parallel effects vocabulary or renderer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from editor_asset_plan import (
     save_editor_asset_plan,
     set_editor_plan_context,
 )
-from emoji_overlay import prepare_emoji_events
+from emoji_overlay import prepare_emoji_events, resolve_event_asset
 from emoji_planner import build_emoji_candidates
 from make_captions import choose_emoji_events
 from pipeline_paths import RECAP_EDITOR_ASSET_PLAN_PATH, RECAP_EFFECTS_PLAN_PATH
@@ -39,6 +40,7 @@ from visual_fx import build_semantic_moments, expand_moments_to_events, motion_e
 
 RECAP_EFFECTS_SCHEMA_VERSION = 1
 RECAP_TIME_BASIS = "recap_base_timeline"
+AI_RECAP_ORIGIN = "ai_recap"
 
 
 class RecapEffectsError(Exception):
@@ -50,6 +52,101 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def recap_timeline_blocks(
+    sequence: dict[str, Any],
+    recap_script: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Authoritative final-assembly block windows with story provenance."""
+
+    script_by_id = {
+        str(segment.get("segment_id", "") or ""): segment
+        for segment in (recap_script or {}).get("segments", [])
+        if isinstance(segment, dict) and str(segment.get("segment_id", "") or "")
+    }
+    blocks: list[dict[str, Any]] = []
+    cursor = 0.0
+    for segment in sorted(sequence.get("segments", []), key=lambda item: item.get("order", 0)):
+        if not isinstance(segment, dict):
+            continue
+        block_id = str(segment.get("segment_id", "") or "")
+        if not block_id:
+            continue
+        start = _as_float(segment.get("timeline_start_seconds"), cursor)
+        duration = max(0.0, _as_float(segment.get("timeline_duration_seconds")))
+        end = _as_float(segment.get("timeline_end_seconds"), start + duration)
+        if end < start:
+            end = start + duration
+        source = script_by_id.get(block_id, {})
+        raw_beat_ids = segment.get("beat_ids") or source.get("beat_ids") or []
+        blocks.append(
+            {
+                "block_id": block_id,
+                "block_type": str(segment.get("block_type", source.get("block_type", "")) or ""),
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "beat_ids": [str(beat_id) for beat_id in raw_beat_ids if str(beat_id)],
+            }
+        )
+        cursor = max(cursor, end)
+    return blocks
+
+
+def _block_for_time(blocks: list[dict[str, Any]], timestamp: float) -> dict[str, Any] | None:
+    if not blocks:
+        return None
+    for block in blocks:
+        if _as_float(block.get("start")) <= timestamp < _as_float(block.get("end")):
+            return block
+    return min(
+        blocks,
+        key=lambda block: min(
+            abs(timestamp - _as_float(block.get("start"))),
+            abs(timestamp - _as_float(block.get("end"))),
+        ),
+    )
+
+
+def _stable_effect_id(family: str, event: dict[str, Any], block_id: str) -> str:
+    descriptor = {
+        "family": family,
+        "block_id": block_id,
+        "beat_ids": event.get("beat_ids", []),
+        "start": round(_as_float(event.get("start")), 3),
+        "end": round(_as_float(event.get("end")), 3),
+        "effect": event.get("effect", event.get("movement", event.get("category", event.get("emoji", "")))),
+        "trigger": event.get("trigger_word", event.get("matched_word", "")),
+        "stack_id": event.get("stack_id", ""),
+    }
+    digest = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    return f"recap_{family}_{block_id.lower()}_{digest}"
+
+
+def _annotate_recap_events(
+    events: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+    family: str,
+) -> list[dict[str, Any]]:
+    """Give shared event dictionaries stable Recap ownership/provenance."""
+
+    annotated: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        item = dict(event)
+        block = _block_for_time(blocks, _as_float(item.get("start")))
+        block_id = str((block or {}).get("block_id", "timeline") or "timeline")
+        item["block_id"] = block_id
+        item["beat_ids"] = list((block or {}).get("beat_ids", []))
+        item["id"] = _stable_effect_id(family, item, block_id)
+        item["origin"] = AI_RECAP_ORIGIN
+        item["time_basis"] = RECAP_TIME_BASIS
+        item["active"] = item.get("active", True) is not False
+        item["manual_override"] = False
+        item.setdefault("reason", f"ai_recap_{family}")
+        annotated.append(item)
+    return annotated
 
 
 def _output_intervals(
@@ -152,9 +249,37 @@ def _caption_anchor_y(portrait_plan: dict[str, Any]) -> float:
 
 
 def _emoji_clips(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    prepared = prepare_emoji_events(events)
+    # Phase 6A is planning-only. Keep it offline and only propose assets the
+    # existing emoji system has already resolved locally; Phase 6B can decide
+    # whether to acquire/render any missing glyphs.
+    prepared = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        asset_path = resolve_event_asset(event)
+        if asset_path is None:
+            continue
+        prepared.append(
+            {
+                "id": str(event.get("id", "") or ""),
+                "emoji": str(event.get("asset_description", event.get("emoji", "")) or ""),
+                "path": asset_path,
+                "start": _as_float(event.get("start")),
+                "end": _as_float(event.get("end")),
+                "matched_word": str(event.get("matched_word", "") or ""),
+                "position_x": event.get("position_x"),
+                "position_y": event.get("position_y"),
+                "scale": event.get("scale", 1.0),
+            }
+        )
+    metadata_by_id = {
+        str(event.get("id", "") or ""): event
+        for event in events
+        if isinstance(event, dict)
+    }
     clips: list[dict[str, Any]] = []
     for index, event in enumerate(prepared, start=1):
+        metadata = metadata_by_id.get(str(event.get("id", "") or ""), {})
         clips.append(
             {
                 "id": str(event.get("id") or f"recap_emoji_auto_{index:02d}"),
@@ -169,8 +294,12 @@ def _emoji_clips(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "position_y": event.get("position_y"),
                 "scale": event.get("scale", 1.0),
                 "active": True,
-                "origin": "automatic",
+                "origin": AI_RECAP_ORIGIN,
                 "manual_override": False,
+                "block_id": str(metadata.get("block_id", "") or ""),
+                "beat_ids": list(metadata.get("beat_ids", [])),
+                "reason": str(metadata.get("reason", "emoji reaction") or "emoji reaction"),
+                "stack_id": str(metadata.get("stack_id", "") or ""),
             }
         )
     return clips
@@ -226,6 +355,7 @@ def build_recap_effects_plan(
     sequence: dict[str, Any],
     narration_captions: dict[str, Any],
     portrait_plan: dict[str, Any],
+    recap_script: dict[str, Any] | None = None,
     *,
     energy: str = DEFAULT_ENERGY,
 ) -> dict[str, Any]:
@@ -234,18 +364,17 @@ def build_recap_effects_plan(
     energy = normalize_energy(energy)
     words = recap_base_timeline_words(sequence, narration_captions)
     duration = max(0.0, _as_float(sequence.get("total_duration_seconds")))
+    blocks = recap_timeline_blocks(sequence, recap_script)
     moments, intensity_curve = build_semantic_moments(words, energy)
-    fx_events = expand_moments_to_events(moments, energy)
+    moments = _annotate_recap_events(moments, blocks, "moment")
+    fx_events = _annotate_recap_events(expand_moments_to_events(moments, energy), blocks, "fx")
     protected_windows = source_audio_insert_windows(sequence)
     fx_events = [
         event for event in fx_events if not _overlaps_protected_window(event, protected_windows)
     ]
-    for event in fx_events:
-        event["active"] = True
-        event["origin"] = "automatic"
-        event["time_basis"] = RECAP_TIME_BASIS
-
-    motion_events = motion_events_for_moments(moments, duration, energy)
+    motion_events = _annotate_recap_events(
+        motion_events_for_moments(moments, duration, energy), blocks, "motion"
+    )
     motion_events = [
         event for event in motion_events if not _overlaps_protected_window(event, protected_windows)
     ]
@@ -258,9 +387,7 @@ def build_recap_effects_plan(
     emoji_events = [
         event for event in emoji_events if not _overlaps_protected_window(event, protected_windows)
     ]
-    for index, event in enumerate(emoji_events, start=1):
-        event["id"] = f"recap_emoji_auto_{index:02d}"
-        event["time_basis"] = RECAP_TIME_BASIS
+    emoji_events = _annotate_recap_events(emoji_events, blocks, "emoji")
 
     selected_sfx = select_events(
         _sfx_candidates(fx_events, motion_events, emoji_events),
@@ -278,24 +405,27 @@ def build_recap_effects_plan(
         index_local_assets(),
         warnings,
     )
-    sfx_clips = [
-        sfx_clip_from_event(
+    prepared_sfx = _annotate_recap_events(prepared_sfx, blocks, "sfx")
+    sfx_clips = []
+    for event in prepared_sfx:
+        clip = sfx_clip_from_event(event)
+        clip.update(
             {
-                **event,
-                "id": f"recap_sfx_auto_{index:02d}",
-                "time_basis": RECAP_TIME_BASIS,
-                "origin": "automatic",
-                "manual_override": False,
+                "block_id": event["block_id"],
+                "beat_ids": event["beat_ids"],
+                "reason": event["reason"],
+                "stack_id": event.get("stack_id", ""),
             }
         )
-        for index, event in enumerate(prepared_sfx, start=1)
-    ]
+        sfx_clips.append(clip)
 
     return {
         "schema_version": RECAP_EFFECTS_SCHEMA_VERSION,
         "time_basis": RECAP_TIME_BASIS,
+        "render_enabled": False,
         "edit_energy": energy,
         "base_timeline_duration_seconds": round(duration, 3),
+        "timeline_blocks": blocks,
         "source_audio_insert_windows": [
             {"start": round(start, 3), "end": round(end, 3)}
             for start, end in protected_windows
@@ -318,6 +448,28 @@ def build_recap_effects_plan(
     }
 
 
+def _manual_visual_events(data: dict[str, Any], field: str) -> list[dict[str, Any]]:
+    visual = data.get("visual_fx", {})
+    events = visual.get(field, []) if isinstance(visual, dict) else []
+    return [
+        dict(event)
+        for event in events
+        if isinstance(event, dict)
+        and (bool(event.get("manual_override", False)) or bool(event.get("locked", False)))
+    ]
+
+
+def _merge_manual_visual_events(
+    generated: list[dict[str, Any]],
+    manual: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = {str(event.get("id", "") or ""): event for event in generated}
+    for event in manual:
+        event_id = str(event.get("id", "") or "")
+        merged[event_id or f"manual_{len(merged):04d}"] = event
+    return sorted(merged.values(), key=lambda event: (_as_float(event.get("start")), str(event.get("id", ""))))
+
+
 def write_recap_effects_plan(
     effects_plan: dict[str, Any],
     *,
@@ -328,6 +480,18 @@ def write_recap_effects_plan(
     """Persist automatic clips while retaining authoritative manual recap edits."""
 
     duration = _as_float(effects_plan.get("base_timeline_duration_seconds"))
+    try:
+        existing_payload = json.loads(effects_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing_payload = {}
+    payload = dict(effects_plan)
+    visual = dict(payload.get("visual_fx", {}))
+    for field in ("events", "motion_events"):
+        visual[field] = _merge_manual_visual_events(
+            list(visual.get(field, [])),
+            _manual_visual_events(existing_payload, field),
+        )
+    payload["visual_fx"] = visual
     editor_plan = load_editor_asset_plan(editor_plan_path)
     context_matches = editor_plan_context_matches(editor_plan, source_key, 0.0, duration)
     editor_plan = set_editor_plan_context(
@@ -337,13 +501,12 @@ def write_recap_effects_plan(
         duration,
         clear_clips_on_change=not context_matches,
     )
-    automatic = effects_plan.get("automatic_editor_clips", {})
+    automatic = payload.get("automatic_editor_clips", {})
     for kind in ("SFX", "EMOJI"):
         clips = automatic.get(kind, []) if isinstance(automatic, dict) else []
         editor_plan = replace_kind_clips(editor_plan, kind, clips, preserve_manual=True)
     save_editor_asset_plan(editor_plan, editor_plan_path)
 
-    payload = dict(effects_plan)
     payload["editor_asset_plan_path"] = str(editor_plan_path)
     effects_path.parent.mkdir(parents=True, exist_ok=True)
     effects_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -354,6 +517,7 @@ def create_recap_effects_plan(
     sequence: dict[str, Any],
     narration_captions: dict[str, Any],
     portrait_plan: dict[str, Any],
+    recap_script: dict[str, Any] | None = None,
     *,
     energy: str = DEFAULT_ENERGY,
     source_key: str = "recap",
@@ -361,7 +525,13 @@ def create_recap_effects_plan(
     editor_plan_path: Path = RECAP_EDITOR_ASSET_PLAN_PATH,
 ) -> dict[str, Any]:
     return write_recap_effects_plan(
-        build_recap_effects_plan(sequence, narration_captions, portrait_plan, energy=energy),
+        build_recap_effects_plan(
+            sequence,
+            narration_captions,
+            portrait_plan,
+            recap_script,
+            energy=energy,
+        ),
         source_key=source_key,
         effects_path=effects_path,
         editor_plan_path=editor_plan_path,
@@ -381,6 +551,14 @@ def load_recap_effects(
         raise RecapEffectsError(f"recap effects plan is unavailable: {effects_path}") from exc
     if not isinstance(data, dict) or data.get("schema_version") != RECAP_EFFECTS_SCHEMA_VERSION:
         raise RecapEffectsError("recap effects plan has an unsupported schema")
+    if data.get("render_enabled") is False:
+        return {
+            "visual_fx_events": [],
+            "motion_events": [],
+            "sfx_events": [],
+            "emoji_events": [],
+            "time_basis": data.get("time_basis", RECAP_TIME_BASIS),
+        }
 
     editor_plan = load_editor_asset_plan(editor_plan_path)
     sfx_events = []
