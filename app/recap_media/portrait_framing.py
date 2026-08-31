@@ -76,6 +76,7 @@ def build_portrait_filter_chain(
     background_dim: float = DEFAULT_BACKGROUND_DIM,
     input_label: str = "0:v",
     active_rect: dict[str, int] | None = None,
+    pre_split_filters: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     """
     Build the ffmpeg filter_complex fragment: split the source into a
@@ -83,10 +84,11 @@ def build_portrait_filter_chain(
     optionally dimmed) and a foreground copy (scaled to exactly
     content_width x content_height -- the full active picture at the largest
     size that still fits the canvas), then overlay the
-    foreground onto the background at (content_x, content_y). Reads
-    input_label (default the raw first input "0:v"; B9's render pass
-    points this at its concatenated shots track instead); outputs
-    [recap_out].
+    foreground onto the background at (content_x, content_y). Optional
+    pre_split_filters are applied once to the active source picture before
+    the foreground/background split. Reads input_label (default the raw first
+    input "0:v"; B9's render pass points this at its concatenated shots track
+    instead); outputs [recap_out].
     """
 
     background_dim = _clamp(background_dim, 0.0, 1.0)
@@ -114,8 +116,16 @@ def build_portrait_filter_chain(
             f"[{source_label}];"
         )
 
+    pre_split_prefix = ""
+    filters = [str(item).strip() for item in (pre_split_filters or ()) if str(item).strip()]
+    if filters:
+        prepared_label = "recap_prepared_src"
+        pre_split_prefix = f"[{source_label}]{','.join(filters)}[{prepared_label}];"
+        source_label = prepared_label
+
     return (
         crop_prefix
+        + pre_split_prefix
         + f"[{source_label}]split=2[recap_bg_src][recap_fg_src];"
         f"[recap_bg_src]{background_chain}[recap_bg];"
         f"[recap_fg_src]scale={content_width}:{content_height}[recap_fg];"

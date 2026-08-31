@@ -7,6 +7,7 @@ import wave
 
 import pytest
 
+from base_video_polish import PRODUCTION_POLISH_PRESET, polish_filters
 from recap_media.render import (
     DEFAULT_NARRATION_PITCH_SEMITONES,
     DEFAULT_SOURCE_PITCH_SEMITONES,
@@ -369,6 +370,32 @@ def test_filter_complex_applies_a_detected_active_picture_crop_to_all_recap_bloc
 
     assert "[vconcat]crop=1440:1080:240:0[recap_active_src]" in filter_complex
     assert filter_complex.index("crop=1440:1080:240:0") < filter_complex.index("split=2")
+
+
+def test_filter_complex_reuses_standard_base_polish_for_narration_and_source_blocks():
+    sequence = {
+        "total_duration_seconds": 5.5,
+        "segments": [
+            {"segment_id": "N_001", "block_type": "narration", "shots": [_shots()[0]]},
+            {"segment_id": "S_001", "block_type": "source_moment", "shots": [_shots()[1]]},
+        ],
+    }
+    portrait = {
+        **_portrait_plan(),
+        "active_rect": {"x": 240, "y": 0, "width": 1440, "height": 1080},
+        "pillarbox_detection": {"pillarbox_detected": True},
+    }
+
+    filter_complex, _, _ = build_recap_filter_complex(
+        sequence, [_voiceover_clip("VO_001", start=0.0)], {"VO_001": 1}, portrait, _duck_plan()
+    )
+
+    shared_polish = ",".join(polish_filters(PRODUCTION_POLISH_PRESET))
+    assert f"[recap_active_src]{shared_polish}[recap_prepared_src]" in filter_complex
+    assert "trim=start=10.000:end=12.500" in filter_complex
+    assert "trim=start=40.000:end=43.000" in filter_complex
+    assert filter_complex.index(shared_polish) < filter_complex.index("split=2")
+    assert filter_complex.index("split=2") < filter_complex.index("gblur=sigma=")
 
 
 def test_filter_complex_includes_captions_when_path_given(tmp_path):

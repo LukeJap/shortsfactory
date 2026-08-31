@@ -37,6 +37,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from base_video_polish import PRODUCTION_POLISH_PRESET, polish_filters
 from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 from emoji_overlay import (
     build_emoji_filter_complex,
@@ -435,6 +436,9 @@ def build_recap_filter_complex(
         background_dim=portrait_plan.get("background_dim", 0.0),
         input_label=video_label,
         active_rect=active_rect,
+        # Use the exact Standard Short base treatment on the active source
+        # picture before portrait framing splits it into foreground/background.
+        pre_split_filters=polish_filters(PRODUCTION_POLISH_PRESET),
     )
     final_video_label = "recap_out"
     recap_effects = recap_effects or {}

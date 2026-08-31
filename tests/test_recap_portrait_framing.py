@@ -72,6 +72,22 @@ def test_filter_chain_crops_active_picture_before_background_and_foreground_spli
     assert "[recap_active_src]split=2" in chain
 
 
+def test_filter_chain_applies_pre_split_filters_before_blurring_background():
+    chain = build_portrait_filter_chain(
+        0,
+        555,
+        1080,
+        810,
+        active_rect={"x": 240, "y": 0, "width": 1440, "height": 1080},
+        pre_split_filters=["eq=contrast=1.1800", "unsharp=5:5:0.7000:3:3:0.0000"],
+    )
+
+    assert "[recap_active_src]eq=contrast=1.1800,unsharp=5:5:0.7000:3:3:0.0000[recap_prepared_src]" in chain
+    assert chain.index("crop=1440:1080:240:0") < chain.index("eq=contrast=1.1800")
+    assert chain.index("eq=contrast=1.1800") < chain.index("split=2")
+    assert chain.index("split=2") < chain.index("gblur=sigma=")
+
+
 # ============================================================
 # build_portrait_framing_plan: geometry correctness
 # ============================================================
