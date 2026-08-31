@@ -66,7 +66,14 @@ from recap_media.portrait_framing import (
     build_portrait_framing_plan_for_video,
     write_portrait_framing_plan,
 )
-from recap_media.render import RecapRenderError, render_recap, resolve_recap_source_video
+from recap_media.render import (
+    DEFAULT_NARRATION_PITCH_SEMITONES,
+    DEFAULT_SOURCE_PITCH_SEMITONES,
+    NARRATION_PITCH_SEMITONES_RANGE,
+    RecapRenderError,
+    render_recap,
+    resolve_recap_source_video,
+)
 from recap_media.sequence import (
     assemble_sequence,
     interweave_original_dialogue,
@@ -81,6 +88,8 @@ from recap_media.voiceover import (
 )
 
 from ..settings_keys import (
+    RECAP_NARRATION_PITCH_SEMITONES,
+    RECAP_SOURCE_PITCH_SEMITONES,
     RECAP_SCRIPT_SOURCE,
     RECAP_SPEED,
     RECAP_TARGET_DURATION_SECONDS,
@@ -551,6 +560,30 @@ class RecapMixin:
         self.recap_speed = speed
         self.settings.setValue(RECAP_SPEED, speed)
 
+    def recap_narration_pitch_changed(self, value: float):
+        low, high = NARRATION_PITCH_SEMITONES_RANGE
+        try:
+            semitones = float(value)
+        except (TypeError, ValueError):
+            semitones = DEFAULT_NARRATION_PITCH_SEMITONES
+        self.recap_narration_pitch_semitones = max(low, min(high, semitones))
+        self.settings.setValue(
+            RECAP_NARRATION_PITCH_SEMITONES,
+            self.recap_narration_pitch_semitones,
+        )
+
+    def recap_source_pitch_changed(self, value: float):
+        low, high = NARRATION_PITCH_SEMITONES_RANGE
+        try:
+            semitones = float(value)
+        except (TypeError, ValueError):
+            semitones = DEFAULT_SOURCE_PITCH_SEMITONES
+        self.recap_source_pitch_semitones = max(low, min(high, semitones))
+        self.settings.setValue(
+            RECAP_SOURCE_PITCH_SEMITONES,
+            self.recap_source_pitch_semitones,
+        )
+
     def generate_recap(self) -> bool:
         """Build a recap sequence, narration, and its final media render."""
 
@@ -644,6 +677,16 @@ class RecapMixin:
                 output_path=context.final_recap_path,
                 recap_effects={},
                 voiceover_dir=context.voiceover_dir,
+                narration_pitch_semitones=getattr(
+                    self,
+                    "recap_narration_pitch_semitones",
+                    DEFAULT_NARRATION_PITCH_SEMITONES,
+                ),
+                source_pitch_semitones=getattr(
+                    self,
+                    "recap_source_pitch_semitones",
+                    DEFAULT_SOURCE_PITCH_SEMITONES,
+                ),
             )
         except (RecapRenderError, RecapInputError, OSError, ValueError) as exc:
             message = str(exc)

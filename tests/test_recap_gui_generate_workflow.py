@@ -181,6 +181,8 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
         "output_path": context.final_recap_path,
         "recap_effects": {},
         "voiceover_dir": context.voiceover_dir,
+        "narration_pitch_semitones": 1.8,
+        "source_pitch_semitones": 1.8,
     }
     assert [segment["segment_id"] for segment in captured["render_sequence"]["segments"]] == [
         "N_001",

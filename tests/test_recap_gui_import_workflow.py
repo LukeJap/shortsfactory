@@ -369,6 +369,18 @@ def test_active_external_source_and_one_point_five_speed_are_preserved():
     assert window.settings.values[recap_module.RECAP_SPEED] == 1.5
 
 
+def test_recap_pitch_settings_are_persisted_separately_from_overall_speed():
+    window = _RecapWindow()
+
+    window.recap_narration_pitch_changed(2.0)
+    window.recap_source_pitch_changed(1.8)
+
+    assert window.recap_narration_pitch_semitones == 2.0
+    assert window.settings.values[recap_module.RECAP_NARRATION_PITCH_SEMITONES] == 2.0
+    assert window.recap_source_pitch_semitones == 1.8
+    assert window.settings.values[recap_module.RECAP_SOURCE_PITCH_SEMITONES] == 1.8
+
+
 def test_empty_session_does_not_claim_stale_recap_identity():
     window = _RecapWindow()
     window.video_path = None

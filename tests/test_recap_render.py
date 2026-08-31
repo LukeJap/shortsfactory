@@ -1,19 +1,30 @@
+from array import array
+import math
 from pathlib import Path
+import shutil
+import subprocess
+import wave
 
 import pytest
 
 from recap_media.render import (
+    DEFAULT_NARRATION_PITCH_SEMITONES,
+    DEFAULT_SOURCE_PITCH_SEMITONES,
     RECAP_PLAYBACK_SPEED,
     RecapRenderError,
     active_voiceover_clips_in_order,
+    build_narration_pitch_filter,
     build_narration_track_filter,
     build_recap_ffmpeg_command,
     build_recap_filter_complex,
     build_source_audio_track_filter,
+    build_source_pitch_filter,
     escape_ffmpeg_filter_path,
     build_video_track_filter,
     final_recap_duration_seconds,
     input_index_for_voiceover_clips,
+    narration_pitch_ratio,
+    source_pitch_ratio,
     render_recap,
     resolve_recap_source_video,
 )
@@ -81,7 +92,8 @@ def test_source_audio_track_filter_uses_atrim_and_concat_audio_only():
     assert "atrim=start=10.000:end=12.500" in filter_str
     assert "asetpts=PTS-STARTPTS" in filter_str
     assert "concat=n=2:v=0:a=1" in filter_str
-    assert label == "asource"
+    assert "[asource]rubberband=pitch=1.109569:tempo=1.000" in filter_str
+    assert label == "asource_pitched"
 
 
 def test_source_audio_track_filter_never_extends_source_audio_for_holds():
@@ -110,6 +122,14 @@ def test_source_audio_track_uses_tiny_edge_fades_for_original_dialogue_only():
     assert "afade=t=in:st=0:d=0.012" in filter_str
     assert "afade=t=out:st=2.488:d=0.012" in filter_str
     assert filter_str.count("afade=") == 2
+
+
+def test_zero_source_pitch_bypasses_the_source_pitch_filter():
+    filter_str, label = build_source_audio_track_filter(_shots(), source_pitch_semitones=0.0)
+
+    assert build_source_pitch_filter(0.0) == ""
+    assert "rubberband=" not in filter_str
+    assert label == "asource"
 
 
 def test_source_audio_track_filter_empty_shots_raises():
@@ -142,7 +162,8 @@ def test_narration_track_filter_positions_by_start_and_applies_volume():
 
     filter_str, label = build_narration_track_filter(clips, index_map)
 
-    assert "[1:a]volume=0.800,adelay=2500|2500" in filter_str
+    assert "rubberband=pitch=1.109569:tempo=1.000" in filter_str
+    assert "[narr_pitch_1]volume=0.800,adelay=2500|2500" in filter_str
     assert "amix=inputs=1" in filter_str
     assert label == "anarration"
 
@@ -174,6 +195,66 @@ def test_narration_track_filter_splits_and_delays_audio_around_source_insert():
     assert "adelay=4000|4000[narr1_0]" in filter_str
     assert "atrim=start=2.000" in filter_str
     assert "adelay=8500|8500[narr1_1]" in filter_str
+
+
+def test_matched_pitch_configuration_uses_the_expected_plus_one_point_eight_ratio():
+    assert DEFAULT_NARRATION_PITCH_SEMITONES == DEFAULT_SOURCE_PITCH_SEMITONES == 1.8
+    assert narration_pitch_ratio(1.8) == pytest.approx(1.1095695, abs=0.000001)
+    assert source_pitch_ratio(1.8) == pytest.approx(1.1095695, abs=0.000001)
+    expected_filter = (
+        "rubberband=pitch=1.109569:tempo=1.000:formant=preserved:pitchq=quality"
+    )
+    assert build_narration_pitch_filter(1.8) == expected_filter
+    assert build_source_pitch_filter(1.8) == expected_filter
+
+
+def test_zero_narration_pitch_bypasses_the_pitch_filter():
+    filter_str, _ = build_narration_track_filter(
+        [_voiceover_clip("VO_001", start=0.0)],
+        {"VO_001": 1},
+        narration_pitch_semitones=0.0,
+    )
+
+    assert build_narration_pitch_filter(0.0) == ""
+    assert "rubberband=" not in filter_str
+    assert "[1:a]volume=1.000" in filter_str
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for pitch duration coverage")
+@pytest.mark.parametrize("pitch_filter", [build_narration_pitch_filter, build_source_pitch_filter])
+def test_pitch_filters_preserve_a_synthetic_wav_duration(tmp_path, pitch_filter):
+    source_path = tmp_path / "source.wav"
+    pitched_path = tmp_path / "pitched.wav"
+    sample_rate = 24_000
+    samples = array(
+        "h",
+        (
+            round(8_000 * math.sin(2 * math.pi * 440 * index / sample_rate))
+            for index in range(sample_rate)
+        ),
+    )
+    with wave.open(str(source_path), "wb") as source_wav:
+        source_wav.setparams((1, 2, sample_rate, len(samples), "NONE", "not compressed"))
+        source_wav.writeframes(samples.tobytes())
+
+    subprocess.run(
+        [
+            shutil.which("ffmpeg"),
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(source_path),
+            "-af",
+            pitch_filter(1.8),
+            str(pitched_path),
+        ],
+        check=True,
+    )
+    with wave.open(str(pitched_path), "rb") as pitched_wav:
+        pitched_duration = pitched_wav.getnframes() / pitched_wav.getframerate()
+
+    assert pitched_duration == pytest.approx(1.0, abs=0.02)
 
 
 # ============================================================
@@ -240,6 +321,37 @@ def test_filter_complex_assembles_all_pieces_without_captions():
     assert "atempo=1.500" in filter_complex
     assert video_label == "recap_playback_video"
     assert audio_label == "recap_playback_audio"
+
+
+def test_filter_complex_applies_each_pitch_control_to_its_own_audio_branch_before_speed():
+    filter_complex, _, _ = build_recap_filter_complex(
+        _sequence(),
+        [_voiceover_clip("VO_001", start=0.0)],
+        {"VO_001": 1},
+        _portrait_plan(),
+        _duck_plan(),
+        narration_pitch_semitones=1.8,
+        source_pitch_semitones=0.0,
+    )
+
+    assert "[1:a]rubberband=pitch=1.109569:tempo=1.000" in filter_complex
+    assert "[0:a]atrim=start=10.000:end=12.500" in filter_complex
+    assert filter_complex.count("rubberband=") == 1
+    assert filter_complex.count("atempo=1.500") == 1
+    assert final_recap_duration_seconds(113.288, RECAP_PLAYBACK_SPEED) == pytest.approx(75.525)
+
+    source_only_filter, _, _ = build_recap_filter_complex(
+        _sequence(),
+        [_voiceover_clip("VO_001", start=0.0)],
+        {"VO_001": 1},
+        _portrait_plan(),
+        _duck_plan(),
+        narration_pitch_semitones=0.0,
+        source_pitch_semitones=1.8,
+    )
+    assert "[asource]rubberband=pitch=1.109569:tempo=1.000" in source_only_filter
+    assert "[1:a]rubberband=" not in source_only_filter
+    assert source_only_filter.count("atempo=1.500") == 1
 
 
 def test_filter_complex_applies_a_detected_active_picture_crop_to_all_recap_blocks():

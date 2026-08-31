@@ -32,6 +32,7 @@ caveat from the other direction).
 
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,9 @@ class RecapRenderError(Exception):
 
 
 RECAP_PLAYBACK_SPEED = 1.5
+DEFAULT_NARRATION_PITCH_SEMITONES = 1.8
+DEFAULT_SOURCE_PITCH_SEMITONES = 1.8
+NARRATION_PITCH_SEMITONES_RANGE = (-3.0, 4.0)
 MAX_RENDERABLE_VISUAL_SHORTFALL_SECONDS = 0.15
 SOURCE_AUDIO_EDGE_FADE_SECONDS = 0.012
 
@@ -73,6 +77,61 @@ def _validated_playback_speed(playback_speed: float) -> float:
     if not 0.5 <= speed <= 2.0:
         raise RecapRenderError("Recap playback speed must be between 0.5x and 2.0x.")
     return speed
+
+
+def _validated_pitch_semitones(pitch_semitones: float, stream_name: str) -> float:
+    try:
+        semitones = float(pitch_semitones)
+    except (TypeError, ValueError) as exc:
+        raise RecapRenderError(
+            f"Invalid {stream_name.lower()} pitch semitones: {pitch_semitones!r}"
+        ) from exc
+    low, high = NARRATION_PITCH_SEMITONES_RANGE
+    if not low <= semitones <= high:
+        raise RecapRenderError(
+            f"{stream_name} pitch must be between {low:.1f} and {high:.1f} semitones."
+        )
+    return semitones
+
+
+def _pitch_ratio(pitch_semitones: float, stream_name: str) -> float:
+    """Frequency ratio for a semitone setting after range validation."""
+
+    semitones = _validated_pitch_semitones(pitch_semitones, stream_name)
+    return 2 ** (semitones / 12.0)
+
+
+def narration_pitch_ratio(narration_pitch_semitones: float) -> float:
+    return _pitch_ratio(narration_pitch_semitones, "Narration")
+
+
+def source_pitch_ratio(source_pitch_semitones: float) -> float:
+    return _pitch_ratio(source_pitch_semitones, "Source")
+
+
+def _build_duration_preserving_pitch_filter(pitch_semitones: float, stream_name: str) -> str:
+    """Build a duration-preserving pitch transform for one recap audio branch.
+
+    The project's verified FFmpeg build provides ``rubberband``. An explicit
+    tempo=1.000 keeps each branch's duration fixed, leaving the accepted
+    shared playback-speed stage as the only timeline transform.
+    """
+
+    semitones = _validated_pitch_semitones(pitch_semitones, stream_name)
+    if math.isclose(semitones, 0.0, abs_tol=1e-9):
+        return ""
+    return (
+        f"rubberband=pitch={_pitch_ratio(semitones, stream_name):.6f}:tempo=1.000:"
+        "formant=preserved:pitchq=quality"
+    )
+
+
+def build_narration_pitch_filter(narration_pitch_semitones: float) -> str:
+    return _build_duration_preserving_pitch_filter(narration_pitch_semitones, "Narration")
+
+
+def build_source_pitch_filter(source_pitch_semitones: float) -> str:
+    return _build_duration_preserving_pitch_filter(source_pitch_semitones, "Source")
 
 
 def final_recap_duration_seconds(
@@ -189,6 +248,7 @@ def build_source_audio_track_filter(
     shots: list[dict[str, Any]],
     audio_label: str = "0:a",
     output_label: str = "asource",
+    source_pitch_semitones: float = DEFAULT_SOURCE_PITCH_SEMITONES,
 ) -> tuple[str, str]:
     """Same trim+concat reconstruction as build_video_track_filter(), for
     the source video's own audio track (atrim/asetpts/concat a=1)."""
@@ -196,6 +256,7 @@ def build_source_audio_track_filter(
     if not shots:
         raise RecapRenderError("Cannot build a source audio track from an empty shot list.")
 
+    pitch_filter = build_source_pitch_filter(source_pitch_semitones)
     parts = []
     labels = []
 
@@ -217,13 +278,19 @@ def build_source_audio_track_filter(
         labels.append(f"[{label}]")
 
     parts.append("".join(labels) + f"concat=n={len(shots)}:v=0:a=1[{output_label}]")
-    return ";".join(parts), output_label
+    if not pitch_filter:
+        return ";".join(parts), output_label
+
+    pitched_output_label = f"{output_label}_pitched"
+    parts.append(f"[{output_label}]{pitch_filter}[{pitched_output_label}]")
+    return ";".join(parts), pitched_output_label
 
 
 def build_narration_track_filter(
     active_clips: list[dict[str, Any]],
     input_index_by_clip_id: dict[str, int],
     output_label: str = "anarration",
+    narration_pitch_semitones: float = DEFAULT_NARRATION_PITCH_SEMITONES,
 ) -> tuple[str, str]:
     """
     Position each active VOICEOVER clip's WAV (already a separate ffmpeg
@@ -239,6 +306,7 @@ def build_narration_track_filter(
             "Cannot build a narration track with zero active VOICEOVER clips."
         )
 
+    pitch_filter = build_narration_pitch_filter(narration_pitch_semitones)
     parts = []
     labels = []
 
@@ -262,6 +330,10 @@ def build_narration_track_filter(
             raise RecapRenderError(f"No ffmpeg input registered for VOICEOVER clip {clip_id!r}.")
 
         input_index = input_index_by_clip_id[clip_id]
+        input_audio_label = f"{input_index}:a"
+        if pitch_filter:
+            input_audio_label = f"narr_pitch_{input_index}"
+            parts.append(f"[{input_index}:a]{pitch_filter}[{input_audio_label}]")
         delay_ms = max(0, round(float(clip.get("start", 0.0) or 0.0) * 1000))
         try:
             volume = max(0.0, min(1.0, float(clip.get("volume", 1.0) or 1.0)))
@@ -272,7 +344,7 @@ def build_narration_track_filter(
         if not pauses:
             label = f"narr{input_index}"
             parts.append(
-                f"[{input_index}:a]volume={volume:.3f},"
+                f"[{input_audio_label}]volume={volume:.3f},"
                 f"adelay={delay_ms}|{delay_ms}[{label}]"
             )
             labels.append(f"[{label}]")
@@ -288,7 +360,7 @@ def build_narration_track_filter(
                     round((float(clip.get("start", 0.0) or 0.0) + narration_cursor + added_pause_duration) * 1000),
                 )
                 parts.append(
-                    f"[{input_index}:a]atrim=start={narration_cursor:.3f}:end={pause_offset:.3f},"
+                    f"[{input_audio_label}]atrim=start={narration_cursor:.3f}:end={pause_offset:.3f},"
                     f"asetpts=PTS-STARTPTS,volume={volume:.3f},"
                     f"adelay={fragment_delay_ms}|{fragment_delay_ms}[{label}]"
                 )
@@ -302,7 +374,7 @@ def build_narration_track_filter(
             round((float(clip.get("start", 0.0) or 0.0) + narration_cursor + added_pause_duration) * 1000),
         )
         parts.append(
-            f"[{input_index}:a]atrim=start={narration_cursor:.3f},asetpts=PTS-STARTPTS,"
+            f"[{input_audio_label}]atrim=start={narration_cursor:.3f},asetpts=PTS-STARTPTS,"
             f"volume={volume:.3f},adelay={fragment_delay_ms}|{fragment_delay_ms}[{label}]"
         )
         labels.append(f"[{label}]")
@@ -324,6 +396,8 @@ def build_recap_filter_complex(
     captions_ass_path: Path | None = None,
     playback_speed: float = RECAP_PLAYBACK_SPEED,
     recap_effects: dict[str, Any] | None = None,
+    narration_pitch_semitones: float = DEFAULT_NARRATION_PITCH_SEMITONES,
+    source_pitch_semitones: float = DEFAULT_SOURCE_PITCH_SEMITONES,
 ) -> tuple[str, str, str]:
     """
     Assemble the complete filter_complex for one recap render pass.
@@ -333,9 +407,14 @@ def build_recap_filter_complex(
     shots = [shot for segment in sequence["segments"] for shot in segment["shots"]]
 
     video_filter, video_label = build_video_track_filter(shots)
-    source_audio_filter, source_audio_label = build_source_audio_track_filter(shots)
+    source_audio_filter, source_audio_label = build_source_audio_track_filter(
+        shots,
+        source_pitch_semitones=source_pitch_semitones,
+    )
     narration_filter, narration_label = build_narration_track_filter(
-        active_voiceover_clips, input_index_by_clip_id
+        active_voiceover_clips,
+        input_index_by_clip_id,
+        narration_pitch_semitones=narration_pitch_semitones,
     )
 
     pillarbox_detection = portrait_plan.get("pillarbox_detection")
@@ -546,6 +625,8 @@ def render_recap(
     playback_speed: float = RECAP_PLAYBACK_SPEED,
     recap_effects: dict[str, Any] | None = None,
     voiceover_dir: Path | None = None,
+    narration_pitch_semitones: float = DEFAULT_NARRATION_PITCH_SEMITONES,
+    source_pitch_semitones: float = DEFAULT_SOURCE_PITCH_SEMITONES,
 ) -> Path:
     """
     Top-level orchestration: resolve the accepted recap source, build the
@@ -611,6 +692,8 @@ def render_recap(
         captions_ass_path,
         speed,
         recap_effects,
+        narration_pitch_semitones=narration_pitch_semitones,
+        source_pitch_semitones=source_pitch_semitones,
     )
 
     command = build_recap_ffmpeg_command(

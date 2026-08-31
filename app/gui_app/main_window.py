@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -59,6 +60,8 @@ from .settings_keys import (
     FX_INTENSITY,
     MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
+    RECAP_NARRATION_PITCH_SEMITONES,
+    RECAP_SOURCE_PITCH_SEMITONES,
     RECAP_SCRIPT_SOURCE,
     RECAP_SPEED,
     RECAP_TARGET_DURATION_SECONDS,
@@ -71,6 +74,11 @@ from .timeline_widget import SuggestionSlider
 from .widgets import DropZone, TimelineNavigator
 
 from recap_media.orpheus_provider import DEFAULT_VOICE as DEFAULT_ORPHEUS_VOICE
+from recap_media.render import (
+    DEFAULT_NARRATION_PITCH_SEMITONES,
+    DEFAULT_SOURCE_PITCH_SEMITONES,
+    NARRATION_PITCH_SEMITONES_RANGE,
+)
 
 from .mixins.ai_clip_hunter import AIClipHunterMixin
 from .mixins.ai_visual_pipeline import AIVisualPipelineMixin
@@ -525,6 +533,35 @@ class ShortsFactoryWindow(
             self.recap_speed = 1.5
         if self.recap_speed not in {1.25, 1.5, 1.75}:
             self.recap_speed = 1.5
+        try:
+            self.recap_narration_pitch_semitones = float(
+                self.settings.value(
+                    RECAP_NARRATION_PITCH_SEMITONES,
+                    DEFAULT_NARRATION_PITCH_SEMITONES,
+                )
+                or DEFAULT_NARRATION_PITCH_SEMITONES
+            )
+        except (TypeError, ValueError):
+            self.recap_narration_pitch_semitones = DEFAULT_NARRATION_PITCH_SEMITONES
+        pitch_low, pitch_high = NARRATION_PITCH_SEMITONES_RANGE
+        self.recap_narration_pitch_semitones = max(
+            pitch_low,
+            min(pitch_high, self.recap_narration_pitch_semitones),
+        )
+        try:
+            self.recap_source_pitch_semitones = float(
+                self.settings.value(
+                    RECAP_SOURCE_PITCH_SEMITONES,
+                    DEFAULT_SOURCE_PITCH_SEMITONES,
+                )
+                or DEFAULT_SOURCE_PITCH_SEMITONES
+            )
+        except (TypeError, ValueError):
+            self.recap_source_pitch_semitones = DEFAULT_SOURCE_PITCH_SEMITONES
+        self.recap_source_pitch_semitones = max(
+            pitch_low,
+            min(pitch_high, self.recap_source_pitch_semitones),
+        )
         self.recap_active_script: dict | None = None
         self.recap_active_inputs = None
         self.recap_artifact_context = None
@@ -1126,6 +1163,46 @@ class ShortsFactoryWindow(
         recap_speed_row.addWidget(recap_speed_label)
         recap_speed_row.addWidget(self.recap_speed_combo, 1)
         recap_layout.addLayout(recap_speed_row)
+
+        recap_pitch_row = QHBoxLayout()
+        recap_pitch_row.setSpacing(8)
+        recap_pitch_label = QLabel("NARRATION PITCH")
+        recap_pitch_label.setObjectName("TinyLabel")
+        self.recap_narration_pitch_spinbox = QDoubleSpinBox()
+        self.recap_narration_pitch_spinbox.setObjectName("CompactSpinBox")
+        self.recap_narration_pitch_spinbox.setRange(*NARRATION_PITCH_SEMITONES_RANGE)
+        self.recap_narration_pitch_spinbox.setSingleStep(0.1)
+        self.recap_narration_pitch_spinbox.setDecimals(1)
+        self.recap_narration_pitch_spinbox.setSuffix(" st")
+        self.recap_narration_pitch_spinbox.setValue(self.recap_narration_pitch_semitones)
+        self.recap_narration_pitch_spinbox.setToolTip(
+            "Pitch shift applied only during recap rendering; cached narration WAVs remain unchanged."
+        )
+        self.recap_narration_pitch_spinbox.valueChanged.connect(
+            self.recap_narration_pitch_changed
+        )
+        recap_pitch_row.addWidget(recap_pitch_label)
+        recap_pitch_row.addWidget(self.recap_narration_pitch_spinbox, 1)
+        recap_layout.addLayout(recap_pitch_row)
+
+        recap_source_pitch_row = QHBoxLayout()
+        recap_source_pitch_row.setSpacing(8)
+        recap_source_pitch_label = QLabel("SOURCE PITCH")
+        recap_source_pitch_label.setObjectName("TinyLabel")
+        self.recap_source_pitch_spinbox = QDoubleSpinBox()
+        self.recap_source_pitch_spinbox.setObjectName("CompactSpinBox")
+        self.recap_source_pitch_spinbox.setRange(*NARRATION_PITCH_SEMITONES_RANGE)
+        self.recap_source_pitch_spinbox.setSingleStep(0.1)
+        self.recap_source_pitch_spinbox.setDecimals(1)
+        self.recap_source_pitch_spinbox.setSuffix(" st")
+        self.recap_source_pitch_spinbox.setValue(self.recap_source_pitch_semitones)
+        self.recap_source_pitch_spinbox.setToolTip(
+            "Duration-preserving pitch shift for audible episode audio during recap rendering."
+        )
+        self.recap_source_pitch_spinbox.valueChanged.connect(self.recap_source_pitch_changed)
+        recap_source_pitch_row.addWidget(recap_source_pitch_label)
+        recap_source_pitch_row.addWidget(self.recap_source_pitch_spinbox, 1)
+        recap_layout.addLayout(recap_source_pitch_row)
 
         self.recap_script_preview = QListWidget()
         self.recap_script_preview.setObjectName("TranscriptList")
