@@ -264,3 +264,79 @@ def test_phase_6a_plan_is_not_loaded_for_rendering(tmp_path):
         "emoji_events": [],
         "time_basis": RECAP_TIME_BASIS,
     }
+
+
+def test_explicit_render_opt_in_uses_shared_entities_without_promoting_plan(tmp_path, monkeypatch):
+    effects_path = tmp_path / "effects_plan.json"
+    editor_plan_path = tmp_path / "editor_asset_plan.json"
+    sfx_path = Path("assets/sfx/oxidvideos-ding-editing-sfx-414336.mp3").resolve()
+    emoji_path = Path("assets/emoji/23866-spongebob-dance.gif").resolve()
+    plan = {
+        "schema_version": RECAP_EFFECTS_SCHEMA_VERSION,
+        "time_basis": RECAP_TIME_BASIS,
+        "render_enabled": False,
+        "base_timeline_duration_seconds": 8.0,
+        "visual_fx": {
+            "events": [
+                {"id": "fx_01", "start": 1.25, "end": 1.75, "active": True},
+                {"id": "fx_disabled", "start": 2.0, "end": 2.5, "active": False},
+            ],
+            "motion_events": [
+                {"id": "motion_01", "start": 1.2, "end": 1.8, "active": True},
+                {"id": "motion_disabled", "start": 2.0, "end": 2.5, "active": False},
+            ],
+        },
+        "automatic_editor_clips": {
+            "SFX": [
+                {
+                    "id": "sfx_01",
+                    "kind": "SFX",
+                    "time_basis": RECAP_TIME_BASIS,
+                    "start": 1.25,
+                    "end": 1.5,
+                    "duration": 0.25,
+                    "asset_path": str(sfx_path),
+                    "active": True,
+                },
+                {
+                    "id": "sfx_disabled",
+                    "kind": "SFX",
+                    "time_basis": RECAP_TIME_BASIS,
+                    "start": 2.0,
+                    "end": 2.25,
+                    "duration": 0.25,
+                    "asset_path": str(sfx_path),
+                    "active": False,
+                },
+            ],
+            "EMOJI": [
+                {
+                    "id": "emoji_01",
+                    "kind": "EMOJI",
+                    "time_basis": RECAP_TIME_BASIS,
+                    "start": 1.25,
+                    "end": 2.75,
+                    "emoji": "spongebob dance",
+                    "asset_path": str(emoji_path),
+                    "active": True,
+                }
+            ],
+        },
+    }
+    write_recap_effects_plan(plan, effects_path=effects_path, editor_plan_path=editor_plan_path)
+    monkeypatch.setattr("recap_media.effects.prepare_emoji_events", _prepared_emoji)
+
+    renderable = load_recap_effects(
+        effects_path=effects_path,
+        editor_plan_path=editor_plan_path,
+        render_planned_effects=True,
+    )
+
+    persisted = json.loads(effects_path.read_text(encoding="utf-8"))
+    assert persisted["render_enabled"] is False
+    assert [event["id"] for event in renderable["visual_fx_events"]] == ["fx_01"]
+    assert [event["id"] for event in renderable["motion_events"]] == ["motion_01"]
+    assert [event["id"] for event in renderable["sfx_events"]] == ["sfx_01"]
+    assert [event["id"] for event in renderable["emoji_events"]] == ["emoji_01"]
+    assert renderable["sfx_events"][0]["start"] == 1.25
+    assert renderable["emoji_events"][0]["start"] == 1.25

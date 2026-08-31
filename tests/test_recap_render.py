@@ -9,6 +9,7 @@ import pytest
 
 from base_video_polish import PRODUCTION_POLISH_PRESET, polish_filters
 from recap_media.render import (
+    DEFAULT_RECAP_TIMELINE_FPS,
     DEFAULT_NARRATION_PITCH_SEMITONES,
     DEFAULT_SOURCE_PITCH_SEMITONES,
     RECAP_PLAYBACK_SPEED,
@@ -18,6 +19,7 @@ from recap_media.render import (
     build_narration_track_filter,
     build_recap_ffmpeg_command,
     build_recap_filter_complex,
+    build_recap_motion_filter,
     build_source_audio_track_filter,
     build_source_pitch_filter,
     escape_ffmpeg_filter_path,
@@ -25,6 +27,7 @@ from recap_media.render import (
     final_recap_duration_seconds,
     input_index_for_voiceover_clips,
     narration_pitch_ratio,
+    recap_timeline_fps,
     source_pitch_ratio,
     render_recap,
     resolve_recap_source_video,
@@ -448,6 +451,7 @@ def test_filter_complex_uses_shared_fx_sfx_and_emoji_before_the_single_speed_pas
     )
 
     assert "[recap_out]zoompan=" in filter_complex
+    assert f"fps={DEFAULT_RECAP_TIMELINE_FPS:.6f}" in filter_complex
     assert "[recap_motion]" in filter_complex
     assert "[2:a:0]atrim=" in filter_complex
     assert "[3:v]format=rgba" in filter_complex
@@ -456,6 +460,152 @@ def test_filter_complex_uses_shared_fx_sfx_and_emoji_before_the_single_speed_pas
     assert filter_complex.count("atempo=1.500") == 1
     assert video_label == "recap_playback_video"
     assert audio_label == "recap_playback_audio"
+
+
+def test_shared_effect_timestamps_stay_on_the_recap_base_timeline(tmp_path):
+    clips = [_voiceover_clip("VO_001", start=0.0)]
+    ass_path = tmp_path / "narration.ass"
+    effects = {
+        "visual_fx_events": [
+            {"type": "filter", "effect": "impact_punch", "start": 11.65, "end": 12.15}
+        ],
+        "motion_events": [
+            {"start": 11.57, "end": 12.33, "zoom": 1.08, "movement": "punch_in"}
+        ],
+        "sfx_events": [
+            {
+                "start": 11.57,
+                "duration": 0.2,
+                "volume": 0.2,
+                "trim_in": 0.0,
+                "asset_path": str(tmp_path / "ding.mp3"),
+            }
+        ],
+        "emoji_events": [
+            {
+                "path": tmp_path / "emoji.png",
+                "start": 11.65,
+                "end": 13.15,
+                "position_x": 0.2,
+                "position_y": 0.3,
+            }
+        ],
+    }
+
+    filter_complex, _, _ = build_recap_filter_complex(
+        _sequence(), clips, {"VO_001": 1}, _portrait_plan(), _duck_plan(), ass_path,
+        recap_effects=effects,
+    )
+
+    assert "between(t,11.65,13.15)" in filter_complex
+    assert "adelay=11570|11570" in filter_complex
+    assert filter_complex.index("between(t,11.65,13.15)") < filter_complex.index("setpts=PTS/1.500")
+
+
+def test_motion_adapter_preserves_two_source_moments_in_the_assembled_video(tmp_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is required for source-moment video coverage")
+
+    source_path = tmp_path / "source.mp4"
+    rendered_path = tmp_path / "effects.mp4"
+    colors = ("red", "green", "blue", "yellow", "magenta")
+    inputs = [
+        item
+        for color in colors
+        for item in ("-f", "lavfi", "-i", f"color=c={color}:s=96x54:r=24000/1001:d=1")
+    ]
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            *inputs,
+            "-filter_complex",
+            "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0[v]",
+            "-map",
+            "[v]",
+            "-c:v",
+            "libx264",
+            str(source_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    shots = [
+        {"start": index, "end": index + 1.0, "duration": 1.0}
+        for index in range(5)
+    ]
+    video_filter, video_label = build_video_track_filter(shots)
+    motion_filter = build_recap_motion_filter(
+        [{"start": 0.2, "end": 0.7, "zoom": 1.05, "movement": "punch_in"}],
+        input_label=video_label,
+        output_label="motion_test",
+        timeline_fps=24000 / 1001,
+    ).replace("s=1080x1920", "s=96x54")
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source_path),
+            "-filter_complex",
+            f"{video_filter};{motion_filter};[motion_test]setpts=PTS/1.500[out]",
+            "-map",
+            "[out]",
+            "-c:v",
+            "libx264",
+            str(rendered_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    def center_rgb(timestamp: float) -> tuple[int, int, int]:
+        sample_path = tmp_path / f"sample_{timestamp:.3f}.ppm"
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                str(rendered_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                    "crop=2:2:48:26",
+                "-c:v",
+                "ppm",
+                str(sample_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0
+        return tuple(sample_path.read_bytes()[-3:])
+
+    # At 1.0s final time the 1.50x render is inside source moment S_001
+    # (green); at 2.333s it is inside separated S_002 (yellow).
+    green = center_rgb(1.0)
+    yellow = center_rgb(2.333)
+    assert green[1] > green[0] * 1.5 and green[1] > green[2] * 1.5
+    assert yellow[0] > 120 and yellow[1] > 120 and yellow[2] < 80
+
+
+def test_recap_timeline_fps_uses_source_rate_and_falls_back(monkeypatch, tmp_path):
+    class Result:
+        stdout = "30000/1001\n"
+
+    monkeypatch.setattr("recap_media.render.subprocess.run", lambda *args, **kwargs: Result())
+    assert recap_timeline_fps(tmp_path / "source.mp4") == pytest.approx(30000 / 1001)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("ffprobe unavailable")
+
+    monkeypatch.setattr("recap_media.render.subprocess.run", unavailable)
+    assert recap_timeline_fps(tmp_path / "source.mp4") == DEFAULT_RECAP_TIMELINE_FPS
 
 
 def test_filter_complex_escapes_windows_ass_drive_path_for_subtitles():

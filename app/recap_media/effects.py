@@ -542,8 +542,15 @@ def load_recap_effects(
     *,
     effects_path: Path = RECAP_EFFECTS_PLAN_PATH,
     editor_plan_path: Path = RECAP_EDITOR_ASSET_PLAN_PATH,
+    render_planned_effects: bool = False,
 ) -> dict[str, Any]:
-    """Load renderable effects, honoring disabled/deleted recap entities."""
+    """Load renderable effects, honoring disabled/deleted recap entities.
+
+    Phase 6A plans deliberately remain planning-only until a caller opts in
+    at render time.  The opt-in is intentionally an argument rather than a
+    mutation of the persisted plan, so a candidate render cannot silently
+    promote or rewrite the editable effect artifact.
+    """
 
     try:
         data = json.loads(effects_path.read_text(encoding="utf-8"))
@@ -551,7 +558,7 @@ def load_recap_effects(
         raise RecapEffectsError(f"recap effects plan is unavailable: {effects_path}") from exc
     if not isinstance(data, dict) or data.get("schema_version") != RECAP_EFFECTS_SCHEMA_VERSION:
         raise RecapEffectsError("recap effects plan has an unsupported schema")
-    if data.get("render_enabled") is False:
+    if data.get("render_enabled") is False and not render_planned_effects:
         return {
             "visual_fx_events": [],
             "motion_events": [],

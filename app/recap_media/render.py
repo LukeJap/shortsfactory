@@ -63,6 +63,7 @@ class RecapRenderError(Exception):
 
 
 RECAP_PLAYBACK_SPEED = 1.5
+DEFAULT_RECAP_TIMELINE_FPS = 24000 / 1001
 DEFAULT_NARRATION_PITCH_SEMITONES = 1.8
 DEFAULT_SOURCE_PITCH_SEMITONES = 1.8
 NARRATION_PITCH_SEMITONES_RANGE = (-3.0, 4.0)
@@ -142,6 +143,66 @@ def final_recap_duration_seconds(
     """Output duration after the final composite speed transform."""
 
     return round(max(0.0, float(base_duration_seconds)) / _validated_playback_speed(playback_speed), 3)
+
+
+def recap_timeline_fps(source_video: Path) -> float:
+    """Return the assembled source timeline's frame rate for smart motion.
+
+    ``zoompan`` with ``d=1`` emits one output frame per assembled input
+    frame. Its output FPS therefore must match the source timeline or video
+    runs independently of the source-audio concat. A conservative broadcast
+    default preserves the established behavior when probing is unavailable.
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(source_video),
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        numerator, denominator = result.stdout.strip().split("/", 1)
+        fps = float(numerator) / float(denominator)
+    except (OSError, subprocess.SubprocessError, ValueError, ZeroDivisionError):
+        return DEFAULT_RECAP_TIMELINE_FPS
+    return fps if math.isfinite(fps) and 1.0 <= fps <= 120.0 else DEFAULT_RECAP_TIMELINE_FPS
+
+
+def build_recap_motion_filter(
+    motion_events: list[dict[str, Any]],
+    *,
+    input_label: str = "recap_out",
+    output_label: str = "recap_motion",
+    timeline_fps: float = DEFAULT_RECAP_TIMELINE_FPS,
+) -> str:
+    """Adapt the shared smart-motion expressions to the assembled recap.
+
+    This does not create a second motion implementation. It only gives the
+    existing shared expressions the same frame rate as the N_/S_ concat they
+    consume, which keeps source video and source audio on one timeline.
+    """
+
+    fps = float(timeline_fps)
+    if not math.isfinite(fps) or not 1.0 <= fps <= 120.0:
+        fps = DEFAULT_RECAP_TIMELINE_FPS
+    return (
+        f"[{input_label}]zoompan="
+        f"z='{zoom_expression(motion_events, fps)}':"
+        f"x='{x_expression(motion_events, fps)}':"
+        f"y='{y_expression(motion_events, fps)}':"
+        f"d=1:s=1080x1920:fps={fps:.6f}[{output_label}]"
+    )
 
 
 def escape_ffmpeg_filter_path(path: Path) -> str:
@@ -399,6 +460,7 @@ def build_recap_filter_complex(
     recap_effects: dict[str, Any] | None = None,
     narration_pitch_semitones: float = DEFAULT_NARRATION_PITCH_SEMITONES,
     source_pitch_semitones: float = DEFAULT_SOURCE_PITCH_SEMITONES,
+    timeline_fps: float = DEFAULT_RECAP_TIMELINE_FPS,
 ) -> tuple[str, str, str]:
     """
     Assemble the complete filter_complex for one recap render pass.
@@ -462,13 +524,9 @@ def build_recap_filter_complex(
         # the already-framed 1080x1920 recap canvas. This retains Recap
         # Mode's portrait composition while giving its semantic moments the
         # same punch-in/pan language as a regular Short.
-        fps = 30.0
-        motion_filter = (
-            "[recap_out]zoompan="
-            f"z='{zoom_expression(motion_events, fps)}':"
-            f"x='{x_expression(motion_events, fps)}':"
-            f"y='{y_expression(motion_events, fps)}':"
-            "d=1:s=1080x1920:fps=30.000[recap_motion]"
+        motion_filter = build_recap_motion_filter(
+            motion_events,
+            timeline_fps=timeline_fps,
         )
         final_video_label = "recap_motion"
 
@@ -654,6 +712,7 @@ def render_recap(
         )
 
     source_video = resolve_recap_source_video(episode_identity)
+    timeline_fps = recap_timeline_fps(source_video)
     speed = _validated_playback_speed(playback_speed)
     active_clips = active_voiceover_clips_in_order(voiceover_clips)
     if not active_clips:
@@ -698,6 +757,7 @@ def render_recap(
         recap_effects,
         narration_pitch_semitones=narration_pitch_semitones,
         source_pitch_semitones=source_pitch_semitones,
+        timeline_fps=timeline_fps,
     )
 
     command = build_recap_ffmpeg_command(
