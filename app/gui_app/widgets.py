@@ -10,8 +10,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont, QMouseEvent, QPainter
+from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QFont,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -65,6 +74,376 @@ class AspectRatioContainer(QWidget):
             max(1, target_width),
             max(1, target_height),
         )
+
+
+class YouTubeShortsMockOverlay(QWidget):
+    """A preview-only painted mobile Shorts shell; it has no render contract."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.hide()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        width = max(1, self.width())
+        height = max(1, self.height())
+        unit = max(1.0, width / 360.0)
+
+        def font(size: float, weight: QFont.Weight = QFont.Weight.Normal):
+            result = QFont(self.font())
+            result.setPixelSize(max(8, round(size * unit)))
+            result.setWeight(weight)
+            return result
+
+        def text(
+            rect: QRect,
+            value: str,
+            size: float,
+            weight=QFont.Weight.Normal,
+            align=None,
+            color: QColor | None = None,
+        ):
+            painter.save()
+            painter.setFont(font(size, weight))
+            painter.setPen(color or QColor(255, 255, 255, 245))
+            painter.drawText(
+                rect,
+                align or (Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+                value,
+            )
+            painter.restore()
+
+        def stroke(width: float = 1.7):
+            pen = QPen(QColor(255, 255, 255, 245), max(1.2, width * unit))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        def draw_thumb(x: int, y: int, size: int, down: bool = False):
+            painter.save()
+            if down:
+                painter.translate(0, 2 * y + size)
+                painter.scale(1, -1)
+            path = QPainterPath()
+            path.moveTo(x, y + size * 0.42)
+            path.lineTo(x + size * 0.22, y + size * 0.42)
+            path.lineTo(x + size * 0.34, y + size * 0.12)
+            path.lineTo(x + size * 0.49, y + size * 0.12)
+            path.lineTo(x + size * 0.54, y + size * 0.29)
+            path.lineTo(x + size * 0.82, y + size * 0.29)
+            path.lineTo(x + size * 0.92, y + size * 0.40)
+            path.lineTo(x + size * 0.87, y + size * 0.73)
+            path.lineTo(x + size * 0.76, y + size * 0.87)
+            path.lineTo(x + size * 0.22, y + size * 0.87)
+            path.lineTo(x + size * 0.22, y + size * 0.42)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.drawLine(x + size * 0.22, y + size * 0.42, x + size * 0.22, y + size * 0.87)
+            painter.restore()
+
+        def draw_comment(x: int, y: int, size: int):
+            bubble = QRect(x, y, round(size * 0.92), round(size * 0.67))
+            painter.drawRoundedRect(bubble, round(size * 0.12), round(size * 0.12))
+            painter.drawLine(
+                x + round(size * 0.58),
+                y + round(size * 0.67),
+                x + round(size * 0.74),
+                y + round(size * 0.88),
+            )
+            painter.drawLine(
+                x + round(size * 0.74),
+                y + round(size * 0.88),
+                x + round(size * 0.74),
+                y + round(size * 0.67),
+            )
+
+        def draw_share(x: int, y: int, size: int):
+            painter.drawLine(
+                x + round(size * 0.10),
+                y + round(size * 0.74),
+                x + round(size * 0.78),
+                y + round(size * 0.27),
+            )
+            painter.drawLine(
+                x + round(size * 0.52),
+                y + round(size * 0.27),
+                x + round(size * 0.78),
+                y + round(size * 0.27),
+            )
+            painter.drawLine(
+                x + round(size * 0.78),
+                y + round(size * 0.27),
+                x + round(size * 0.71),
+                y + round(size * 0.05),
+            )
+            painter.drawLine(
+                x + round(size * 0.10),
+                y + round(size * 0.74),
+                x + round(size * 0.10),
+                y + round(size * 0.48),
+            )
+
+        def draw_remix(x: int, y: int, size: int):
+            painter.drawLine(
+                x + round(size * 0.12),
+                y + round(size * 0.31),
+                x + round(size * 0.72),
+                y + round(size * 0.31),
+            )
+            painter.drawLine(
+                x + round(size * 0.72),
+                y + round(size * 0.31),
+                x + round(size * 0.58),
+                y + round(size * 0.14),
+            )
+            painter.drawLine(
+                x + round(size * 0.72),
+                y + round(size * 0.31),
+                x + round(size * 0.58),
+                y + round(size * 0.48),
+            )
+            painter.drawLine(
+                x + round(size * 0.88),
+                y + round(size * 0.69),
+                x + round(size * 0.28),
+                y + round(size * 0.69),
+            )
+            painter.drawLine(
+                x + round(size * 0.28),
+                y + round(size * 0.69),
+                x + round(size * 0.42),
+                y + round(size * 0.52),
+            )
+            painter.drawLine(
+                x + round(size * 0.28),
+                y + round(size * 0.69),
+                x + round(size * 0.42),
+                y + round(size * 0.86),
+            )
+
+        def draw_home(x: int, y: int, size: int):
+            path = QPainterPath()
+            path.moveTo(x + size * 0.10, y + size * 0.47)
+            path.lineTo(x + size * 0.50, y + size * 0.12)
+            path.lineTo(x + size * 0.90, y + size * 0.47)
+            path.lineTo(x + size * 0.82, y + size * 0.47)
+            path.lineTo(x + size * 0.82, y + size * 0.87)
+            path.lineTo(x + size * 0.18, y + size * 0.87)
+            path.lineTo(x + size * 0.18, y + size * 0.47)
+            path.closeSubpath()
+            painter.drawPath(path)
+
+        def draw_shorts(x: int, y: int, size: int):
+            path = QPainterPath()
+            path.moveTo(x + size * 0.35, y + size * 0.08)
+            path.lineTo(x + size * 0.72, y + size * 0.30)
+            path.lineTo(x + size * 0.55, y + size * 0.46)
+            path.lineTo(x + size * 0.75, y + size * 0.68)
+            path.lineTo(x + size * 0.39, y + size * 0.91)
+            path.lineTo(x + size * 0.22, y + size * 0.74)
+            path.lineTo(x + size * 0.42, y + size * 0.53)
+            path.lineTo(x + size * 0.23, y + size * 0.30)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.drawLine(x + size * 0.43, y + size * 0.36, x + size * 0.60, y + size * 0.48)
+            painter.drawLine(x + size * 0.43, y + size * 0.60, x + size * 0.59, y + size * 0.49)
+
+        def draw_subscriptions(x: int, y: int, size: int):
+            painter.drawRoundedRect(
+                QRect(x, y + round(size * 0.16), size, round(size * 0.67)),
+                round(size * 0.10),
+                round(size * 0.10),
+            )
+            path = QPainterPath()
+            path.moveTo(x + size * 0.42, y + size * 0.34)
+            path.lineTo(x + size * 0.42, y + size * 0.65)
+            path.lineTo(x + size * 0.68, y + size * 0.50)
+            path.closeSubpath()
+            painter.drawPath(path)
+
+        def draw_profile(x: int, y: int, size: int):
+            painter.drawEllipse(
+                QRect(x + round(size * 0.34), y + round(size * 0.08), round(size * 0.32), round(size * 0.32))
+            )
+            shoulders = QPainterPath()
+            shoulders.moveTo(x + size * 0.16, y + size * 0.86)
+            shoulders.cubicTo(
+                x + size * 0.23,
+                y + size * 0.53,
+                x + size * 0.77,
+                y + size * 0.53,
+                x + size * 0.84,
+                y + size * 0.86,
+            )
+            painter.drawPath(shoulders)
+
+        def draw_music_note(x: int, y: int, size: int):
+            painter.drawLine(
+                x + round(size * 0.62),
+                y + round(size * 0.08),
+                x + round(size * 0.62),
+                y + round(size * 0.70),
+            )
+            painter.drawLine(
+                x + round(size * 0.62),
+                y + round(size * 0.08),
+                x + round(size * 0.92),
+                y + round(size * 0.18),
+            )
+            painter.drawEllipse(
+                QRect(x, y + round(size * 0.57), round(size * 0.42), round(size * 0.28))
+            )
+
+        margin = round(17 * unit)
+        top_icon = round(24 * unit)
+        search_ring = round(16 * unit)
+
+        painter.save()
+        stroke(1.35)
+        painter.drawLine(margin + top_icon, margin, margin, margin + top_icon // 2)
+        painter.drawLine(margin, margin + top_icon // 2, margin + top_icon, margin + top_icon)
+        search_x = width - margin - round(top_icon * 3.35)
+        painter.drawEllipse(search_x, margin + 2, search_ring, search_ring)
+        painter.drawLine(
+            search_x + search_ring - 1,
+            margin + search_ring + 1,
+            search_x + search_ring + round(7 * unit),
+            margin + search_ring + round(9 * unit),
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 245))
+        for index in range(3):
+            painter.drawEllipse(
+                width - margin - top_icon + 5,
+                margin + 5 + index * round(6 * unit),
+                max(2, round(2.4 * unit)),
+                max(2, round(2.4 * unit)),
+            )
+        painter.restore()
+
+        rail_width = round(44 * unit)
+        rail_x = width - margin - round(34 * unit)
+        rail_icon = max(round(17 * unit), round(min(width, height) * 0.045))
+        rail_top = round(height * 0.37)
+        action_gap = max(round(52 * unit), rail_icon + round(24 * unit))
+        actions = (("like", "17K"), ("dislike", "Dislike"), ("comment", "391"), ("share", "Share"), ("remix", "Remix"))
+        for index, (action, label) in enumerate(actions):
+            y = rail_top + index * action_gap
+            icon_x = rail_x + (rail_width - rail_icon) // 2
+            painter.save()
+            stroke(1.55)
+            if action == "like":
+                draw_thumb(icon_x, y, rail_icon)
+            elif action == "dislike":
+                draw_thumb(icon_x, y, rail_icon, down=True)
+            elif action == "comment":
+                draw_comment(icon_x, y + round(rail_icon * 0.08), rail_icon)
+            elif action == "share":
+                draw_share(icon_x, y, rail_icon)
+            else:
+                draw_remix(icon_x, y, rail_icon)
+            painter.restore()
+            text(
+                QRect(rail_x, y + rail_icon + round(3 * unit), rail_width, round(15 * unit)),
+                label,
+                8,
+                QFont.Weight.DemiBold,
+            )
+
+        lower_left = round(height * 0.76)
+        avatar = round(28 * unit)
+        painter.save()
+        painter.setBrush(QColor(245, 245, 245, 235))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(margin, lower_left, avatar, avatar)
+        painter.setBrush(QColor(180, 180, 180, 255))
+        painter.drawEllipse(margin + avatar // 3, lower_left + avatar // 4, avatar // 3, avatar // 3)
+        painter.restore()
+        text(QRect(margin + avatar + round(8 * unit), lower_left - 2, round(150 * unit), avatar), "@shortsfactory", 10, QFont.Weight.DemiBold, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        pill_x = margin + avatar + round(122 * unit)
+        painter.save()
+        painter.setBrush(QColor(255, 255, 255, 225))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(pill_x, lower_left + round(4 * unit), round(72 * unit), round(20 * unit), round(10 * unit), round(10 * unit))
+        painter.restore()
+        text(
+            QRect(pill_x, lower_left + round(4 * unit), round(72 * unit), round(20 * unit)),
+            "Subscribe",
+            8,
+            QFont.Weight.DemiBold,
+            color=QColor(20, 20, 20, 245),
+        )
+        text(
+            QRect(
+                margin,
+                lower_left + round(36 * unit),
+                width - margin * 2 - round(64 * unit),
+                round(30 * unit),
+            ),
+            "Your short title and description live here.",
+            9,
+            QFont.Weight.Normal,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        )
+        nav_height = round(62 * unit)
+        nav_y = height - nav_height
+        audio_y = min(
+            lower_left + round(76 * unit),
+            nav_y - round(21 * unit),
+        )
+        painter.save()
+        stroke(1.15)
+        draw_music_note(margin, audio_y + round(3 * unit), round(12 * unit))
+        painter.restore()
+        text(
+            QRect(margin + round(16 * unit), audio_y, width - margin * 2 - round(16 * unit), round(20 * unit)),
+            "Original audio - ShortsFactory",
+            8,
+            QFont.Weight.Normal,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        painter.save()
+        painter.setBrush(QColor(0, 0, 0, 245))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(0, nav_y, width, nav_height)
+        painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        painter.drawLine(0, nav_y, width, nav_y)
+        painter.restore()
+        nav_icon = max(round(18 * unit), round(nav_height * 0.31))
+        for index, label in enumerate(("Home", "Shorts", "Create", "Inbox", "You")):
+            x = int((index + 0.5) * width / 5)
+            icon_x = x - nav_icon // 2
+            icon_y = nav_y + round(7 * unit)
+            painter.save()
+            stroke(1.5)
+            if index == 0:
+                draw_home(icon_x, icon_y, nav_icon)
+            elif index == 1:
+                draw_shorts(icon_x, icon_y, nav_icon)
+            elif index == 2:
+                painter.setBrush(QColor(45, 45, 45, 245))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(icon_x - round(3 * unit), icon_y - round(3 * unit), nav_icon + round(6 * unit), nav_icon + round(6 * unit))
+                stroke(1.8)
+                painter.drawLine(x - round(nav_icon * 0.28), icon_y + nav_icon // 2, x + round(nav_icon * 0.28), icon_y + nav_icon // 2)
+                painter.drawLine(x, icon_y + round(nav_icon * 0.22), x, icon_y + round(nav_icon * 0.78))
+            elif index == 3:
+                draw_subscriptions(icon_x, icon_y, nav_icon)
+            else:
+                draw_profile(icon_x, icon_y, nav_icon)
+            painter.restore()
+            text(
+                QRect(x - round(35 * unit), icon_y + nav_icon + round(2 * unit), round(70 * unit), round(15 * unit)),
+                label,
+                7,
+                QFont.Weight.DemiBold,
+            )
 
 
 class TimelineNavigator(QWidget):

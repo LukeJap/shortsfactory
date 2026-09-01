@@ -463,6 +463,7 @@ def build_recap_filter_complex(
     captions_ass_path: Path | None = None,
     playback_speed: float = RECAP_PLAYBACK_SPEED,
     recap_effects: dict[str, Any] | None = None,
+    title_ass_path: Path | None = None,
     narration_pitch_semitones: float = DEFAULT_NARRATION_PITCH_SEMITONES,
     source_pitch_semitones: float = DEFAULT_SOURCE_PITCH_SEMITONES,
     timeline_fps: float = DEFAULT_RECAP_TIMELINE_FPS,
@@ -560,6 +561,15 @@ def build_recap_filter_complex(
         # builder carries labels without brackets between stages.
         final_video_label = final_video_label.strip("[]")
 
+    if title_ass_path is not None:
+        title_filter = (
+            f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(title_ass_path)}"
+            "[recap_titled]"
+        )
+        final_video_label = "recap_titled"
+    else:
+        title_filter = None
+
     if captions_ass_path is not None:
         caption_filter = (
             f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
@@ -602,6 +612,8 @@ def build_recap_filter_complex(
         fragments.append(fx_filter)
     if emoji_filter is not None:
         fragments.append(emoji_filter)
+    if title_filter is not None:
+        fragments.append(title_filter)
     if caption_filter is not None:
         fragments.append(caption_filter)
     fragments.append(duck_filter)
@@ -675,6 +687,7 @@ def build_recap_editor_export_filter_complex(
     recap_effects: dict[str, Any],
     *,
     captions_ass_path: Path,
+    title_ass_path: Path | None = None,
     timeline_fps: float,
     emoji_first_input_index: int | None = None,
     music_input_index: int | None = None,
@@ -717,6 +730,12 @@ def build_recap_editor_export_filter_complex(
         )
         fragments.append(emoji_filter)
         video_label = emoji_label.strip("[]")
+    if title_ass_path is not None:
+        fragments.append(
+            f"[{video_label}]subtitles=filename={escape_ffmpeg_filter_path(title_ass_path)}"
+            "[recap_editor_titled]"
+        )
+        video_label = "recap_editor_titled"
     fragments.append(
         f"[{video_label}]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
         "[recap_editor_captioned]"
@@ -842,6 +861,7 @@ def render_recap_editor_export(
     captions_ass_path: Path,
     output_path: Path,
     *,
+    title_ass_path: Path | None = None,
     music_path: Path | None = None,
     music_volume: float = 0.0,
 ) -> Path:
@@ -851,6 +871,8 @@ def render_recap_editor_export(
         raise RecapRenderError(f"Clean Recap editor base not found: {editor_base_path}")
     if not captions_ass_path.is_file():
         raise RecapRenderError(f"Combined Recap captions not found: {captions_ass_path}")
+    if title_ass_path is not None and not title_ass_path.is_file():
+        raise RecapRenderError(f"Persistent title ASS file not found: {title_ass_path}")
     if music_path is not None and not music_path.is_file():
         raise RecapRenderError(f"Background music not found: {music_path}")
     input_arguments, bindings = bind_recap_editor_export_inputs(
@@ -865,6 +887,7 @@ def render_recap_editor_export(
     filters, video_label, audio_label = build_recap_editor_export_filter_complex(
         effects,
         captions_ass_path=captions_ass_path,
+        title_ass_path=title_ass_path,
         timeline_fps=fps,
         emoji_first_input_index=bindings["emoji_first_input_index"],
         music_input_index=bindings["music_input_index"],
@@ -904,6 +927,7 @@ def render_recap(
     portrait_plan: dict[str, Any],
     duck_plan: dict[str, Any],
     captions_ass_path: Path | None = None,
+    title_ass_path: Path | None = None,
     output_path: Path = RECAP_FINAL_OUTPUT_PATH,
     playback_speed: float = RECAP_PLAYBACK_SPEED,
     recap_effects: dict[str, Any] | None = None,
@@ -925,6 +949,8 @@ def render_recap(
         )
     if captions_ass_path is not None and not captions_ass_path.is_file():
         raise RecapRenderError(f"Narration caption ASS file not found: {captions_ass_path}")
+    if title_ass_path is not None and not title_ass_path.is_file():
+        raise RecapRenderError(f"Persistent title ASS file not found: {title_ass_path}")
 
     shortfall = float(sequence.get("visual_coverage_shortfall_seconds", 0.0) or 0.0)
     if shortfall > MAX_RENDERABLE_VISUAL_SHORTFALL_SECONDS:
@@ -977,6 +1003,7 @@ def render_recap(
         captions_ass_path,
         speed,
         recap_effects,
+        title_ass_path=title_ass_path,
         narration_pitch_semitones=narration_pitch_semitones,
         source_pitch_semitones=source_pitch_semitones,
         timeline_fps=timeline_fps,

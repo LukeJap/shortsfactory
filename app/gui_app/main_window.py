@@ -23,6 +23,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -84,6 +85,7 @@ from .mixins.editor_assets import EditorAssetsMixin
 from .mixins.emoji_preview import EmojiPreviewMixin
 from .mixins.music import MusicMixin
 from .mixins.playback import PlaybackMixin
+from .mixins.persistent_title import PersistentTitleMixin
 from .mixins.recap import RecapMixin
 from .mixins.render_pipeline import RenderPipelineMixin
 from .mixins.settings import SettingsMixin
@@ -98,6 +100,7 @@ class ShortsFactoryWindow(
     AIClipHunterMixin,
     MusicMixin,
     RenderPipelineMixin,
+    PersistentTitleMixin,
     EditorAssetsMixin,
     EmojiPreviewMixin,
     CaptionPreviewMixin,
@@ -230,6 +233,7 @@ class ShortsFactoryWindow(
         self.caption_preview_drag_origin = QPoint()
         self.caption_preview_drag_start_x = 0.0
         self.caption_preview_drag_start_y = 0.0
+        self.youtube_ui_preview_enabled = False
 
         self.editor_asset_plan: dict = load_editor_asset_plan()
         self.selected_sfx_clip_id: str | None = None
@@ -1390,6 +1394,34 @@ class ShortsFactoryWindow(
         playback.addWidget(self.preview_volume_slider)
         playback.addWidget(self.preview_volume_label)
 
+        title_controls = QHBoxLayout()
+        title_controls.setSpacing(8)
+        title_label = QLabel("VIDEO TITLE")
+        title_label.setObjectName("TinyLabel")
+        self.persistent_title_input = QLineEdit()
+        self.persistent_title_input.setObjectName("PersistentTitleInput")
+        self.persistent_title_input.setPlaceholderText("Add a persistent title for the exported video")
+        self.persistent_title_input.setMaxLength(180)
+        self.persistent_title_input.setToolTip(
+            "A persistent title rendered above the foreground footage. "
+            "It is separate from captions."
+        )
+        self.persistent_title_input.textChanged.connect(
+            self.persistent_video_title_changed,
+        )
+        self.youtube_ui_preview_toggle = QCheckBox("UI Preview")
+        self.youtube_ui_preview_toggle.setObjectName("UiPreviewToggle")
+        self.youtube_ui_preview_toggle.setToolTip(
+            "Show or hide the preview-only YouTube Shorts mobile UI. "
+            "It is never exported."
+        )
+        self.youtube_ui_preview_toggle.toggled.connect(
+            self.set_youtube_ui_preview_enabled,
+        )
+        title_controls.addWidget(title_label)
+        title_controls.addWidget(self.persistent_title_input, 1)
+        title_controls.addWidget(self.youtube_ui_preview_toggle)
+
         self.render_features_summary_label = QLabel(
             self.render_features_summary_text()
         )
@@ -1409,6 +1441,7 @@ class ShortsFactoryWindow(
         video_stack_layout.setSpacing(6)
         video_stack_layout.addWidget(self.program_monitor_viewport, 1)
         video_stack_layout.addLayout(playback)
+        video_stack_layout.addLayout(title_controls)
 
         self.timeline = SuggestionSlider(Qt.Orientation.Horizontal)
         self.timeline.setRange(0, 0)
@@ -2508,6 +2541,10 @@ class ShortsFactoryWindow(
                 lambda: self.update_caption_preview_overlay(
                     self.player.position()
                 ),
+            )
+            QTimer.singleShot(
+                0,
+                self.update_persistent_title_preview,
             )
 
         if (

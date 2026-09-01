@@ -316,6 +316,32 @@ STYLESHEET =            """
                 border: 2px solid #C9384F;
             }
 
+            QLabel#PersistentTitlePreview {
+                background: transparent;
+                color: #FFFFFF;
+                border: none;
+            }
+
+            QLineEdit#PersistentTitleInput {
+                background: #0A0A0B;
+                border: 1px solid #40333A;
+                border-radius: 3px;
+                color: #F4EFE6;
+                font-weight: 700;
+                padding: 5px 7px;
+            }
+
+            QCheckBox#UiPreviewToggle {
+                color: #B8AEA1;
+                font-size: 10px;
+                font-weight: 800;
+            }
+
+            QCheckBox#UiPreviewToggle::indicator {
+                width: 14px;
+                height: 14px;
+            }
+
             QLabel#EmojiResizeHandle,
             QLabel#CaptionResizeHandle {
                 background: #C9384F;

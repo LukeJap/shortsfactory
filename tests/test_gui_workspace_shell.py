@@ -103,6 +103,38 @@ def test_program_monitor_is_portrait_and_clear_of_its_transport_controls():
         _close(app, window)
 
 
+def test_program_monitor_title_and_preview_only_shorts_shell_are_independent():
+    app, window = _window()
+    try:
+        window.save_editor_asset_plan_state = lambda: None
+        window.editor_asset_plan = {"version": 1, "clips": []}
+        window.resize(1600, 900)
+        window.show()
+        app.processEvents()
+
+        window.persistent_title_input.setText("Gary chooses Patrick")
+        app.processEvents()
+
+        assert window.persistent_title_preview_label.isVisible()
+        assert window.persistent_title_preview_label.text() == "Gary chooses Patrick"
+        assert not window.youtube_shorts_mock_overlay.isVisible()
+        assert window.editor_asset_plan["persistent_title"] == {
+            "text": "Gary chooses Patrick"
+        }
+
+        window.youtube_ui_preview_toggle.setChecked(True)
+        app.processEvents()
+        assert window.youtube_shorts_mock_overlay.isVisible()
+        assert window.persistent_title_preview_label.isVisible()
+
+        window.youtube_ui_preview_toggle.setChecked(False)
+        app.processEvents()
+        assert not window.youtube_shorts_mock_overlay.isVisible()
+        assert window.persistent_title_preview_label.isVisible()
+    finally:
+        _close(app, window)
+
+
 def test_workspace_rebalances_width_to_the_right_editor_without_shrinking_preview():
     app, window = _window()
     try:
@@ -211,6 +243,10 @@ def test_recap_sidebar_and_right_editor_stack_remain_responsive():
         window.resize(1600, 900)
         window.show()
         window.set_recap_mode("recap")
+        window.save_editor_asset_plan_state = lambda: None
+        window.editor_asset_plan = {"version": 1, "clips": []}
+        window.persistent_title_input.setText("A recap title")
+        window.youtube_ui_preview_toggle.setChecked(True)
         app.processEvents()
 
         recap_viewport = window.recap_scroll_area.viewport()
@@ -220,6 +256,8 @@ def test_recap_sidebar_and_right_editor_stack_remain_responsive():
         assert right_stack.itemAt(1).widget() is window.transcript_frame
         assert right_stack.itemAt(2).widget() is window.render_log_frame
         assert window.video_widget.height() > 500
+        assert window.persistent_title_preview_label.isVisible()
+        assert window.youtube_shorts_mock_overlay.isVisible()
     finally:
         _close(app, window)
 

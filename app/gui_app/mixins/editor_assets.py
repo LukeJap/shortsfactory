@@ -137,6 +137,8 @@ class EditorAssetsMixin:
         self.editor_asset_plan = (
             load_editor_asset_plan(Path(path)) if path else load_editor_asset_plan()
         )
+        if hasattr(self, "load_persistent_title_state"):
+            self.load_persistent_title_state()
         self.refresh_editor_asset_timeline()
 
 
@@ -227,6 +229,8 @@ class EditorAssetsMixin:
             self.update_caption_preview_overlay(
                 self.player.position()
             )
+            if hasattr(self, "update_persistent_title_preview"):
+                self.update_persistent_title_preview()
 
 
     def find_editor_clip(

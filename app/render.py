@@ -83,6 +83,13 @@ try:
 except ImportError:
     from render_archive import is_archived_clip_name
 
+try:
+    from .editor_asset_plan import load_editor_asset_plan
+    from .persistent_title import write_persistent_title_ass
+except ImportError:
+    from editor_asset_plan import load_editor_asset_plan
+    from persistent_title import write_persistent_title_ass
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -101,6 +108,8 @@ TIGHT_OUTPUT_PATH = (
 CAPTION_OUTPUT_PATH = (
     OUTPUT_DIR / "short1_captioned.mp4"
 )
+
+PERSISTENT_TITLE_ASS_PATH = ROOT / "output" / "persistent_title.ass"
 
 DEFAULT_SOURCE_VIDEO = (
     ROOT / "input" / "short1.mp4"
@@ -1191,7 +1200,9 @@ def burn_captions() -> None:
 # EMOJIS
 # ============================================================
 
-def add_emoji_overlay() -> None:
+def add_emoji_overlay(
+    title_ass_path: Path | None = None,
+) -> None:
 
     print()
     print(
@@ -1207,18 +1218,19 @@ def add_emoji_overlay() -> None:
             f"{EMOJI_SCRIPT}"
         )
 
-    run_command(
-        [
-            python_executable(),
-            str(EMOJI_SCRIPT),
-            "--input",
-            str(TIGHT_OUTPUT_PATH),
-            "--output",
-            str(CAPTION_OUTPUT_PATH),
-            "--captions",
-            str(CAPTIONS_PATH.relative_to(ROOT)),
-        ]
-    )
+    command = [
+        python_executable(),
+        str(EMOJI_SCRIPT),
+        "--input",
+        str(TIGHT_OUTPUT_PATH),
+        "--output",
+        str(CAPTION_OUTPUT_PATH),
+        "--captions",
+        str(CAPTIONS_PATH.relative_to(ROOT)),
+    ]
+    if title_ass_path is not None:
+        command.extend(["--title", str(title_ass_path.relative_to(ROOT))])
+    run_command(command)
 
 
 # ============================================================
@@ -1441,6 +1453,21 @@ def resolve_source_timestamps(
     return start, end
 
 
+def timestamp_to_seconds(value: str) -> float:
+    """Parse the timestamp forms accepted by ffmpeg's ``-ss``/``-to``."""
+
+    parts = str(value).strip().split(":")
+    try:
+        seconds = float(parts[-1])
+        if len(parts) >= 2:
+            seconds += int(parts[-2]) * 60
+        if len(parts) >= 3:
+            seconds += int(parts[-3]) * 3600
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, seconds)
+
+
 def run_transcript_step(
     render_settings: dict[str, Any],
     source_video: Path,
@@ -1612,6 +1639,11 @@ def main() -> int:
     start, end = resolve_source_timestamps(
         args
     )
+    title_ass_path = write_persistent_title_ass(
+        load_editor_asset_plan().get("persistent_title", {}),
+        timestamp_to_seconds(end) - timestamp_to_seconds(start),
+        PERSISTENT_TITLE_ASS_PATH,
+    )
 
     # --------------------------------------------------------
     # STEP 1
@@ -1722,7 +1754,7 @@ def main() -> int:
     # Full-color emoji graphics
     # --------------------------------------------------------
 
-    add_emoji_overlay()
+    add_emoji_overlay(title_ass_path)
 
     # --------------------------------------------------------
     # STEP 10

@@ -82,6 +82,23 @@ def test_recap_editor_export_filter_consumes_current_entities_without_reassembly
     assert "rubberband=" not in filters
 
 
+def test_recap_editor_export_places_persistent_title_before_captions(tmp_path):
+    title = tmp_path / "persistent_title.ass"
+    captions = tmp_path / "recap.ass"
+    filters, video_label, _audio_label = build_recap_editor_export_filter_complex(
+        _effects(sfx_count=0, emoji_count=0),
+        captions_ass_path=captions,
+        title_ass_path=title,
+        timeline_fps=24.0,
+    )
+
+    assert video_label == "recap_editor_captioned"
+    assert filters.index("[recap_editor_titled]") < filters.index(
+        "[recap_editor_captioned]"
+    )
+    assert "YouTubeShortsMockOverlay" not in filters
+
+
 def test_recap_editor_export_uses_current_sfx_for_music_ducking_and_no_new_inputs(tmp_path):
     captions = tmp_path / "recap.ass"
     input_arguments, bindings = bind_recap_editor_export_inputs(

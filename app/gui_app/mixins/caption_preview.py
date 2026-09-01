@@ -287,6 +287,12 @@ class CaptionPreviewMixin:
         label.raise_()
         label.show()
 
+        # Restore the Program Monitor's stable stack after a time-based
+        # caption refresh: effects below the persistent title, captions
+        # above it, and the optional mock platform UI above everything.
+        if hasattr(self, "update_persistent_title_preview"):
+            self.update_persistent_title_preview()
+
         self.layout_caption_resize_handles()
 
 

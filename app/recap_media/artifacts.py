@@ -36,6 +36,10 @@ class RecapArtifactContext:
         return self.root / "narration.ass"
 
     @property
+    def persistent_title_ass_path(self) -> Path:
+        return self.root / "persistent_title.ass"
+
+    @property
     def recap_caption_plan_path(self) -> Path:
         return self.root / "recap_captions.json"
 

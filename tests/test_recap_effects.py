@@ -306,11 +306,13 @@ def test_recap_plan_keeps_manual_entities_and_disabled_entities_do_not_render(tm
             "manual_override": True,
         }
     )
+    editor_plan["persistent_title"] = {"text": "Gary chooses Patrick"}
     save_editor_asset_plan(editor_plan, editor_plan_path)
 
     write_recap_effects_plan(effects, effects_path=effects_path, editor_plan_path=editor_plan_path)
     persisted = load_editor_asset_plan(editor_plan_path)
     assert any(clip["id"] == "manual_sfx" for clip in persisted["clips"])
+    assert persisted["persistent_title"] == {"text": "Gary chooses Patrick"}
 
     renderable = load_recap_effects(effects_path=effects_path, editor_plan_path=editor_plan_path)
     assert renderable["visual_fx_events"] == []

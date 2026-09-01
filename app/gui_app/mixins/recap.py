@@ -826,6 +826,14 @@ class RecapMixin:
         self.append_recap_log("Preparing recap render assets...")
         QCoreApplication.processEvents()
         try:
+            title_ass_path = None
+            if hasattr(self, "write_persistent_title_for_export"):
+                title_ass_path = self.write_persistent_title_for_export(
+                    context.persistent_title_ass_path,
+                    recap_final_duration_seconds(
+                        float(self.recap_sequence.get("total_duration_seconds", 0.0) or 0.0),
+                    ),
+                )
             portrait_plan = build_portrait_framing_plan_for_video(
                 source_video,
                 cache_path=context.portrait_framing_plan_path,
@@ -918,26 +926,31 @@ class RecapMixin:
                     encoding="utf-8",
                 )
 
+            final_render_kwargs = {
+                "captions_ass_path": context.narration_captions_ass_path,
+                "output_path": context.final_recap_path,
+                "recap_effects": recap_effects,
+                "voiceover_dir": context.voiceover_dir,
+                "narration_pitch_semitones": getattr(
+                    self,
+                    "recap_narration_pitch_semitones",
+                    DEFAULT_NARRATION_PITCH_SEMITONES,
+                ),
+                "source_pitch_semitones": getattr(
+                    self,
+                    "recap_source_pitch_semitones",
+                    DEFAULT_SOURCE_PITCH_SEMITONES,
+                ),
+            }
+            if title_ass_path is not None:
+                final_render_kwargs["title_ass_path"] = title_ass_path
             output_path = render_recap(
                 inputs.episode_identity,
                 self.recap_sequence,
                 voiceover_clips,
                 portrait_plan,
                 duck_plan,
-                captions_ass_path=context.narration_captions_ass_path,
-                output_path=context.final_recap_path,
-                recap_effects=recap_effects,
-                voiceover_dir=context.voiceover_dir,
-                narration_pitch_semitones=getattr(
-                    self,
-                    "recap_narration_pitch_semitones",
-                    DEFAULT_NARRATION_PITCH_SEMITONES,
-                ),
-                source_pitch_semitones=getattr(
-                    self,
-                    "recap_source_pitch_semitones",
-                    DEFAULT_SOURCE_PITCH_SEMITONES,
-                ),
+                **final_render_kwargs,
             )
         except (RecapRenderError, RecapInputError, OSError, ValueError) as exc:
             message = str(exc)
@@ -1141,6 +1154,12 @@ class RecapMixin:
         duration = recap_final_duration_seconds(
             float(self.recap_sequence.get("total_duration_seconds", 0.0) or 0.0)
         )
+        title_ass_path = None
+        if hasattr(self, "write_persistent_title_for_export"):
+            title_ass_path = self.write_persistent_title_for_export(
+                context.persistent_title_ass_path,
+                duration,
+            )
         self.recap_export_in_progress = True
         self.pending_render_duration_seconds = duration
         self.start_render_progress(duration, bool(getattr(self, "music_path", None)), False)
@@ -1162,6 +1181,8 @@ class RecapMixin:
             "--caption-ass", str(context.narration_captions_ass_path),
             "--output", str(context.final_recap_path),
         ]
+        if title_ass_path is not None:
+            arguments.extend(["--title-ass", str(title_ass_path)])
         for option, value in (
             ("--caption-position-x", getattr(self, "caption_position_x", None)),
             ("--caption-position-y", getattr(self, "caption_position_y", None)),

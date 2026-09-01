@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--editor-plan", required=True)
     parser.add_argument("--caption-plan", required=True)
     parser.add_argument("--caption-ass", required=True)
+    parser.add_argument("--title-ass")
     parser.add_argument("--output", required=True)
     parser.add_argument("--caption-position-x", type=float)
     parser.add_argument("--caption-position-y", type=float)
@@ -36,6 +37,7 @@ def main() -> int:
     editor_plan = Path(args.editor_plan).resolve()
     caption_plan_path = Path(args.caption_plan).resolve()
     caption_ass_path = Path(args.caption_ass).resolve()
+    title_ass_path = Path(args.title_ass).resolve() if args.title_ass else None
     output_path = Path(args.output).resolve()
     music_path = Path(args.music).resolve() if args.music else None
 
@@ -69,6 +71,7 @@ def main() -> int:
             effects,
             caption_ass_path,
             output_path,
+            title_ass_path=title_ass_path,
             music_path=music_path,
             music_volume=args.music_volume,
         )

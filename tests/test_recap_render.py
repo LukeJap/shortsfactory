@@ -89,6 +89,26 @@ def test_video_track_filter_empty_shots_raises():
         build_video_track_filter([])
 
 
+def test_recap_title_filter_is_composited_before_narration_captions(tmp_path):
+    title = tmp_path / "persistent_title.ass"
+    captions = tmp_path / "narration.ass"
+    filter_complex, _video_label, _audio_label = build_recap_filter_complex(
+        _sequence(),
+        [_voiceover_clip("VO_001", start=0.0)],
+        {"VO_001": 1},
+        _portrait_plan(),
+        _duck_plan(),
+        captions_ass_path=captions,
+        title_ass_path=title,
+    )
+
+    assert "[recap_titled]" in filter_complex
+    assert filter_complex.index("[recap_titled]") < filter_complex.index(
+        "[recap_captioned]"
+    )
+    assert "YouTubeShortsMockOverlay" not in filter_complex
+
+
 # ============================================================
 # build_source_audio_track_filter
 # ============================================================

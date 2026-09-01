@@ -44,7 +44,6 @@ try:
 except ImportError:
     from visual_emphasis import load_render_settings
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 EMOJI_DIR = ROOT / "assets" / "emoji"
@@ -68,6 +67,16 @@ TWEMOJI_BASE = (
     "jdecked/twemoji@17.0.3/"
     "assets/72x72/"
 )
+
+
+def subtitle_filter_path(path: Path) -> str:
+    """Return the project-relative ASS path used by the subtitles filter."""
+
+    try:
+        path = path.resolve().relative_to(ROOT.resolve())
+    except (OSError, ValueError):
+        pass
+    return str(path).replace("\\", "/")
 
 
 # Simple emoji style.
@@ -764,6 +773,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional ASS captions path to burn before emoji overlays.",
     )
+    parser.add_argument(
+        "--title",
+        default="",
+        help="Optional persistent-title ASS path to burn below captions.",
+    )
     return parser.parse_args()
 
 
@@ -782,6 +796,11 @@ def main() -> int:
     captions_path = (
         resolve_project_path(args.captions)
         if str(args.captions).strip()
+        else None
+    )
+    title_path = (
+        resolve_project_path(args.title)
+        if str(args.title).strip()
         else None
     )
 
@@ -851,9 +870,14 @@ def main() -> int:
 
     filter_parts = []
     current = "[0:v]"
+    if title_path is not None:
+        filter_parts.append(
+            f"[0:v]subtitles=filename={subtitle_filter_path(title_path)}[titled]"
+        )
+        current = "[titled]"
     if captions_path is not None:
         filter_parts.append(
-            f"[0:v]{caption_filter_fragment(captions_path)}[captioned]"
+            f"{current}{caption_filter_fragment(captions_path)}[captioned]"
         )
         current = "[captioned]"
 
