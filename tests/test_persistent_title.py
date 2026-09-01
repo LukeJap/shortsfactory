@@ -4,7 +4,9 @@ from editor_asset_plan import load_editor_asset_plan, save_editor_asset_plan
 from persistent_title import (
     persistent_title_ass,
     persistent_title_from_plan,
+    persistent_title_state_from_plan,
     set_persistent_title_on_plan,
+    set_persistent_title_transform_on_plan,
     write_persistent_title_ass,
 )
 
@@ -39,6 +41,33 @@ def test_empty_persistent_title_removes_stale_export_layer(tmp_path):
 
     assert write_persistent_title_ass("   ", 5.0, path) is None
     assert not path.exists()
+
+
+def test_title_transform_is_normalized_and_shared_with_the_export_layer(tmp_path):
+    plan = {"version": 1, "clips": []}
+    set_persistent_title_on_plan(plan, "Gary chooses Patrick")
+    set_persistent_title_transform_on_plan(
+        plan,
+        x=0.31,
+        y=0.14,
+        scale=1.35,
+        width=0.68,
+    )
+
+    state = persistent_title_state_from_plan(plan)
+    assert state == {
+        "text": "Gary chooses Patrick",
+        "x": 0.31,
+        "y": 0.14,
+        "scale": 1.35,
+        "width": 0.68,
+        "active": True,
+    }
+
+    path = tmp_path / "persistent_title.ass"
+    write_persistent_title_ass(plan["persistent_title"], 10.0, path)
+    content = path.read_text(encoding="utf-8")
+    assert "{\\pos(335,269)\\fscx135\\fscy135}" in content
 
 
 def test_standard_export_passes_title_layer_without_any_preview_ui(monkeypatch):

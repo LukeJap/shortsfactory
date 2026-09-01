@@ -343,14 +343,16 @@ STYLESHEET =            """
             }
 
             QLabel#EmojiResizeHandle,
-            QLabel#CaptionResizeHandle {
+            QLabel#CaptionResizeHandle,
+            QLabel#PersistentTitleResizeHandle {
                 background: #C9384F;
                 border: 1px solid #F4EFE6;
                 border-radius: 2px;
             }
 
             QLabel#EmojiResizeReadout,
-            QLabel#CaptionResizeReadout {
+            QLabel#CaptionResizeReadout,
+            QLabel#PersistentTitleResizeReadout {
                 background: #741C28;
                 color: #F4EFE6;
                 border: 1px solid #C9384F;
@@ -389,6 +391,46 @@ STYLESHEET =            """
             QFrame#TimelineFooter {
                 background: #0B0B0D;
                 border-top: 1px solid #2A2527;
+            }
+
+            QFrame#TimelineItemInspector {
+                background: #0D0D10;
+                border: 1px solid #4B3038;
+                border-left: 3px solid #C9384F;
+                border-radius: 3px;
+            }
+
+            QLabel#TimelineInspectorHeader {
+                color: #F5E7D7;
+                font-size: 10px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+
+            QLabel#TimelineInspectorSummary {
+                color: #B8AEA1;
+                font-size: 10px;
+            }
+
+            QLabel#TimelineInspectorValue {
+                color: #D9D0C5;
+                font-family: Consolas;
+                font-size: 10px;
+                font-weight: 700;
+            }
+
+            QDoubleSpinBox#TimelineInspectorTime {
+                background: #09090A;
+                color: #F2E6D4;
+                border: 1px solid #42343A;
+                border-radius: 2px;
+                padding: 2px 4px;
+                font-family: Consolas;
+                font-size: 10px;
+            }
+
+            QDoubleSpinBox#TimelineInspectorTime:focus {
+                border: 1px solid #C9384F;
             }
 
             QLabel#TimelineLegendItem {

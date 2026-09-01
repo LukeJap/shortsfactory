@@ -75,9 +75,15 @@ EMOJI_CORNER_CURSORS = {
 
 class EmojiPreviewMixin:
 
+    def preview_overlay_host(self):
+        """The shared 9:16 composition layer used by all monitor overlays."""
+
+        return getattr(self, "program_monitor_composition", self.video_widget)
+
     def preview_canvas_rect(self) -> tuple[int, int, int, int]:
-        width = max(1, self.video_widget.width())
-        height = max(1, self.video_widget.height())
+        host = self.preview_overlay_host()
+        width = max(1, host.width())
+        height = max(1, host.height())
         canvas_height = height
         canvas_width = max(1, int(round(canvas_height * 9 / 16)))
         if canvas_width > width:
@@ -89,6 +95,18 @@ class EmojiPreviewMixin:
             canvas_width,
             canvas_height,
         )
+
+    def preview_event_point(self, event, watched) -> QPoint:
+        """Translate event coordinates into the shared overlay host."""
+
+        point = event.position().toPoint()
+        host = self.preview_overlay_host()
+        if watched is host:
+            return point
+        try:
+            return watched.mapTo(host, point)
+        except Exception:
+            return point
 
     def plan_emoji_preview(self):
         """
@@ -304,7 +322,7 @@ class EmojiPreviewMixin:
             self.emoji_resize_handles = []
             self.emoji_resize_hover_slot = None
             self.emoji_resize_dragging = False
-            self.emoji_resize_readout = QLabel("", self.video_widget)
+            self.emoji_resize_readout = QLabel("", self.preview_overlay_host())
             self.emoji_resize_readout.setObjectName("EmojiResizeReadout")
             self.emoji_resize_readout.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents,
@@ -313,7 +331,7 @@ class EmojiPreviewMixin:
             self.emoji_resize_readout.hide()
 
         while len(self.emoji_preview_labels) < count:
-            label = QLabel(self.video_widget)
+            label = QLabel(self.preview_overlay_host())
             label.setObjectName("EmojiPreviewOverlay")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setAttribute(
@@ -328,7 +346,7 @@ class EmojiPreviewMixin:
 
             handles = {}
             for corner in CORNER_NAMES:
-                handle = QLabel(self.video_widget)
+                handle = QLabel(self.preview_overlay_host())
                 handle.setObjectName("EmojiResizeHandle")
                 handle.setCursor(EMOJI_CORNER_CURSORS[corner])
                 handle.hide()
@@ -424,6 +442,11 @@ class EmojiPreviewMixin:
             self.layout_emoji_resize_handles(slot_index, screen_x, screen_y, emoji_width, emoji_height)
 
         self.emoji_preview_active = active
+        # Emoji placement refreshes on every seek. Restore the deterministic
+        # composition stack afterwards so preview-only platform chrome never
+        # depends on hover or a particular refresh order.
+        if hasattr(self, "update_persistent_title_preview"):
+            self.update_persistent_title_preview()
 
 
     def begin_emoji_preview_drag(self, event, watched) -> bool:
@@ -435,10 +458,10 @@ class EmojiPreviewMixin:
                 continue
 
             hit = watched is label
-            if watched is self.video_widget:
+            if watched in (self.video_widget, self.preview_overlay_host()):
                 try:
                     hit = label.geometry().contains(
-                        event.position().toPoint()
+                        self.preview_event_point(event, watched)
                     )
                 except Exception:
                     hit = False
@@ -572,10 +595,10 @@ class EmojiPreviewMixin:
                 if not handle.isVisible():
                     continue
                 hit = watched is handle
-                if watched is self.video_widget:
+                if watched in (self.video_widget, self.preview_overlay_host()):
                     try:
                         hit = handle.geometry().contains(
-                            event.position().toPoint()
+                            self.preview_event_point(event, watched)
                         )
                     except Exception:
                         hit = False
@@ -621,10 +644,10 @@ class EmojiPreviewMixin:
         # against the mouse's *global* position on every move -- so that
         # comparison needs its own global-mapped copies of these two
         # points, or the computed ratio is meaningless.
-        global_anchor = self.video_widget.mapToGlobal(
+        global_anchor = self.preview_overlay_host().mapToGlobal(
             QPoint(anchor_point[0], anchor_point[1])
         )
-        global_start = self.video_widget.mapToGlobal(
+        global_start = self.preview_overlay_host().mapToGlobal(
             QPoint(start_point[0], start_point[1])
         )
 

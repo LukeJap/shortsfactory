@@ -22,6 +22,45 @@ from ..settings_keys import PREVIEW_VOLUME
 
 class PlaybackMixin:
 
+    def configure_program_monitor_framing(self, source_path: Path):
+        """Reuse Recap's active-picture geometry for the live monitor."""
+
+        composition = getattr(self, "program_monitor_composition", None)
+        if composition is None:
+            return
+        try:
+            from recap_media.portrait_framing import (
+                build_portrait_framing_plan_for_video,
+                load_portrait_framing_plan,
+                source_identity_for_video,
+            )
+
+            plan = None
+            context = getattr(self, "recap_artifact_context", None)
+            plan_path = getattr(context, "portrait_framing_plan_path", None)
+            if plan_path and Path(plan_path).is_file():
+                candidate = load_portrait_framing_plan(Path(plan_path))
+                identity = candidate.get("source_identity")
+                active_rect = candidate.get("active_rect")
+                has_active_rect = isinstance(active_rect, dict) and all(
+                    key in active_rect for key in ("x", "y", "width", "height")
+                )
+                if has_active_rect and (
+                    not isinstance(identity, dict)
+                    or identity == source_identity_for_video(source_path)
+                ):
+                    plan = candidate
+            if plan is None:
+                plan = build_portrait_framing_plan_for_video(source_path)
+            composition.set_active_picture_rect(
+                plan.get("active_rect"),
+                source_width=plan.get("source_width"),
+                source_height=plan.get("source_height"),
+            )
+        except Exception:
+            # A preview must remain usable when source probing is unavailable.
+            composition.set_active_picture_rect(None)
+
     def load_video(
         self,
         path: Path,
@@ -44,6 +83,7 @@ class PlaybackMixin:
         self.video_path = path
         if hasattr(self, "_set_recap_episode_context"):
             self._set_recap_episode_context()
+        self.configure_program_monitor_framing(path)
 
         # Word-wrap alone doesn't help a long underscore-separated filename
         # (Qt only wraps at whitespace) -- elide it instead, keeping the

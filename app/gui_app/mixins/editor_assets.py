@@ -214,6 +214,8 @@ class EditorAssetsMixin:
             )
 
             selected_asset_id = (
+                getattr(self, "selected_timeline_item_id", None)
+                or
                 self.selected_sfx_clip_id
                 or self.selected_emoji_clip_id
             )
@@ -222,6 +224,7 @@ class EditorAssetsMixin:
             )
         self.update_sfx_inspector()
         self.update_emoji_inspector()
+        self.update_timeline_item_inspector()
         if hasattr(self, "video_widget"):
             self.update_emoji_preview_overlay(
                 self.player.position()
@@ -299,6 +302,230 @@ class EditorAssetsMixin:
         )
 
 
+    def selected_timeline_item_clip(self) -> dict | None:
+
+        kind = str(
+            getattr(self, "selected_timeline_item_kind", "")
+            or ""
+        ).upper()
+        clip_id = str(
+            getattr(self, "selected_timeline_item_id", "")
+            or ""
+        )
+        if not kind or not clip_id:
+            return None
+        return self.find_editor_clip(kind, clip_id)
+
+
+    def clear_timeline_item_selection(self):
+
+        self.selected_timeline_item_kind = None
+        self.selected_timeline_item_id = None
+        self.selected_sfx_clip_id = None
+        self.selected_emoji_clip_id = None
+        if hasattr(self, "timeline"):
+            self.timeline.set_selected_asset_clip(None)
+        self.update_sfx_inspector()
+        self.update_emoji_inspector()
+        self.update_timeline_item_inspector()
+
+
+    def set_timeline_item_selection(self, kind: str, clip_id: str):
+
+        normalized_kind = str(kind or "").upper()
+        normalized_id = str(clip_id or "")
+        if not normalized_kind:
+            self.clear_timeline_item_selection()
+            return
+
+        self.selected_timeline_item_kind = normalized_kind
+        self.selected_timeline_item_id = normalized_id or None
+        if normalized_kind != "SFX":
+            self.selected_sfx_clip_id = None
+        if normalized_kind != "EMOJI":
+            self.selected_emoji_clip_id = None
+        if hasattr(self, "timeline"):
+            self.timeline.set_selected_asset_clip(
+                normalized_id if normalized_id else None
+            )
+        self.update_timeline_item_inspector()
+
+
+    def timeline_item_type_label(self, kind: str) -> str:
+
+        return {
+            "SOURCE": "SOURCE",
+            "SFX": "SFX",
+            "EMOJI": "EMOJI",
+            "VOICEOVER": "VOICEOVER",
+            RECAP_MOTION_CLIP_KIND: "SMART MOTION",
+            RECAP_VISUAL_FX_CLIP_KIND: "VISUAL FX",
+        }.get(str(kind or "").upper(), "TIMELINE ITEM")
+
+
+    @staticmethod
+    def _timeline_item_seconds(value, default: float = 0.0) -> float:
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+
+    def update_timeline_item_inspector(self):
+
+        if not hasattr(self, "timeline_item_inspector"):
+            return
+
+        kind = str(
+            getattr(self, "selected_timeline_item_kind", "")
+            or ""
+        ).upper()
+        clip = self.selected_timeline_item_clip()
+        is_source = kind == "SOURCE"
+        is_voiceover = kind == "VOICEOVER"
+        editable = clip is not None and not is_voiceover
+
+        self.updating_timeline_item_inspector = True
+        try:
+            if not kind:
+                self.timeline_item_inspector.setVisible(False)
+                return
+
+            if is_source:
+                start = self.start_ms / 1000
+                end = self.end_ms / 1000
+                name = "CURRENT SELECTION"
+                summary = "Read-only source selection. Use the timeline IN / OUT controls to trim it."
+            elif clip is None:
+                self.timeline_item_inspector.setVisible(False)
+                return
+            else:
+                start = self._timeline_item_seconds(clip.get("start"))
+                end = self._timeline_item_seconds(clip.get("end"), start)
+                name = str(
+                    clip.get("label")
+                    or clip.get("effect")
+                    or clip.get("movement")
+                    or clip.get("emoji")
+                    or kind
+                )
+                if kind == "SFX":
+                    summary = "Asset: " + str(
+                        clip.get("asset_filename")
+                        or clip.get("asset_path")
+                        or name
+                    )
+                elif kind == "EMOJI":
+                    summary = "Emoji: " + str(clip.get("emoji") or name)
+                elif is_voiceover:
+                    summary = "Read-only narration segment: " + name
+                else:
+                    summary = "Existing recap effect: " + name
+
+            self.timeline_item_inspector_header.setText(
+                f"SELECTED: {self.timeline_item_type_label(kind)} - {name}"
+            )
+            self.timeline_item_inspector_summary.setText(summary)
+            self.timeline_inspector_start.setValue(max(0.0, start))
+            self.timeline_inspector_end.setValue(max(start, end))
+            self.timeline_inspector_duration.setText(
+                f"Duration: {max(0.0, end - start):.3f} s"
+            )
+            self.timeline_inspector_enabled.setChecked(
+                bool(clip.get("active", True)) if clip is not None else True
+            )
+            self.timeline_inspector_locked.setChecked(
+                bool(clip.get("locked", False)) if clip is not None else False
+            )
+
+            for control in (
+                self.timeline_inspector_start,
+                self.timeline_inspector_end,
+                self.timeline_inspector_enabled,
+            ):
+                control.setVisible(not is_source and not is_voiceover)
+                control.setEnabled(editable)
+            self.timeline_inspector_duration.setVisible(not is_source)
+            self.timeline_inspector_locked.setVisible(not is_source)
+            self.timeline_inspector_emoji_controls.setVisible(kind == "EMOJI")
+
+            if kind == "EMOJI" and clip is not None:
+                self.timeline_inspector_emoji_x.setValue(
+                    self._timeline_item_seconds(clip.get("position_x"), 0.5)
+                )
+                self.timeline_inspector_emoji_y.setValue(
+                    self._timeline_item_seconds(clip.get("position_y"), 0.5)
+                )
+                self.timeline_inspector_emoji_scale.setValue(
+                    self._timeline_item_seconds(clip.get("scale"), 1.0)
+                )
+
+            self.timeline_item_inspector.setVisible(True)
+        finally:
+            self.updating_timeline_item_inspector = False
+            refresh_timeline_height = getattr(
+                self,
+                "update_timeline_panel_minimum_height",
+                None,
+            )
+            if callable(refresh_timeline_height):
+                refresh_timeline_height()
+
+
+    def commit_timeline_item_inspector_clip(self, clip: dict):
+
+        kind = str(clip.get("kind", "") or "").upper()
+        clip["manual_override"] = True
+        clip["locked"] = True
+        self.editor_asset_plan = upsert_clip(self.editor_asset_plan, clip)
+        self.save_editor_asset_plan_state()
+        self.selected_timeline_item_kind = kind
+        self.selected_timeline_item_id = str(clip.get("id", "") or "") or None
+        self.refresh_editor_asset_timeline()
+        if kind == "EMOJI" and hasattr(self, "video_widget"):
+            self.update_emoji_preview_overlay(self.player.position())
+
+
+    def timeline_inspector_timing_changed(self):
+
+        if getattr(self, "updating_timeline_item_inspector", False):
+            return
+        clip = self.selected_timeline_item_clip()
+        if clip is None:
+            return
+        start = float(self.timeline_inspector_start.value())
+        end = max(start + 0.08, float(self.timeline_inspector_end.value()))
+        clip["start"] = round(start, 3)
+        clip["end"] = round(end, 3)
+        clip["duration"] = round(end - start, 3)
+        self.commit_timeline_item_inspector_clip(clip)
+
+
+    def timeline_inspector_enabled_changed(self, enabled: bool):
+
+        if getattr(self, "updating_timeline_item_inspector", False):
+            return
+        clip = self.selected_timeline_item_clip()
+        if clip is None:
+            return
+        clip["active"] = bool(enabled)
+        self.commit_timeline_item_inspector_clip(clip)
+
+
+    def timeline_inspector_emoji_transform_changed(self):
+
+        if getattr(self, "updating_timeline_item_inspector", False):
+            return
+        clip = self.selected_timeline_item_clip()
+        if clip is None or str(clip.get("kind", "")).upper() != "EMOJI":
+            return
+        clip["position_x"] = round(float(self.timeline_inspector_emoji_x.value()), 3)
+        clip["position_y"] = round(float(self.timeline_inspector_emoji_y.value()), 3)
+        clip["scale"] = round(float(self.timeline_inspector_emoji_scale.value()), 2)
+        self.commit_timeline_item_inspector_clip(clip)
+
+
     def editor_asset_clip_selected(
         self,
         kind: str,
@@ -312,6 +539,15 @@ class EditorAssetsMixin:
         normalized_id = str(
             clip_id
             or ""
+        )
+
+        if not normalized_kind:
+            self.clear_timeline_item_selection()
+            return
+
+        self.set_timeline_item_selection(
+            normalized_kind,
+            normalized_id,
         )
 
         if normalized_kind == "EMOJI":

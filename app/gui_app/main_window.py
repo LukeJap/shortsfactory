@@ -70,7 +70,12 @@ from .settings_keys import (
 )
 from .style import STYLESHEET
 from .timeline_widget import SuggestionSlider
-from .widgets import AspectRatioContainer, DropZone, TimelineNavigator
+from .widgets import (
+    AspectRatioContainer,
+    DropZone,
+    ProgramMonitorComposition,
+    TimelineNavigator,
+)
 
 from recap_media.orpheus_provider import DEFAULT_VOICE as DEFAULT_ORPHEUS_VOICE
 from recap_media.render import (
@@ -238,6 +243,8 @@ class ShortsFactoryWindow(
         self.editor_asset_plan: dict = load_editor_asset_plan()
         self.selected_sfx_clip_id: str | None = None
         self.selected_emoji_clip_id: str | None = None
+        self.selected_timeline_item_kind: str | None = None
+        self.selected_timeline_item_id: str | None = None
         self.sfx_preview_triggered: set[str] = set()
 
         # Pre-render subject-aware 9:16 framing stage.
@@ -298,6 +305,7 @@ class ShortsFactoryWindow(
         self.updating_image_model_combo = False
         self.image_quality = "BALANCED"
         self.updating_visual_inspector = False
+        self.updating_timeline_item_inspector = False
         self.user_visual_edits = False
         self.updating_timeline_controls = False
         self.paused_seek_refresh_pending = False
@@ -1344,11 +1352,18 @@ class ShortsFactoryWindow(
         self.program_monitor_viewport = AspectRatioContainer(9, 16)
         self.program_monitor_viewport.setObjectName("ProgramMonitorViewport")
 
+        self.program_monitor_composition = ProgramMonitorComposition()
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("VideoPreview")
-        self.program_monitor_viewport.set_content(self.video_widget)
+        self.program_monitor_composition.set_foreground_video(self.video_widget)
+        self.program_monitor_viewport.set_content(self.program_monitor_composition)
 
         self.player.setVideoOutput(self.video_widget)
+        video_sink = self.video_widget.videoSink()
+        if video_sink is not None:
+            video_sink.videoFrameChanged.connect(
+                self.program_monitor_composition.set_background_frame
+            )
 
         playback = QHBoxLayout()
         playback.setSpacing(8)
@@ -1463,6 +1478,7 @@ class ShortsFactoryWindow(
         timeline_panel_layout = QVBoxLayout(timeline_panel)
         timeline_panel_layout.setContentsMargins(0, 0, 0, 0)
         timeline_panel_layout.setSpacing(8)
+        self.timeline_panel_layout = timeline_panel_layout
 
         timeline_tools = QVBoxLayout()
         timeline_tools.setSpacing(4)
@@ -1521,6 +1537,7 @@ class ShortsFactoryWindow(
         timeline_zoom_row.addWidget(zoom_in_label)
         timeline_tools.addLayout(timeline_header_row)
         timeline_tools.addLayout(timeline_zoom_row)
+        self.timeline_tools = timeline_tools
 
         self.timeline_navigator = TimelineNavigator()
         self.timeline_navigator.setObjectName("TimelineNavigator")
@@ -1529,7 +1546,81 @@ class ShortsFactoryWindow(
         )
 
         timeline_panel_layout.addLayout(timeline_tools)
-        timeline_panel_layout.addWidget(self.timeline, 1)
+        timeline_panel_layout.addWidget(self.timeline)
+
+        self.timeline_item_inspector = QFrame()
+        self.timeline_item_inspector.setObjectName("TimelineItemInspector")
+        self.timeline_item_inspector.setVisible(False)
+        self.timeline_item_inspector.setMinimumHeight(108)
+        timeline_item_inspector_layout = QVBoxLayout(self.timeline_item_inspector)
+        timeline_item_inspector_layout.setContentsMargins(9, 7, 9, 7)
+        timeline_item_inspector_layout.setSpacing(5)
+
+        self.timeline_item_inspector_header = QLabel("SELECTED: NONE")
+        self.timeline_item_inspector_header.setObjectName("TimelineInspectorHeader")
+        self.timeline_item_inspector_summary = QLabel()
+        self.timeline_item_inspector_summary.setObjectName("TimelineInspectorSummary")
+        self.timeline_item_inspector_summary.setWordWrap(True)
+
+        inspector_common = QGridLayout()
+        inspector_common.setHorizontalSpacing(7)
+        inspector_common.setVerticalSpacing(3)
+        self.timeline_inspector_start = QDoubleSpinBox()
+        self.timeline_inspector_start.setObjectName("TimelineInspectorTime")
+        self.timeline_inspector_end = QDoubleSpinBox()
+        self.timeline_inspector_end.setObjectName("TimelineInspectorTime")
+        for control in (self.timeline_inspector_start, self.timeline_inspector_end):
+            control.setRange(0.0, 86_400.0)
+            control.setDecimals(3)
+            control.setSingleStep(0.1)
+            control.setSuffix(" s")
+            control.setMinimumWidth(88)
+            control.valueChanged.connect(self.timeline_inspector_timing_changed)
+        self.timeline_inspector_duration = QLabel("Duration: --")
+        self.timeline_inspector_duration.setObjectName("TimelineInspectorValue")
+        self.timeline_inspector_enabled = QCheckBox("Enabled")
+        self.timeline_inspector_enabled.toggled.connect(self.timeline_inspector_enabled_changed)
+        self.timeline_inspector_locked = QCheckBox("Locked")
+        self.timeline_inspector_locked.setEnabled(False)
+
+        inspector_common.addWidget(QLabel("Start"), 0, 0)
+        inspector_common.addWidget(self.timeline_inspector_start, 0, 1)
+        inspector_common.addWidget(QLabel("End"), 0, 2)
+        inspector_common.addWidget(self.timeline_inspector_end, 0, 3)
+        inspector_common.addWidget(self.timeline_inspector_duration, 1, 0, 1, 2)
+        inspector_common.addWidget(self.timeline_inspector_enabled, 1, 2)
+        inspector_common.addWidget(self.timeline_inspector_locked, 1, 3)
+
+        self.timeline_inspector_emoji_controls = QWidget()
+        emoji_controls = QGridLayout(self.timeline_inspector_emoji_controls)
+        emoji_controls.setContentsMargins(0, 0, 0, 0)
+        emoji_controls.setHorizontalSpacing(7)
+        emoji_controls.setVerticalSpacing(0)
+        self.timeline_inspector_emoji_x = QDoubleSpinBox()
+        self.timeline_inspector_emoji_y = QDoubleSpinBox()
+        self.timeline_inspector_emoji_scale = QDoubleSpinBox()
+        for control, maximum in (
+            (self.timeline_inspector_emoji_x, 1.0),
+            (self.timeline_inspector_emoji_y, 1.0),
+            (self.timeline_inspector_emoji_scale, 3.0),
+        ):
+            control.setRange(0.0 if maximum == 1.0 else 0.25, maximum)
+            control.setDecimals(2)
+            control.setSingleStep(0.05)
+            control.setMinimumWidth(72)
+            control.valueChanged.connect(self.timeline_inspector_emoji_transform_changed)
+        emoji_controls.addWidget(QLabel("X"), 0, 0)
+        emoji_controls.addWidget(self.timeline_inspector_emoji_x, 0, 1)
+        emoji_controls.addWidget(QLabel("Y"), 0, 2)
+        emoji_controls.addWidget(self.timeline_inspector_emoji_y, 0, 3)
+        emoji_controls.addWidget(QLabel("Scale"), 0, 4)
+        emoji_controls.addWidget(self.timeline_inspector_emoji_scale, 0, 5)
+
+        timeline_item_inspector_layout.addWidget(self.timeline_item_inspector_header)
+        timeline_item_inspector_layout.addWidget(self.timeline_item_inspector_summary)
+        timeline_item_inspector_layout.addLayout(inspector_common)
+        timeline_item_inspector_layout.addWidget(self.timeline_inspector_emoji_controls)
+        timeline_panel_layout.addWidget(self.timeline_item_inspector)
 
         self.suggestions_label = QLabel("AI clips appear as purple ranges on V1. Click a range to load that pick, then drag IN / OUT handles to tune the cut.")
         self.suggestions_label.setObjectName("SuggestionLabel")
@@ -1597,25 +1688,11 @@ class ShortsFactoryWindow(
         timeline_footer_layout.addWidget(selection_frame)
         timeline_panel_layout.addWidget(timeline_footer)
 
-        # The timeline panel needs room for its five fixed lanes plus the
-        # editor controls around them. Derive that floor from the timeline's
-        # shared lane geometry instead of letting a parent splitter compress
-        # the lower lanes at compact desktop heights.
-        timeline_panel_minimum_height = (
-            self.timeline.required_lane_stack_height()
-            + timeline_tools.minimumSize().height()
-            + max(
-                timeline_footer.minimumSizeHint().height(),
-                timeline_footer.sizeHint().height(),
-            )
-            + (timeline_panel_layout.spacing() * 2)
-        )
-        timeline_panel.setMinimumHeight(timeline_panel_minimum_height)
         timeline_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
         )
-        self.timeline_panel_minimum_height = timeline_panel_minimum_height
+        self.update_timeline_panel_minimum_height()
 
         center_editor_layout.addWidget(preview_frame, 1)
 
@@ -2131,6 +2208,7 @@ class ShortsFactoryWindow(
         right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         right_scroll.setWidget(right_column)
         self.right_editor_scroll = right_scroll
+        self.update_timeline_panel_minimum_height()
 
         workspace.addWidget(right_scroll)
         workspace.setStretchFactor(0, 20)
@@ -2228,6 +2306,47 @@ class ShortsFactoryWindow(
             0,
         )
 
+    def update_timeline_panel_minimum_height(self):
+        """Fit the timeline section to its visible controls and lane geometry."""
+
+        required = (
+            "timeline",
+            "timeline_panel",
+            "timeline_panel_layout",
+            "timeline_tools",
+            "timeline_footer",
+            "timeline_item_inspector",
+        )
+        if not all(hasattr(self, name) for name in required):
+            return
+
+        inspector = self.timeline_item_inspector
+        inspector_visible = inspector.isVisible()
+        footer_height = self.timeline_footer.minimumSizeHint().height()
+        minimum_height = (
+            self.timeline.required_lane_stack_height()
+            + self.timeline_tools.minimumSize().height()
+            + footer_height
+            + (self.timeline_panel_layout.spacing() * (3 if inspector_visible else 2))
+        )
+        if inspector_visible:
+            minimum_height += inspector.minimumSizeHint().height()
+
+        self.timeline_panel_minimum_height = minimum_height
+        self.timeline_panel.setMinimumHeight(minimum_height)
+
+        if all(
+            hasattr(self, name)
+            for name in ("right_editor_content", "transcript_frame", "render_log_frame")
+        ):
+            right_layout = self.right_editor_content.layout()
+            self.right_editor_content.setMinimumHeight(
+                minimum_height
+                + self.transcript_frame.minimumHeight()
+                + self.render_log_frame.minimumHeight()
+                + (right_layout.spacing() * 2)
+            )
+
     def keyPressEvent(
         self,
         event,
@@ -2242,11 +2361,13 @@ class ShortsFactoryWindow(
             event
         )
 
-    def _point_in_widget(self, widget, event) -> bool:
+    def _point_in_widget(self, widget, event, watched=None) -> bool:
         try:
-            return widget.geometry().contains(
-                event.position().toPoint()
-            )
+            point = event.position().toPoint()
+            parent = widget.parentWidget()
+            if watched is not None and parent is not None and watched is not parent:
+                point = watched.mapTo(parent, point)
+            return widget.geometry().contains(point)
         except AttributeError:
             return False
 
@@ -2261,6 +2382,86 @@ class ShortsFactoryWindow(
             "video_widget",
             None,
         )
+        preview_surface_widgets = (
+            video_widget,
+            getattr(self, "program_monitor_composition", video_widget),
+        )
+
+        title_handle_widgets = list(
+            getattr(self, "persistent_title_resize_handles", {}).values()
+        )
+        title_label = getattr(self, "persistent_title_preview_label", None)
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and hasattr(self, "persistent_title_resize_handles")
+        ):
+            if self.begin_persistent_title_resize_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "persistent_title_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_persistent_title_resize_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "persistent_title_resize_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_persistent_title_resize_drag()
+            event.accept()
+            return True
+
+        if (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+            and title_label is not None
+            and title_label.isVisible()
+            and (
+                watched is title_label
+                or (
+                    watched in preview_surface_widgets
+                    and self._point_in_widget(title_label, event, watched)
+                )
+            )
+        ):
+            self.edit_persistent_title_from_preview()
+            event.accept()
+            return True
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and (
+                watched in preview_surface_widgets
+                or watched is title_label
+                or watched in title_handle_widgets
+            )
+        ):
+            if self.begin_persistent_title_preview_drag(event, watched):
+                event.accept()
+                return True
+
+        if (
+            getattr(self, "persistent_title_dragging", False)
+            and event.type() == QEvent.Type.MouseMove
+        ):
+            self.update_persistent_title_preview_drag(event)
+            event.accept()
+            return True
+
+        if (
+            getattr(self, "persistent_title_dragging", False)
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            self.finish_persistent_title_preview_drag()
+            event.accept()
+            return True
 
         emoji_handle_widgets = [
             handle
@@ -2302,13 +2503,13 @@ class ShortsFactoryWindow(
             self.set_emoji_resize_hover(None)
         elif (
             event.type() == QEvent.Type.MouseMove
-            and watched is video_widget
+            and watched in preview_surface_widgets
             and not getattr(self, "emoji_preview_dragging", False)
             and not getattr(self, "emoji_resize_dragging", False)
         ):
             hover_slot = None
             try:
-                point = event.position().toPoint()
+                point = self.preview_event_point(event, watched)
                 for index, label in enumerate(
                     getattr(self, "emoji_preview_labels", [])
                 ):
@@ -2350,7 +2551,7 @@ class ShortsFactoryWindow(
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
             and (
-                watched is video_widget
+                watched in preview_surface_widgets
                 or watched in getattr(self, "emoji_preview_labels", [])
             )
         ):
@@ -2384,8 +2585,8 @@ class ShortsFactoryWindow(
                 if not label.isVisible():
                     continue
                 hit = watched is label or (
-                    watched is video_widget
-                    and self._point_in_widget(label, event)
+                    watched in preview_surface_widgets
+                    and self._point_in_widget(label, event, watched)
                 )
                 if hit:
                     self.open_emoji_picker(slot_index)
@@ -2403,8 +2604,8 @@ class ShortsFactoryWindow(
                 and (
                     watched is dbl_click_caption_label
                     or (
-                        watched is video_widget
-                        and self._point_in_widget(dbl_click_caption_label, event)
+                        watched in preview_surface_widgets
+                        and self._point_in_widget(dbl_click_caption_label, event, watched)
                     )
                 )
             ):
@@ -2430,7 +2631,7 @@ class ShortsFactoryWindow(
             self.set_caption_resize_hover(False)
         elif (
             event.type() == QEvent.Type.MouseMove
-            and watched is video_widget
+            and watched in preview_surface_widgets
             and caption_label is not None
             and caption_label.isVisible()
             and not getattr(self, "caption_preview_dragging", False)
@@ -2439,7 +2640,7 @@ class ShortsFactoryWindow(
             try:
                 hovering = caption_label.geometry().adjusted(
                     -8, -8, 8, 8
-                ).contains(event.position().toPoint())
+                ).contains(self.preview_event_point(event, watched))
             except Exception:
                 hovering = False
             self.set_caption_resize_hover(hovering)
@@ -2474,7 +2675,7 @@ class ShortsFactoryWindow(
             and event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
             and (
-                watched is video_widget
+                watched in preview_surface_widgets
                 or watched is getattr(self, "caption_preview_label", None)
             )
         ):
@@ -2508,8 +2709,8 @@ class ShortsFactoryWindow(
                 if not label.isVisible():
                     continue
                 if watched is label or (
-                    watched is video_widget
-                    and self._point_in_widget(label, event)
+                    watched in preview_surface_widgets
+                    and self._point_in_widget(label, event, watched)
                 ):
                     if self.reset_emoji_preview_position(slot_index):
                         event.accept()
@@ -2519,15 +2720,15 @@ class ShortsFactoryWindow(
             caption_label = getattr(self, "caption_preview_label", None)
             if caption_label is not None and caption_label.isVisible():
                 if watched is caption_label or (
-                    watched is video_widget
-                    and self._point_in_widget(caption_label, event)
+                    watched in preview_surface_widgets
+                    and self._point_in_widget(caption_label, event, watched)
                 ):
                     self.reset_caption_position()
                     event.accept()
                     return True
 
         if (
-            watched is video_widget
+            watched in preview_surface_widgets
             and event.type() == QEvent.Type.Resize
         ):
             QTimer.singleShot(

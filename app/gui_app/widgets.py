@@ -20,10 +20,12 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QGraphicsBlurEffect,
     QLabel,
     QPushButton,
     QSizePolicy,
@@ -74,6 +76,163 @@ class AspectRatioContainer(QWidget):
             max(1, target_width),
             max(1, target_height),
         )
+
+
+class ProgramMonitorComposition(QWidget):
+    """One 9:16 preview composition with deterministic video/overlay layers."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ProgramMonitorComposition")
+        self.background_preview = QLabel(self)
+        self.background_preview.setObjectName("ProgramMonitorBackgroundPreview")
+        self.background_preview.setScaledContents(False)
+        self.background_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        blur = QGraphicsBlurEffect(self.background_preview)
+        blur.setBlurRadius(28)
+        self.background_preview.setGraphicsEffect(blur)
+        self._background_frame = QPixmap()
+        self.active_picture_rect: dict[str, int] | None = None
+        self.active_picture_source_size: tuple[int, int] | None = None
+        self.foreground_video: QWidget | None = None
+        self.foreground_preview = QLabel(self)
+        self.foreground_preview.setObjectName("ProgramMonitorForegroundPreview")
+        self.foreground_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.foreground_preview.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.foreground_preview.hide()
+
+    def set_foreground_video(self, widget: QWidget):
+        self.foreground_video = widget
+        widget.setParent(self)
+        widget.show()
+        self._layout_layers()
+        # The decoded-frame label is deliberately a sibling above the native
+        # video surface. Qt's Windows video widget otherwise paints an opaque
+        # black matte over sibling background/overlay widgets at this size.
+        self.foreground_preview.raise_()
+
+    def set_active_picture_rect(
+        self,
+        active_rect: dict | None,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ):
+        """Apply the renderer's pillarbox-aware source crop to the preview."""
+
+        try:
+            rect = {
+                "x": max(0, int(active_rect["x"])),
+                "y": max(0, int(active_rect["y"])),
+                "width": max(1, int(active_rect["width"])),
+                "height": max(1, int(active_rect["height"])),
+            }
+        except (KeyError, TypeError, ValueError):
+            rect = None
+        self.active_picture_rect = rect
+        try:
+            width = int(source_width or 0)
+            height = int(source_height or 0)
+        except (TypeError, ValueError):
+            width = height = 0
+        self.active_picture_source_size = (width, height) if width > 0 and height > 0 else None
+        self._layout_layers()
+
+    def _active_picture_aspect_ratio(self) -> float:
+        rect = self.active_picture_rect
+        if isinstance(rect, dict) and rect["width"] > 0 and rect["height"] > 0:
+            return rect["width"] / rect["height"]
+        if not self._background_frame.isNull() and self._background_frame.height() > 0:
+            return self._background_frame.width() / self._background_frame.height()
+        return 16 / 9
+
+    def _active_picture_pixmap(self) -> QPixmap:
+        source = self._background_frame
+        if source.isNull():
+            return source
+        rect = self.active_picture_rect
+        if not isinstance(rect, dict):
+            return source
+        source_width, source_height = self.active_picture_source_size or (
+            source.width(),
+            source.height(),
+        )
+        x = round(rect["x"] * source.width() / max(1, source_width))
+        y = round(rect["y"] * source.height() / max(1, source_height))
+        width = round(rect["width"] * source.width() / max(1, source_width))
+        height = round(rect["height"] * source.height() / max(1, source_height))
+        x = max(0, min(x, source.width() - 1))
+        y = max(0, min(y, source.height() - 1))
+        width = max(1, min(width, source.width() - x))
+        height = max(1, min(height, source.height() - y))
+        return source.copy(x, y, width, height)
+
+    def set_background_frame(self, frame):
+        """Use the existing decoded preview frame as a blurred fill layer."""
+
+        try:
+            if not frame.isValid():
+                return
+            image = frame.toImage()
+            if image.isNull():
+                return
+            self._background_frame = QPixmap.fromImage(image)
+        except Exception:
+            return
+        self._update_background_pixmap()
+        self._update_foreground_pixmap()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_layers()
+
+    def _layout_layers(self):
+        self.background_preview.setGeometry(self.rect())
+        if self.foreground_video is not None:
+            foreground_width = self.width()
+            foreground_height = min(
+                self.height(),
+                max(1, round(foreground_width / self._active_picture_aspect_ratio())),
+            )
+            self.foreground_video.setGeometry(
+                (self.width() - foreground_width) // 2,
+                (self.height() - foreground_height) // 2,
+                foreground_width,
+                foreground_height,
+            )
+            self.foreground_preview.setGeometry(self.foreground_video.geometry())
+        self._update_background_pixmap()
+        self._update_foreground_pixmap()
+
+    def _update_background_pixmap(self):
+        if self._background_frame.isNull() or self.width() < 1 or self.height() < 1:
+            return
+        active_picture = self._active_picture_pixmap()
+        scaled = active_picture.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - self.width()) // 2)
+        y = max(0, (scaled.height() - self.height()) // 2)
+        self.background_preview.setPixmap(
+            scaled.copy(x, y, self.width(), self.height())
+        )
+
+    def _update_foreground_pixmap(self):
+        active_picture = self._active_picture_pixmap()
+        if active_picture.isNull() or self.foreground_preview.width() < 1:
+            return
+        self.foreground_preview.setPixmap(
+            active_picture.scaled(
+                self.foreground_preview.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self.foreground_preview.show()
 
 
 class YouTubeShortsMockOverlay(QWidget):

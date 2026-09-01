@@ -210,7 +210,7 @@ class CaptionPreviewMixin:
         if hasattr(self, "caption_preview_label"):
             return
 
-        label = QLabel(self.video_widget)
+        label = QLabel(self.preview_overlay_host())
         label.setObjectName("CaptionPreviewOverlay")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setWordWrap(True)
@@ -230,13 +230,13 @@ class CaptionPreviewMixin:
 
         self.caption_resize_handles = {}
         for corner in CORNER_NAMES:
-            handle = QLabel(self.video_widget)
+            handle = QLabel(self.preview_overlay_host())
             handle.setObjectName("CaptionResizeHandle")
             handle.setCursor(CAPTION_CORNER_CURSORS[corner])
             handle.hide()
             self.caption_resize_handles[corner] = handle
 
-        self.caption_resize_readout = QLabel("", self.video_widget)
+        self.caption_resize_readout = QLabel("", self.preview_overlay_host())
         self.caption_resize_readout.setObjectName("CaptionResizeReadout")
         self.caption_resize_readout.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
@@ -370,10 +370,10 @@ class CaptionPreviewMixin:
             if not handle.isVisible():
                 continue
             hit = watched is handle
-            if watched is self.video_widget:
+            if watched in (self.video_widget, self.preview_overlay_host()):
                 try:
                     hit = handle.geometry().contains(
-                        event.position().toPoint()
+                        self.preview_event_point(event, watched)
                     )
                 except Exception:
                     hit = False
@@ -413,10 +413,10 @@ class CaptionPreviewMixin:
         # straight to the max clamp on the first pixel of movement and
         # then get stuck there (every subsequent move recomputed the
         # same bogus ratio from the same mismatched pair).
-        global_anchor = self.video_widget.mapToGlobal(
+        global_anchor = self.preview_overlay_host().mapToGlobal(
             QPoint(anchor_point[0], anchor_point[1])
         )
-        global_start = self.video_widget.mapToGlobal(
+        global_start = self.preview_overlay_host().mapToGlobal(
             QPoint(start_point[0], start_point[1])
         )
 
@@ -477,10 +477,10 @@ class CaptionPreviewMixin:
             return False
 
         hit = watched is label
-        if watched is self.video_widget:
+        if watched in (self.video_widget, self.preview_overlay_host()):
             try:
                 hit = label.geometry().contains(
-                    event.position().toPoint()
+                    self.preview_event_point(event, watched)
                 )
             except Exception:
                 hit = False

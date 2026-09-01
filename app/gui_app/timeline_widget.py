@@ -12,7 +12,7 @@ gui_app package.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QPoint
-from PySide6.QtGui import QColor, QFont, QPainter, QPolygon
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygon
 from PySide6.QtWidgets import QSizePolicy, QSlider
 
 from .helpers import format_precise_time, format_time
@@ -83,6 +83,7 @@ class SuggestionSlider(QSlider):
         self.scrubbing_playhead = False
         self.asset_clips: list[dict] = []
         self.selected_asset_clip_id: str | None = None
+        self.hovered_asset_clip_id: str | None = None
         self.dragging_asset_clip = False
         self.dragging_asset_part: str | None = None
         self.asset_drag_anchor = 0
@@ -118,13 +119,13 @@ class SuggestionSlider(QSlider):
             True
         )
 
-        self.setMinimumHeight(
-            self.required_lane_stack_height()
-        )
-
+        # The painted lane geometry is fixed. Letting this slider expand
+        # vertically turns spare right-column space into an empty canvas
+        # below VOICEOVER, so use the same geometry as its natural height.
+        self.setFixedHeight(self.required_lane_stack_height())
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
 
         self.setFocusPolicy(
@@ -1655,7 +1656,9 @@ class SuggestionSlider(QSlider):
 
         if source_part is not None:
 
+            self.selected_asset_clip_id = None
             self.source_clip_selected = True
+            self.assetClipSelected.emit("SOURCE", "")
 
             if source_part in {
                 "start",
@@ -1691,7 +1694,9 @@ class SuggestionSlider(QSlider):
 
         if handle is not None:
 
+            self.selected_asset_clip_id = None
             self.source_clip_selected = True
+            self.assetClipSelected.emit("SOURCE", "")
             self.dragging_handle = handle
 
             self.setCursor(
@@ -1710,6 +1715,9 @@ class SuggestionSlider(QSlider):
         )
 
         if suggestion_index is not None:
+
+            self.selected_asset_clip_id = None
+            self.assetClipSelected.emit("", "")
 
             start_ms, end_ms, score = (
                 self.suggested_ranges[
@@ -1743,6 +1751,8 @@ class SuggestionSlider(QSlider):
         )
 
         self.source_clip_selected = False
+        self.selected_asset_clip_id = None
+        self.assetClipSelected.emit("", "")
         self.manual_viewport_navigation = False
         self.scrubbing_playhead = True
         self.setSliderDown(
@@ -1760,6 +1770,16 @@ class SuggestionSlider(QSlider):
     def mouseMoveEvent(self, event):
 
         position = event.position()
+
+        if not self.dragging_asset_clip:
+            asset_hit = self.asset_clip_part_at_position(
+                position.x(),
+                position.y(),
+            )
+            hovered_id = asset_hit[1] if asset_hit is not None else None
+            if hovered_id != self.hovered_asset_clip_id:
+                self.hovered_asset_clip_id = hovered_id
+                self.update()
 
         if self.dragging_asset_clip:
             clip = self.asset_clip_by_id(
@@ -1997,6 +2017,13 @@ class SuggestionSlider(QSlider):
         super().mouseMoveEvent(
             event
         )
+
+    def leaveEvent(self, event):
+
+        if self.hovered_asset_clip_id is not None:
+            self.hovered_asset_clip_id = None
+            self.update()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
 
@@ -2532,6 +2559,16 @@ class SuggestionSlider(QSlider):
             self.selected_asset_clip_id
             or ""
         )
+        hovered = str(
+            clip.get(
+                "id",
+                "",
+            )
+            or ""
+        ) == str(
+            self.hovered_asset_clip_id
+            or ""
+        )
         active = clip.get(
             "active",
             True,
@@ -2594,13 +2631,23 @@ class SuggestionSlider(QSlider):
             )
 
         painter.setPen(
-            edge
+            QPen(edge, 2)
             if selected
-            else QColor(
-                54,
-                44,
-                36,
-                190,
+            else QPen(
+                QColor(
+                    198,
+                    176,
+                    130,
+                    220,
+                )
+                if hovered
+                else QColor(
+                    54,
+                    44,
+                    36,
+                    190,
+                ),
+                1,
             )
         )
         painter.setBrush(
