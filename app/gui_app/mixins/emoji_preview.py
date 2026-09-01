@@ -75,14 +75,27 @@ EMOJI_CORNER_CURSORS = {
 
 class EmojiPreviewMixin:
 
+    def preview_canvas_rect(self) -> tuple[int, int, int, int]:
+        width = max(1, self.video_widget.width())
+        height = max(1, self.video_widget.height())
+        canvas_height = height
+        canvas_width = max(1, int(round(canvas_height * 9 / 16)))
+        if canvas_width > width:
+            canvas_width = width
+            canvas_height = max(1, int(round(canvas_width * 16 / 9)))
+        return (
+            max(0, (width - canvas_width) // 2),
+            max(0, (height - canvas_height) // 2),
+            canvas_width,
+            canvas_height,
+        )
+
     def plan_emoji_preview(self):
         """
         Refresh the emoji preview (default positions for the currently
         selected clip) so it is visible before a full render runs. This is
-        invisible plumbing, not a user-facing step -- it piggybacks on the
-        same "clip selection is finalized, plan pre-render data" moment
-        that already kicks off AI visual planning (see plan_ai_visuals()
-        in ai_visual_pipeline.py).
+        invisible plumbing, not a user-facing step -- it runs once a clip
+        selection has been finalized and preview data is available.
         """
 
         if (
@@ -354,7 +367,7 @@ class EmojiPreviewMixin:
         self.ensure_emoji_preview_label_pool(len(active))
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
-            self.ai_visual_preview_canvas_rect()
+            self.preview_canvas_rect()
         )
 
         for slot_index, label in enumerate(self.emoji_preview_labels):
@@ -467,7 +480,7 @@ class EmojiPreviewMixin:
             return
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
-            self.ai_visual_preview_canvas_rect()
+            self.preview_canvas_rect()
         )
 
         _source, _key, active_event = active[slot_index]
@@ -602,8 +615,7 @@ class EmojiPreviewMixin:
 
         _source, _key, active_event = active[slot_index]
 
-        # See the matching comment in ai_visual_preview.py's
-        # begin_visual_resize_drag(): anchor_point/start_point are in
+        # The anchor/start point is in video-widget-local coordinates,
         # video_widget-local coordinates (needed below to solve for the
         # new position fraction), but the live drag ratio is compared
         # against the mouse's *global* position on every move -- so that
@@ -640,7 +652,7 @@ class EmojiPreviewMixin:
             return
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
-            self.ai_visual_preview_canvas_rect()
+            self.preview_canvas_rect()
         )
 
         mouse = event.globalPosition().toPoint()

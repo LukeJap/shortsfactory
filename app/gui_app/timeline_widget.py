@@ -3,7 +3,7 @@ The custom multi-lane timeline/editor canvas (SuggestionSlider) -- by far
 the most bespoke widget in the app, not a stock Qt component. Handles the
 source clip trim handles, AI clip-hunter suggestion ranges, and the
 stacked event lanes (transcript cuts, captions, smart motion, visual FX,
-AI visual/graphic events, SFX), plus zoom/pan (including trackpad
+emoji, SFX, and voiceover), plus zoom/pan (including trackpad
 horizontal scroll), drag-to-trim, and the app-wide custom Qt signals the
 rest of the GUI listens to for timeline interaction. Largest file in the
 gui_app package.
@@ -52,6 +52,10 @@ class SuggestionSlider(QSlider):
         str,
         object,
     )
+
+    # Reserve a small breathing room below the last lane. The lane stack
+    # itself remains defined exclusively by ``lane_geometry``.
+    LANE_STACK_BOTTOM_PADDING = 17
 
     assetClipDoubleClicked = Signal(
         str,
@@ -115,7 +119,7 @@ class SuggestionSlider(QSlider):
         )
 
         self.setMinimumHeight(
-            250
+            self.required_lane_stack_height()
         )
 
         self.setSizePolicy(
@@ -196,190 +200,71 @@ class SuggestionSlider(QSlider):
         self,
     ) -> dict[str, int]:
 
-        # Always lay lanes out inside the height Qt actually gave the
-        # timeline. QSplitter/QScrollArea can temporarily make this widget
-        # shorter than its requested minimum height; using a synthetic
-        # minimum here painted the SFX lane below the widget and clipped it.
-        height = max(
-            1,
-            self.height(),
-        )
-
-        if height < 218:
-            # Compact layout: preserve all five editor lanes rather than
-            # sacrificing SFX/EMOJI when the center workspace is vertically
-            # tight.
-            ruler_top = 8
-            ruler_bottom = 30
-            video_top = 36
-            lane_gap = 5
-            bottom_margin = 6
-            available_lane_height = max(
-                4,
-                height
-                - video_top
-                - lane_gap * 4
-                - bottom_margin,
-            )
-            video_height = max(
-                1,
-                int(
-                    available_lane_height
-                    * 0.28
-                ),
-            )
-            edit_height = max(
-                1,
-                int(
-                    available_lane_height
-                    * 0.26
-                ),
-            )
-            visual_height = max(
-                1,
-                int(
-                    available_lane_height
-                    * 0.24
-                ),
-            )
-            remaining_height = max(
-                3,
-                available_lane_height
-                - video_height
-                - edit_height
-                - visual_height,
-            )
-            sfx_height = max(
-                1,
-                remaining_height // 3,
-            )
-            emoji_height = max(
-                1,
-                remaining_height // 3,
-            )
-            voiceover_height = max(
-                1,
-                remaining_height
-                - sfx_height
-                - emoji_height,
-            )
-        else:
-            ruler_top = 14
-            ruler_bottom = 42
-            video_top = 50
-            lane_gap = 7
-            bottom_margin = 10
-            video_height = max(
-                36,
-                min(
-                    48,
-                    int(
-                        height
-                        * 0.22
-                    ),
-                ),
-            )
-            edit_height = 48
-
-            # Give VISUALS its preferred height only when doing so still
-            # leaves a visible SFX lane inside the real widget bounds.
-            visual_top_preview = (
-                video_top
-                + video_height
-                + lane_gap
-                + edit_height
-                + lane_gap
-            )
-            preferred_visual_height = max(
-                36,
-                min(
-                    58,
-                    int(
-                        height
-                        * 0.20
-                    ),
-                ),
-            )
-            max_visual_height = max(
-                1,
-                height
-                - visual_top_preview
-                - lane_gap
-                - 24
-                - bottom_margin,
-            )
-            visual_height = min(
-                preferred_visual_height,
-                max_visual_height,
-            )
-
-        edit_top = video_top + video_height + lane_gap
-        visual_top = edit_top + edit_height + lane_gap
-        sfx_top = visual_top + visual_height + lane_gap
-
-        if height >= 218:
-            remaining_height = max(
-                3,
-                height
-                - sfx_top
-                - lane_gap * 2
-                - bottom_margin,
-            )
-            sfx_height = max(
-                1,
-                remaining_height // 3,
-            )
-            emoji_height = max(
-                1,
-                remaining_height // 3,
-            )
-            voiceover_height = max(
-                1,
-                remaining_height
-                - sfx_height
-                - emoji_height,
-            )
-
-        emoji_top = sfx_top + sfx_height + lane_gap
-        voiceover_top = emoji_top + emoji_height + lane_gap
+        ruler_top = 8
+        ruler_height = 24
+        ruler_bottom = ruler_top + ruler_height
+        lane_gap = 3
+        source_top = ruler_bottom + 5
+        lane_heights = {
+            "source": 40,
+            "visual": 34,
+            "sfx": 32,
+            "emoji": 36,
+            "voiceover": 42,
+        }
+        visual_top = source_top + lane_heights["source"] + lane_gap
+        sfx_top = visual_top + lane_heights["visual"] + lane_gap
+        emoji_top = sfx_top + lane_heights["sfx"] + lane_gap
+        voiceover_top = emoji_top + lane_heights["emoji"] + lane_gap
 
         return {
             "ruler_top": ruler_top,
             "ruler_bottom": ruler_bottom,
-            "video_top": video_top,
-            "video_height": video_height,
-            "edit_top": edit_top,
-            "edit_height": edit_height,
+            "source_top": source_top,
+            "source_height": lane_heights["source"],
             "visual_top": visual_top,
-            "visual_height": visual_height,
+            "visual_height": lane_heights["visual"],
             "sfx_top": sfx_top,
-            "sfx_height": sfx_height,
+            "sfx_height": lane_heights["sfx"],
             "emoji_top": emoji_top,
-            "emoji_height": emoji_height,
+            "emoji_height": lane_heights["emoji"],
             "voiceover_top": voiceover_top,
-            "voiceover_height": voiceover_height,
-            "lane_bottom": voiceover_top
-            + voiceover_height,
+            "voiceover_height": lane_heights["voiceover"],
+            "lane_bottom": voiceover_top + lane_heights["voiceover"],
         }
 
-    def edit_row_geometry(
+    def lane_rect(self, lane_name: str) -> tuple[int, int]:
+        """Return a named lane's shared vertical bounds."""
+
+        normalized = lane_name.strip().lower()
+        if normalized not in {"source", "visual", "sfx", "emoji", "voiceover"}:
+            raise ValueError(f"unknown timeline lane: {lane_name}")
+        lanes = self.lane_geometry()
+        return lanes[f"{normalized}_top"], lanes[f"{normalized}_height"]
+
+    def required_lane_stack_height(self) -> int:
+        """Return the minimum height that keeps every timeline lane visible."""
+
+        return (
+            self.lane_geometry()["lane_bottom"]
+            + self.LANE_STACK_BOTTOM_PADDING
+        )
+
+    def stacked_row_geometry(
         self,
         index: int,
         row_count: int,
-        edit_top: int,
-        edit_height: int,
+        lane_top: int,
+        lane_height: int,
     ) -> tuple[int, int]:
 
-        # Give each EDITS-lane category (manual cuts, transcript edits,
-        # caption impact, motion, FX, graphics) its own non-overlapping
-        # row instead of cramming them into overlapping micro-bands —
-        # they used to visually stack on top of each other and read as
-        # illegible slivers.
+        # Keep overlapping clips in non-overlapping rows inside one
+        # authoritative lane geometry model.
         padding = 2
         gap = 1
         usable = max(
             row_count * 4,
-            edit_height - padding * 2,
+            lane_height - padding * 2,
         )
         row_height = max(
             4,
@@ -396,7 +281,7 @@ class SuggestionSlider(QSlider):
             ),
         )
         y = (
-            edit_top
+            lane_top
             + padding
             + index
             * (
@@ -1064,7 +949,7 @@ class SuggestionSlider(QSlider):
         )
 
         lanes = self.lane_geometry()
-        marker_y = lanes["video_top"] + lanes["video_height"] - 15
+        marker_y = lanes["source_top"] + lanes["source_height"] - 15
 
         return (
             x1,
@@ -1119,10 +1004,10 @@ class SuggestionSlider(QSlider):
 
         x1, x2 = geometry
         lanes = self.lane_geometry()
-        top = lanes["video_top"] + 5
+        top = lanes["source_top"] + 5
         height = max(
             24,
-            lanes["video_height"] - 10,
+            lanes["source_height"] - 10,
         )
 
         return (
@@ -1236,6 +1121,7 @@ class SuggestionSlider(QSlider):
             )
             or ""
         )
+        visual_kinds = {"RECAP_VISUAL_FX", "RECAP_MOTION"}
         siblings = [
             candidate
             for candidate in self.asset_clips
@@ -1243,13 +1129,11 @@ class SuggestionSlider(QSlider):
                 candidate,
                 dict,
             )
-            and str(
-                candidate.get(
-                    "kind",
-                    "",
-                )
-                or ""
-            ).upper() == kind
+            and (
+                str(candidate.get("kind", "") or "").upper() in visual_kinds
+                if kind == "VISUALS"
+                else str(candidate.get("kind", "") or "").upper() == kind
+            )
             and not bool(
                 candidate.get(
                     "deleted",
@@ -1388,13 +1272,13 @@ class SuggestionSlider(QSlider):
                 max_rows=2,
             )
 
-        if kind in {"AI_VISUAL", "RECAP_VISUAL_FX", "RECAP_MOTION"}:
+        if kind in {"RECAP_VISUAL_FX", "RECAP_MOTION"}:
             return self._stacked_asset_lane(
                 clip,
-                kind,
+                "VISUALS",
                 lanes["visual_top"],
                 lanes["visual_height"],
-                max_rows=3,
+                max_rows=2,
             )
 
         if kind == "VOICEOVER":
@@ -1422,39 +1306,24 @@ class SuggestionSlider(QSlider):
             kind,
             max_rows=max_rows,
         )
-        usable_height = max(
-            18,
-            lane_height - 8,
-        )
+        inset = 3
+        usable_height = max(1, lane_height - inset * 2)
 
         if row_count <= 1:
             return (
-                lane_top + 4,
+                lane_top + inset,
                 usable_height,
             )
 
         gap = 2
-        row_height = max(
-            14,
-            int(
-                (
-                    usable_height
-                    - gap
-                    * (
-                        row_count
-                        - 1
-                    )
-                )
-                / row_count
-            ),
-        )
+        row_height = max(1, int((usable_height - gap * (row_count - 1)) / row_count))
         row = min(
             row,
             row_count - 1,
         )
         return (
             lane_top
-            + 4
+            + inset
             + row
             * (
                 row_height
@@ -1726,7 +1595,7 @@ class SuggestionSlider(QSlider):
         """
         Hit-tests in priority order and starts whichever drag interaction
         matches, falling through to plain playhead scrubbing if nothing
-        else is hit: (1) an editor asset clip (AI_VISUAL/SFX lane) body
+        else is hit: (1) an editor asset clip body
         or trim handle, (2) the source clip's own trim handles/body,
         (3) a legacy handle_at_position() hit, (4) an AI clip-hunter
         suggestion range (clicking one loads it as the selection),
@@ -2867,10 +2736,8 @@ class SuggestionSlider(QSlider):
         lanes = self.lane_geometry()
         ruler_top = lanes["ruler_top"]
         ruler_bottom = lanes["ruler_bottom"]
-        video_top = lanes["video_top"]
-        video_height = lanes["video_height"]
-        edit_top = lanes["edit_top"]
-        edit_height = lanes["edit_height"]
+        source_top = lanes["source_top"]
+        source_height = lanes["source_height"]
         visual_top = lanes["visual_top"]
         visual_height = lanes["visual_height"]
         sfx_top = lanes["sfx_top"]
@@ -2933,14 +2800,9 @@ class SuggestionSlider(QSlider):
 
         lane_specs = [
             (
-                "V1 SOURCE",
-                video_top,
-                video_height,
-            ),
-            (
-                "EDITS",
-                edit_top,
-                edit_height,
+                "SOURCE",
+                source_top,
+                source_height,
             ),
             (
                 "VISUALS",
@@ -3032,10 +2894,8 @@ class SuggestionSlider(QSlider):
         )
         for y in (
             ruler_bottom,
-            video_top
-            + video_height,
-            edit_top
-            + edit_height,
+            source_top
+            + source_height,
             visual_top
             + visual_height,
             sfx_top
@@ -3055,9 +2915,9 @@ class SuggestionSlider(QSlider):
                 painter,
                 0,
                 self.source_duration(),
-                video_top
+                source_top
                 + 9,
-                video_height
+                source_height
                 - 18,
                 QColor(
                     14,
@@ -3272,13 +3132,10 @@ class SuggestionSlider(QSlider):
                         )
             tick += minor_interval
 
-        # Two semantic rows instead of one-row-per-category: cuts/transcript/
-        # caption edits share the top row, motion/FX/graphics share the
-        # bottom row. A 6-way split made every marker a razor-thin 6px
-        # sliver even after the lane was enlarged; two rows lets each
-        # marker use roughly a third of the whole lane height instead.
-        cut_row_y, cut_row_h = self.edit_row_geometry(
-            0, 2, edit_top, edit_height
+        # SOURCE retains transcript/cut context as a small in-lane overlay;
+        # visual effects and motion share the dedicated VISUALS lane below.
+        cut_row_y, cut_row_h = self.stacked_row_geometry(
+            1, 2, source_top, source_height
         )
         for start_ms, end_ms in self.manual_cut_ranges:
             self.draw_range(
@@ -3322,8 +3179,8 @@ class SuggestionSlider(QSlider):
                 painter,
                 start_ms,
                 end_ms,
-                video_top
-                + video_height
+                source_top
+                + source_height
                 - 17,
                 12,
                 QColor(
@@ -3346,8 +3203,8 @@ class SuggestionSlider(QSlider):
                 min_width=5,
             )
 
-        fx_row_y, fx_row_h = self.edit_row_geometry(
-            1, 2, edit_top, edit_height
+        fx_row_y, fx_row_h = self.stacked_row_geometry(
+            0, 2, visual_top, visual_height
         )
         for start_ms, end_ms in self.motion_ranges:
             self.draw_range(

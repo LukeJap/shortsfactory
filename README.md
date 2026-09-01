@@ -9,8 +9,8 @@ style of YouTube Shorts, TikTok, or Instagram Reels.
 ShortsFactory automates the parts of Shorts-editing a human would
 otherwise do by hand: picking a strong clip from a long source, tightening
 it (cutting dead air and redundant speech), captioning it karaoke-style,
-adding punch-in camera motion, color grading, AI-generated visual cutaway
-graphics, emoji reactions, sound effects, and background music.
+adding punch-in camera motion, color grading, emoji reactions, sound
+effects, and background music.
 
 It runs entirely on your own machine against your own footage — one user,
 one video at a time, not a hosted or multi-tenant product. Every
@@ -27,11 +27,7 @@ render, rather than applied silently in the background.
   need `ffmpeg-full` instead (see install steps below).
 - **[Ollama](https://ollama.com)** running locally, with the `llama3.1:8b`
   model pulled — used for clip selection, content-editing suggestions, and
-  AI visual planning. No cloud AI calls are made.
-- *Optional:* a local Forge/Automatic1111-compatible Stable Diffusion
-  backend, if you want AI-generated visual cutaway images. Without it, the
-  app still works and falls back to preview-only placeholders for that
-  feature.
+  No cloud AI calls are made.
 
 ## Install (macOS)
 
@@ -78,7 +74,7 @@ unverified there.
 
 This launches the desktop editor. From there: import a source video,
 click **Find Best Clips** to get AI-suggested moments, select/trim a clip
-on the timeline, adjust captions/emoji/AI visuals/effects, then
+on the timeline, adjust captions/emoji/effects, then
 **Generate Final Video**.
 
 ## Running tests
@@ -98,9 +94,6 @@ A few optional environment variables, all with sensible defaults if unset:
 | `OLLAMA_MODEL` | Ollama model name (default `llama3.1:8b`) |
 | `SHORTSFACTORY_WHISPER_MODEL` | Override the local Whisper transcription model |
 | `SHORTSFACTORY_TRANSCRIPTION_QUALITY` | Default transcription quality preset |
-| `SHORTSFACTORY_FORGE_LAUNCH` | Path to a local Forge/A1111 launch script, for AI visual generation |
-| `SHORTSFACTORY_IMAGE_API` | Base URL of a running Forge/A1111 image API, if not launching one |
-| `SHORTSFACTORY_OPENAI_IMAGE_API` / `SHORTSFACTORY_OPENAI_IMAGE_MODEL` | Use an OpenAI-compatible image API instead of a local backend |
 
 ## Project layout
 
@@ -109,7 +102,7 @@ A few optional environment variables, all with sensible defaults if unset:
 - `app/gui_app/` — the PySide6 UI: main window, the custom timeline
   widget, the visual style sheet, and one `mixins/` file per feature area
 - `app/*.py` — the render pipeline itself (clip selection, cuts,
-  transcription, captions, motion, base color polish, semantic FX, AI visuals, emoji,
+  transcription, captions, motion, base color polish, semantic FX, emoji,
   sound effects, final render) — each stage is a standalone,
   independently runnable script
 - `tests/` — the automated test suite (`pytest`)

@@ -4,8 +4,8 @@ timeline scrubbing/trim-handle drag paths (both throttled to at most one
 real player seek per 80ms during an active drag, with a synchronous
 repaint nudge, to work around this Qt Multimedia backend never
 repainting a paused video after a bare setPosition() call), and volume
-control. Also fires the preview-overlay refresh calls (AI visual/emoji/
-caption placement previews) on every position change.
+control. Also refreshes the emoji and caption placement previews on every
+position change.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ class PlaybackMixin:
             return
 
         self.cancel_paused_seek_refresh()
-        self.hide_ai_visual_preview_overlay()
         self.play_request_counter += 1
         if (
             hasattr(self, "clear_recap_artifact_context")
@@ -125,25 +124,6 @@ class PlaybackMixin:
         self.load_editor_asset_plan_state()
 
         self.ai_candidates = []
-        self.visual_plan_slots = []
-        self.visual_deleted_slots = []
-        self.reset_pending_visual_replan_state()
-
-        if hasattr(
-            self,
-            "visual_slots_list",
-        ):
-            self.visual_slots_list.clear()
-            self.visual_status_label.setText(
-                "Load a transcript, then plan visuals for the active selection."
-            )
-            self.plan_visuals_button.setEnabled(
-                False
-            )
-
-            self.generate_visual_assets_button.setEnabled(
-                False
-            )
 
         self.source_transcript_segments = []
         self.manual_cut_segments = set()
@@ -398,9 +378,6 @@ class PlaybackMixin:
                     self.start_ms
                 )
             )
-            self.update_ai_visual_preview_overlay(
-                self.start_ms
-            )
             self.update_emoji_preview_overlay(
                 self.start_ms
             )
@@ -438,9 +415,6 @@ class PlaybackMixin:
             )
 
         self.trigger_sfx_previews(
-            position
-        )
-        self.update_ai_visual_preview_overlay(
             position
         )
         self.update_emoji_preview_overlay(
@@ -525,9 +499,6 @@ class PlaybackMixin:
                 )
             )
 
-        self.update_ai_visual_preview_overlay(
-            position
-        )
         self.update_emoji_preview_overlay(
             position
         )
@@ -1011,26 +982,11 @@ class PlaybackMixin:
         self.update_transcript_panel()
         if preserve_editor_assets:
             self.retarget_editor_asset_context_to_current_selection()
-            self.apply_editor_visual_overrides_to_slots()
-            if self.visual_plan_slots:
-                self.save_ai_visual_plan()
-            self.refresh_visual_plan_display()
+            self.refresh_editor_asset_timeline()
         else:
-            self.clear_visual_plan_display()
             self.selected_sfx_clip_id = None
             self.selected_emoji_clip_id = None
             self.refresh_editor_asset_timeline()
-
-        if hasattr(
-            self,
-            "plan_visuals_button",
-        ):
-            self.plan_visuals_button.setEnabled(
-                bool(
-                    self.source_transcript_segments
-                    and self.end_ms > self.start_ms
-                )
-            )
 
     def set_start(self):
 
@@ -1074,12 +1030,11 @@ class PlaybackMixin:
         self.update_selection_label()
         if preserve_editor_assets:
             self.retarget_editor_asset_context_to_current_selection()
-            self.apply_editor_visual_overrides_to_slots()
-            if self.visual_plan_slots:
-                self.save_ai_visual_plan()
-            self.refresh_visual_plan_display()
+            self.refresh_editor_asset_timeline()
         else:
-            self.clear_visual_plan_display()
+            self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
+            self.refresh_editor_asset_timeline()
 
     def set_end(self):
 
@@ -1118,12 +1073,11 @@ class PlaybackMixin:
         self.update_selection_label()
         if preserve_editor_assets:
             self.retarget_editor_asset_context_to_current_selection()
-            self.apply_editor_visual_overrides_to_slots()
-            if self.visual_plan_slots:
-                self.save_ai_visual_plan()
-            self.refresh_visual_plan_display()
+            self.refresh_editor_asset_timeline()
         else:
-            self.clear_visual_plan_display()
+            self.selected_sfx_clip_id = None
+            self.selected_emoji_clip_id = None
+            self.refresh_editor_asset_timeline()
 
     def update_selection_label(self):
 

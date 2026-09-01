@@ -10,8 +10,7 @@ source video (e.g. a full TV episode or podcast) into an edited, vertical
 Reels. It automates the whole pipeline a human editor would otherwise do
 by hand: picking a strong clip, tightening it (cutting dead air and
 redundant speech), captioning it, adding punch-in camera motion, color
-grading, AI-generated visual cutaway graphics, emoji reactions, sound
-effects, and background music.
+grading, emoji reactions, sound effects, and background music.
 
 **Who it's for / design philosophy:** a single local user producing Shorts
 from their own source footage, not a hosted multi-tenant product. The
@@ -32,23 +31,19 @@ it to and hardening it on macOS (Apple Silicon).
   directly rather than using a Python video library
 - `openai-whisper` for local transcription
 - Ollama (a local LLM server, default model `llama3.1:8b`) for clip
-  selection, content editing suggestions, and AI visual planning — no
+  selection and content editing suggestions — no
   cloud AI calls
 - OpenCV for shot-type/face detection (used to size camera zoom effects)
-- Optional: a Forge/Automatic1111-compatible local Stable Diffusion
-  backend for AI-generated visual cutaway images
-
 **Current UI shape** — a dark, gothic/industrial-styled desktop editor
 with three columns:
 - **Left:** source video import (drag-and-drop), transcription quality
   selector, "Find Best Clips" (AI clip discovery), "Generate Short"
 - **Center:** video preview player, a custom multi-lane zoomable/pannable
   timeline (source clip trim handles, transcript cuts, scene markers,
-  smart-motion/visual-FX/AI-visual event lanes), render progress + log
+  smart-motion/visual-FX, SFX, emoji, and voiceover lanes), render progress + log
 - **Right:** "AI Clip Hunter" candidate cards (AI-suggested clip
-  start/end options with scores/reasoning), "AI Visual Cutaways" panel
-  (generated overlay images with per-clip position/scale/display-mode
-  controls), and a transcript editor (click a line to correct/cut it)
+  start/end options with scores/reasoning) and a transcript editor
+  (click a line to correct/cut it)
 
 **Visual identity:** near-black panels (`#09090A`/`#101012`/`#0A0A0B`)
 with off-white/cream text (`#DED6C8`), blood-red/rust accent borders and
@@ -68,13 +63,14 @@ full-bleed, no black borders.
 
 **Codebase shape:** the GUI itself lives in `app/gui_app/` (a
 `main_window.py` plus one mixin file per functional area under
-`app/gui_app/mixins/` — playback, transcript, AI visuals, SFX, render
+`app/gui_app/mixins/` — playback, transcript, emoji/caption preview,
+SFX, render
 pipeline, etc. — see section 3 below for why it's structured that way).
 Everything else in `app/*.py` is a standalone script the GUI invokes as a
 subprocess for one pipeline stage each (`render.py` orchestrates the
 overall render; `subtitles.py` transcribes; `smart_motion.py` does the
 camera zoom/pan effect; `visual_fx.py` does color grade/vignette/overlay
-FX; `apply_ai_visuals.py` composites the AI-generated cutaway images;
+FX;
 `sfx_engine.py` picks and mixes sound effects; etc.) — each independently
 runnable and testable, communicating through small JSON "plan" files in
 `output/`.
@@ -98,6 +94,10 @@ developed and validated on Windows (see `SHORTSFACTORY_CURRENT_STATUS.md` /
 `SHORTSFACTORY_RECOVERY_AUDIT.md`), so a meaningful amount of the work here
 is closing gaps that only show up when running on a different OS with a
 from-scratch `.venv`.
+
+> Historical note: later sections preserve the original recovery record.
+> References there to the retired AI image/cutaway subsystem are archival
+> only and do not describe the active application.
 
 No product behavior was intentionally changed anywhere in this pass unless
 explicitly noted as such (several later sections *are* product/behavior

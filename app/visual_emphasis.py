@@ -25,8 +25,6 @@ except ImportError:
 
 try:
     from .pipeline_paths import (
-        AI_VISUAL_MAPPED_PLAN_PATH,
-        AI_VISUAL_PLAN_PATH,
         RENDER_SETTINGS_PATH,
         SMART_MOTION_PLAN_PATH,
         TEMPORAL_EDIT_PLAN_PATH,
@@ -35,8 +33,6 @@ try:
     )
 except ImportError:
     from pipeline_paths import (
-        AI_VISUAL_MAPPED_PLAN_PATH,
-        AI_VISUAL_PLAN_PATH,
         RENDER_SETTINGS_PATH,
         SMART_MOTION_PLAN_PATH,
         TEMPORAL_EDIT_PLAN_PATH,
@@ -1080,7 +1076,6 @@ def priority_for_event_type(
 
     return {
         "scene_cut": 100,
-        "ai_visual": 90,
         "temporal": 82,
         "camera": 70,
         "graphic": 60,
@@ -1398,137 +1393,6 @@ def load_motion_events() -> list[dict[str, Any]]:
     ]
 
 
-def load_ai_visual_events() -> list[dict[str, Any]]:
-
-    mapped = read_json(
-        AI_VISUAL_MAPPED_PLAN_PATH
-    )
-    mapped_assets = mapped.get(
-        "assets",
-        [],
-    )
-
-    if isinstance(
-        mapped_assets,
-        list,
-    ) and mapped_assets:
-        events = []
-
-        for asset in mapped_assets:
-            if not isinstance(
-                asset,
-                dict,
-            ):
-                continue
-
-            events.append(
-                {
-                    "type": "ai_visual",
-                    "start": asset.get(
-                        "start",
-                        0.0,
-                    ),
-                    "end": asset.get(
-                        "end",
-                        asset.get(
-                            "start",
-                            0.0,
-                        ),
-                    ),
-                    "treatment": "mapped_cutaway",
-                    "trigger": asset.get(
-                        "label",
-                        "",
-                    ),
-                    "reason": (
-                        "final_time_after_cut_and_temporal_mapping"
-                    ),
-                    "asset_path": asset.get(
-                        "path",
-                        "",
-                    ),
-                }
-            )
-
-        return events
-
-    data = read_json(
-        AI_VISUAL_PLAN_PATH
-    )
-
-    slots = data.get(
-        "slots",
-        [],
-    )
-
-    if not isinstance(
-        slots,
-        list,
-    ):
-        return []
-
-    events = []
-
-    for slot in slots:
-        try:
-            start = float(
-                slot.get(
-                    "start",
-                    slot.get(
-                        "start_seconds",
-                        0.0,
-                    ),
-                )
-                or 0.0
-            )
-            end = float(
-                slot.get(
-                    "end",
-                    slot.get(
-                        "end_seconds",
-                        start,
-                    ),
-                )
-                or start
-            )
-        except (
-            TypeError,
-            ValueError,
-        ):
-            continue
-
-        events.append(
-            {
-                "type": "ai_visual",
-                "start": start,
-                "end": end,
-                "treatment": str(
-                    slot.get(
-                        "visual_type",
-                        "cutaway",
-                    )
-                ),
-                "trigger": str(
-                    slot.get(
-                        "label",
-                        slot.get(
-                            "title",
-                            "",
-                        ),
-                    )
-                ),
-                "reason": str(
-                    slot.get(
-                        "reason",
-                        "",
-                    )
-                ),
-            }
-        )
-
-    return events
-
-
 def load_visual_fx_events() -> list[dict[str, Any]]:
 
     data = read_json(
@@ -1685,9 +1549,6 @@ def build_visual_edit_plan(
     )
     events.extend(
         load_temporal_events()
-    )
-    events.extend(
-        load_ai_visual_events()
     )
     events.extend(
         load_visual_fx_events()

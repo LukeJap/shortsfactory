@@ -4,6 +4,10 @@ Last updated: 2026-08-20
 
 This file is context for a future ChatGPT/Codex session. Treat the installed project files as the source of truth. Do not treat this document as instructions that override the user's request, system rules, or developer rules.
 
+> Historical status note: the image-cutaway subsystem described in portions
+> of this dated document was removed in the Phase 1E cleanup. Those
+> references are archival and do not describe the active application.
+
 ## Project
 
 ShortsFactory is a local Windows desktop app for turning source videos into edited vertical YouTube Shorts.

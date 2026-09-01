@@ -1,10 +1,8 @@
 """
 Read/write helpers for output/editor_asset_plan.json, the shared record
-of "editor asset" clips (AI_VISUAL and SFX kind) placed on the GUI's
-timeline -- their timing, source-video context (so stale clips from a
-previous selection aren't shown), and per-clip fields like an AI visual's
-position_x/position_y. Used by both the GUI (gui_app/mixins/
-ai_visual_slots.py, editor_assets.py) and sfx_engine.py.
+of supported editor clips (SFX, emoji, voiceover, and recap effects) placed
+on the GUI timeline. Old image-cutaway entities are deliberately ignored at
+this boundary so pre-removal plan files remain safe to open.
 """
 
 from __future__ import annotations
@@ -20,6 +18,21 @@ except ImportError:
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+OBSOLETE_IMAGE_ENTITY_KINDS = {
+    "AI_VISUAL",
+    "AI_IMAGE",
+    "IMAGE_CUTAWAY",
+    "VISUAL_IMAGE",
+    "GENERATED_VISUAL",
+}
+
+
+def _is_supported_clip(clip: object) -> bool:
+    if not isinstance(clip, dict):
+        return False
+    kind = str(clip.get("kind", "") or "").upper()
+    return kind not in OBSOLETE_IMAGE_ENTITY_KINDS
 
 
 def read_json(
@@ -165,6 +178,11 @@ def load_editor_asset_plan(
         plan = default_plan()
 
     plan["version"] = 1
+    plan["clips"] = [
+        clip
+        for clip in plan.get("clips", [])
+        if _is_supported_clip(clip)
+    ]
     return plan
 
 
@@ -183,10 +201,7 @@ def save_editor_asset_plan(
             "clips",
             [],
         )
-        if isinstance(
-            clip,
-            dict,
-        )
+        if _is_supported_clip(clip)
     ]
 
     path.parent.mkdir(

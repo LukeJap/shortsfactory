@@ -6,7 +6,7 @@ scaling event density and per-category volume by edit-energy tier
 visual_emphasis.py's ENERGY_PROFILES, see the comment on those). Largest
 file in the pipeline. Also provides asset_metadata_for_path(), used by
 the GUI's editor asset panel (gui_app/mixins/editor_assets.py) to
-describe SFX library files. Reuses apply_ai_visuals.py's interval-
+describe SFX library files. Reuses the shared timeline interval-
 remapping helpers (keep_segments, map_source_interval_to_tight,
 map_tight_interval_to_final) to keep SFX event timing in sync with
 whatever cuts were applied.
@@ -33,7 +33,7 @@ try:
         save_editor_asset_plan,
         set_editor_plan_context,
     )
-    from .apply_ai_visuals import (
+    from .timeline_mapping import (
         keep_segments,
         map_source_interval_to_tight,
         map_tight_interval_to_final,
@@ -52,7 +52,7 @@ except ImportError:
         save_editor_asset_plan,
         set_editor_plan_context,
     )
-    from apply_ai_visuals import (
+    from timeline_mapping import (
         keep_segments,
         map_source_interval_to_tight,
         map_tight_interval_to_final,
@@ -1209,10 +1209,7 @@ def category_options_for_event(
     }:
         add("transition")
 
-    if kind in {
-        "camera",
-        "ai_visual",
-    } and any(
+    if kind == "camera" and any(
         token in blob
         for token in (
             "motion",
@@ -1223,7 +1220,6 @@ def category_options_for_event(
             "reframe",
             "entrance",
             "transition",
-            "cutaway",
         )
     ):
         add("whoosh")
@@ -2127,110 +2123,6 @@ def candidate_for_event(
             category = "ding"
             score = 48.0
             reason = "camera accent"
-    elif kind == "ai_visual":
-        if any(
-            token in blob
-            for token in (
-                "money",
-                "cash",
-                "coin",
-            )
-        ):
-            category = "money"
-            score = 58.0
-            reason = "money cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "victory",
-                "cheer",
-                "crowd",
-                "yeah",
-            )
-        ):
-            category = "celebration"
-            score = 56.0
-            reason = "celebration cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "achievement",
-                "success",
-                "unlock",
-                "reward",
-                "bell",
-                "chime",
-            )
-        ):
-            category = "bell"
-            score = 54.0
-            reason = "positive chime cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "wow",
-                "reaction",
-                "shock",
-                "surprise",
-                "funny",
-                "crazy",
-            )
-        ):
-            category = "reaction"
-            score = 54.0
-            reason = "reaction cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "sparkle",
-                "heart",
-                "magic",
-            )
-        ):
-            category = "sparkle"
-            score = 50.0
-            reason = "positive cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "glitch",
-                "rgb",
-                "digital",
-                "overdrive",
-            )
-        ):
-            category = "glitch"
-            score = 56.0
-            reason = "glitch cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "doom",
-                "dark",
-                "negative",
-                "ominous",
-            )
-        ):
-            category = "doom"
-            score = 54.0
-            reason = "negative cutaway"
-        elif any(
-            token in blob
-            for token in (
-                "motion",
-                "transition",
-                "whip",
-                "wipe",
-                "entrance",
-            )
-        ):
-            category = "whoosh"
-            score = 48.0
-            reason = "AI visual transition"
-        else:
-            category = "ding"
-            score = 46.0
-            reason = "AI visual accent"
     elif kind == "emoji":
         if any(
             token in blob

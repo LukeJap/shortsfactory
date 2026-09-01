@@ -17,12 +17,54 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from .constants import ROOT, SUPPORTED_EXTENSIONS
 from .helpers import format_time
+
+
+class AspectRatioContainer(QWidget):
+    """Center one child inside a stable aspect-ratio presentation area."""
+
+    def __init__(self, width_units: int, height_units: int, parent=None):
+        super().__init__(parent)
+        self._width_units = max(1, int(width_units))
+        self._height_units = max(1, int(height_units))
+        self._content: QWidget | None = None
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_content(self, widget: QWidget):
+        self._content = widget
+        widget.setParent(self)
+        widget.show()
+        self._position_content()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_content()
+
+    def _position_content(self):
+        if self._content is None:
+            return
+        available_width = max(1, self.width())
+        available_height = max(1, self.height())
+        target_width = min(
+            available_width,
+            int(available_height * self._width_units / self._height_units),
+        )
+        target_height = int(target_width * self._height_units / self._width_units)
+        if target_height > available_height:
+            target_height = available_height
+            target_width = int(target_height * self._width_units / self._height_units)
+        self._content.setGeometry(
+            max(0, (available_width - target_width) // 2),
+            max(0, (available_height - target_height) // 2),
+            max(1, target_width),
+            max(1, target_height),
+        )
 
 
 class TimelineNavigator(QWidget):

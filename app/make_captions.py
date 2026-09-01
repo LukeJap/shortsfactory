@@ -69,14 +69,14 @@ except ImportError:
     )
 
 try:
-    from .apply_ai_visuals import (
+    from .timeline_mapping import (
         keep_segments,
         load_json,
         map_source_interval_to_tight,
         map_tight_interval_to_final,
     )
 except ImportError:
-    from apply_ai_visuals import (
+    from timeline_mapping import (
         keep_segments,
         load_json,
         map_source_interval_to_tight,

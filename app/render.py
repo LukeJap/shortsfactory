@@ -605,7 +605,7 @@ def get_clip_timestamps() -> tuple[str, str]:
 #
 # render_base_video() below letterboxes the source into the 1080x1920
 # canvas at its native aspect ratio rather than cropping to fill. Every
-# later pipeline stage (smart motion zoom/pan, AI visual overlays) operates
+# later pipeline stage (smart motion zoom/pan and semantic visual effects) operates
 # on that already-letterboxed video, so they need to know where the real
 # (non-black-bar) content actually sits within the canvas -- these two
 # helpers compute that and render_base_video() persists it to
@@ -765,7 +765,7 @@ def render_base_video(
     # cost of losing the source's left/right (or top/bottom) edges. No
     # letterboxing, so there's no separate "content rect" to track: the
     # video content always fills the whole canvas, and every downstream
-    # effect (smart motion zoom, semantic FX, AI visual overlays)
+    # effect (smart motion zoom and semantic FX)
     # already treats a full-canvas content rect as its default, so this
     # needs no further changes there.
     settings = load_render_settings()

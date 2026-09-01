@@ -1,9 +1,9 @@
 """
-EditorAssetsMixin: SFX/AI-visual "editor asset" clip management on the
+EditorAssetsMixin: SFX/emoji/recap "editor asset" clip management on the
 timeline -- browsing the local SFX library (SFX_DIR), invoking
 sfx_engine.py to (re)plan automatic SFX placement, and the shared
 editor_asset_plan.json read/write context (ensure_current_editor_asset_
-context()) that also backs the AI visual slots system.
+context()) used by the supported editable asset types.
 """
 
 from __future__ import annotations
@@ -161,26 +161,6 @@ class EditorAssetsMixin:
         if not self.editor_asset_context_matches_current_selection():
             return []
 
-        # editor_asset_plan.json survives between app sessions. A previous
-        # session can therefore contain AI_VISUAL clips whose source/range
-        # happens to match a newly selected Find Best Clips candidate. Those
-        # stale clips must not reappear before the current session has actually
-        # planned visuals. Keep the persisted data untouched, but only expose
-        # AI_VISUAL clips represented by the current in-memory visual plan.
-        current_visual_clip_ids = {
-            self.visual_clip_id(
-                slot,
-                index,
-            )
-            for index, slot in enumerate(
-                self.visual_plan_slots
-            )
-            if isinstance(
-                slot,
-                dict,
-            )
-        }
-
         clips = []
         for clip in self.editor_asset_plan.get(
             "clips",
@@ -208,24 +188,12 @@ class EditorAssetsMixin:
             ).upper()
             if kind not in {
                 "SFX",
-                "AI_VISUAL",
                 "EMOJI",
                 "VOICEOVER",
                 RECAP_VISUAL_FX_CLIP_KIND,
                 RECAP_MOTION_CLIP_KIND,
             }:
                 continue
-
-            if kind == "AI_VISUAL":
-                clip_id = str(
-                    clip.get(
-                        "id",
-                        "",
-                    )
-                    or ""
-                )
-                if clip_id not in current_visual_clip_ids:
-                    continue
 
             clips.append(
                 clip
@@ -247,35 +215,12 @@ class EditorAssetsMixin:
                 self.selected_sfx_clip_id
                 or self.selected_emoji_clip_id
             )
-            if (
-                self.selected_visual_slot_index is not None
-                and 0
-                <= self.selected_visual_slot_index
-                < len(
-                    self.visual_plan_slots
-                )
-            ):
-                slot = self.visual_plan_slots[
-                    self.selected_visual_slot_index
-                ]
-                if isinstance(
-                    slot,
-                    dict,
-                ):
-                    selected_asset_id = self.visual_clip_id(
-                        slot,
-                        self.selected_visual_slot_index,
-                    )
-
             self.timeline.set_selected_asset_clip(
                 selected_asset_id
             )
         self.update_sfx_inspector()
         self.update_emoji_inspector()
-        if hasattr(self, "ai_visual_preview_overlay"):
-            self.update_ai_visual_preview_overlay(
-                self.player.position()
-            )
+        if hasattr(self, "video_widget"):
             self.update_emoji_preview_overlay(
                 self.player.position()
             )
@@ -365,84 +310,8 @@ class EditorAssetsMixin:
             or ""
         )
 
-        if normalized_kind == "AI_VISUAL":
-            self.selected_sfx_clip_id = None
-            self.selected_emoji_clip_id = None
-
-            for index, slot in enumerate(
-                self.visual_plan_slots
-            ):
-                if not isinstance(
-                    slot,
-                    dict,
-                ):
-                    continue
-                if self.visual_clip_id(
-                    slot,
-                    index,
-                ) != normalized_id:
-                    continue
-
-                self.selected_visual_slot_index = index
-                self.timeline.set_selected_asset_clip(
-                    normalized_id
-                )
-
-                try:
-                    start_ms = int(
-                        round(
-                            float(
-                                slot.get(
-                                    "start",
-                                    0.0,
-                                )
-                                or 0.0
-                            )
-                            * 1000
-                        )
-                    )
-                    end_ms = int(
-                        round(
-                            float(
-                                slot.get(
-                                    "end",
-                                    slot.get(
-                                        "start",
-                                        0.0,
-                                    ),
-                                )
-                            )
-                            * 1000
-                        )
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                ):
-                    start_ms = self.player.position()
-                    end_ms = start_ms
-
-                self.player.setPosition(
-                    start_ms
-                )
-                self.timeline.setValue(
-                    start_ms
-                )
-                self.reveal_timeline_range(
-                    start_ms,
-                    end_ms,
-                )
-                self.refresh_visual_plan_display()
-                self.load_selected_visual_into_inspector()
-                self.refresh_editor_asset_timeline()
-                return
-
-            return
-
         if normalized_kind == "EMOJI":
-            self.selected_visual_slot_index = None
             self.selected_sfx_clip_id = None
-            self.refresh_visual_plan_display()
 
             self.selected_emoji_clip_id = str(
                 clip_id
@@ -490,7 +359,6 @@ class EditorAssetsMixin:
             return
 
         if normalized_kind in {RECAP_VISUAL_FX_CLIP_KIND, RECAP_MOTION_CLIP_KIND}:
-            self.selected_visual_slot_index = None
             self.selected_sfx_clip_id = None
             self.selected_emoji_clip_id = None
             self.timeline.set_selected_asset_clip(normalized_id)
@@ -506,9 +374,7 @@ class EditorAssetsMixin:
         if normalized_kind != "SFX":
             return
 
-        self.selected_visual_slot_index = None
         self.selected_emoji_clip_id = None
-        self.refresh_visual_plan_display()
 
         self.selected_sfx_clip_id = str(
             clip_id
@@ -575,111 +441,6 @@ class EditorAssetsMixin:
             or ""
         ).upper()
 
-        if normalized_kind == "AI_VISUAL":
-            clip["kind"] = "AI_VISUAL"
-
-            try:
-                start = float(
-                    clip.get(
-                        "start",
-                        0.0,
-                    )
-                    or 0.0
-                )
-                end = float(
-                    clip.get(
-                        "end",
-                        start,
-                    )
-                    or start
-                )
-            except (
-                TypeError,
-                ValueError,
-            ):
-                start = 0.0
-                end = 0.2
-
-            end = max(
-                start + 0.2,
-                end,
-            )
-            clip["start"] = round(
-                start,
-                3,
-            )
-            clip["end"] = round(
-                end,
-                3,
-            )
-            clip["duration"] = round(
-                end - start,
-                3,
-            )
-            clip["manual_override"] = True
-            clip["locked"] = True
-            clip["origin"] = (
-                clip.get(
-                    "origin",
-                    "manual",
-                )
-                or "manual"
-            )
-
-            self.editor_asset_plan = upsert_clip(
-                self.editor_asset_plan,
-                clip,
-            )
-            self.save_editor_asset_plan_state()
-
-            clip_id = str(
-                clip.get(
-                    "id",
-                    "",
-                )
-                or ""
-            )
-            self.selected_sfx_clip_id = None
-            self.selected_emoji_clip_id = None
-
-            for index, slot in enumerate(
-                self.visual_plan_slots
-            ):
-                if not isinstance(
-                    slot,
-                    dict,
-                ):
-                    continue
-                if self.visual_clip_id(
-                    slot,
-                    index,
-                ) != clip_id:
-                    continue
-
-                slot["start"] = clip["start"]
-                slot["end"] = clip["end"]
-                slot["duration"] = clip["duration"]
-                slot["enabled"] = bool(
-                    clip.get(
-                        "active",
-                        slot.get(
-                            "enabled",
-                            True,
-                        ),
-                    )
-                )
-                slot["user_modified"] = True
-                self.user_visual_edits = True
-                self.selected_visual_slot_index = index
-
-                self.save_ai_visual_plan()
-                self.refresh_visual_plan_display()
-                self.load_selected_visual_into_inspector()
-                self.refresh_editor_asset_timeline()
-                return
-
-            return
-
         if normalized_kind == "EMOJI":
             clip["kind"] = "EMOJI"
             clip["manual_override"] = True
@@ -697,7 +458,7 @@ class EditorAssetsMixin:
                 or ""
             )
             self.update_emoji_inspector()
-            if hasattr(self, "ai_visual_preview_overlay"):
+            if hasattr(self, "video_widget"):
                 self.update_emoji_preview_overlay(
                     self.player.position()
                 )
@@ -746,15 +507,7 @@ class EditorAssetsMixin:
             or ""
         ).upper()
 
-        if normalized_kind == "AI_VISUAL":
-            self.editor_asset_clip_selected(
-                kind,
-                clip_id,
-            )
-            return
-
         if normalized_kind == "EMOJI":
-            self.selected_visual_slot_index = None
             self.selected_sfx_clip_id = None
             self.selected_emoji_clip_id = str(
                 clip_id

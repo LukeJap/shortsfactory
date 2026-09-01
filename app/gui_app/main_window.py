@@ -3,10 +3,9 @@ ShortsFactoryWindow, the QMainWindow that composes the entire desktop
 app, and its main() launcher. Owns window/UI construction (build_ui() and
 friends: the three-column layout described in SHORTSFACTORY.md's Project
 Context), QSettings load/save, QProcess setup for every subprocess the
-GUI can launch (render, transcript preload, AI visual planning, emoji
-preview planning), keyboard shortcuts, and the single app-wide
-eventFilter() that all the placement-editor drag interactions (AI
-visual/emoji/caption preview) route through. Everything else lives in
+GUI can launch (render, transcript preload, emoji preview planning),
+keyboard shortcuts, and the single app-wide eventFilter() that the
+emoji/caption placement-editor drag interactions route through. Everything else lives in
 mixins/ -- see each mixin file's own docstring for what it owns; this
 class's own body is mostly __init__ and layout construction, with method
 bodies for each functional area coming from whichever mixin implements
@@ -19,7 +18,6 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent, QPoint, QProcess, QProcessEnvironment, QSettings, QTimer
-from PySide6.QtGui import QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -71,7 +69,7 @@ from .settings_keys import (
 )
 from .style import STYLESHEET
 from .timeline_widget import SuggestionSlider
-from .widgets import DropZone, TimelineNavigator
+from .widgets import AspectRatioContainer, DropZone, TimelineNavigator
 
 from recap_media.orpheus_provider import DEFAULT_VOICE as DEFAULT_ORPHEUS_VOICE
 from recap_media.render import (
@@ -81,36 +79,26 @@ from recap_media.render import (
 )
 
 from .mixins.ai_clip_hunter import AIClipHunterMixin
-from .mixins.ai_visual_pipeline import AIVisualPipelineMixin
-from .mixins.ai_visual_preview import AIVisualPreviewMixin
-from .mixins.ai_visual_slots import AIVisualSlotsMixin
 from .mixins.caption_preview import CaptionPreviewMixin
 from .mixins.editor_assets import EditorAssetsMixin
 from .mixins.emoji_preview import EmojiPreviewMixin
-from .mixins.image_ai import ImageAIMixin
 from .mixins.music import MusicMixin
 from .mixins.playback import PlaybackMixin
 from .mixins.recap import RecapMixin
 from .mixins.render_pipeline import RenderPipelineMixin
 from .mixins.settings import SettingsMixin
 from .mixins.transcript import TranscriptMixin
-from .mixins.web_images import WebImagesMixin
 
 
 class ShortsFactoryWindow(
     QMainWindow,
     PlaybackMixin,
     TranscriptMixin,
-    ImageAIMixin,
     SettingsMixin,
-    AIVisualSlotsMixin,
-    WebImagesMixin,
-    AIVisualPipelineMixin,
     AIClipHunterMixin,
     MusicMixin,
     RenderPipelineMixin,
     EditorAssetsMixin,
-    AIVisualPreviewMixin,
     EmojiPreviewMixin,
     CaptionPreviewMixin,
     RecapMixin,
@@ -213,28 +201,6 @@ class ShortsFactoryWindow(
         self.transcript_preload_output = ""
         self.pending_find_best_after_preload = False
 
-        self.visual_process = QProcess(self)
-
-        self.visual_process.setWorkingDirectory(
-            str(ROOT)
-        )
-
-        self.visual_process.setProcessEnvironment(
-            process_env
-        )
-
-        self.visual_process.readyReadStandardOutput.connect(
-            self.read_visual_output
-        )
-
-        self.visual_process.readyReadStandardError.connect(
-            self.read_visual_error
-        )
-
-        self.visual_process.finished.connect(
-            self.visual_plan_finished
-        )
-
         self.emoji_preview_process = QProcess(self)
 
         self.emoji_preview_process.setWorkingDirectory(
@@ -265,111 +231,10 @@ class ShortsFactoryWindow(
         self.caption_preview_drag_start_x = 0.0
         self.caption_preview_drag_start_y = 0.0
 
-        self.visual_plan_slots: list[dict] = []
-        self.visual_deleted_slots: list[dict] = []
-        self.pending_visual_replan_mode = "replace"
-        self.pending_visual_preserved_slots: list[dict] = []
-        self.pending_visual_preserved_deleted_slots: list[dict] = []
-        self.pending_visual_selected_slot_id: str | None = None
         self.editor_asset_plan: dict = load_editor_asset_plan()
         self.selected_sfx_clip_id: str | None = None
         self.selected_emoji_clip_id: str | None = None
         self.sfx_preview_triggered: set[str] = set()
-        self.active_visual_preview_clip_id: str | None = None
-        self.active_visual_preview_signature: tuple | None = None
-        self.active_visual_preview_layout_signature: tuple | None = None
-        self.active_visual_preview_pixmap = QPixmap()
-        self.visual_preview_dragging = False
-        self.visual_preview_drag_origin = QPoint()
-        self.visual_preview_drag_start_geometry = None
-        self.visual_preview_drag_start_x = 0.0
-        self.visual_preview_drag_start_y = 0.0
-
-        self.visual_asset_process = QProcess(self)
-
-        self.visual_asset_process.setWorkingDirectory(
-            str(ROOT)
-        )
-
-        self.visual_asset_process.setProcessEnvironment(
-            process_env
-        )
-
-        self.visual_asset_process.readyReadStandardOutput.connect(
-            self.read_visual_asset_output
-        )
-
-        self.visual_asset_process.readyReadStandardError.connect(
-            self.read_visual_asset_error
-        )
-
-        self.visual_asset_process.finished.connect(
-            self.visual_asset_finished
-        )
-
-        # Openly licensed web-image search/download runs out-of-process so
-        # network activity never freezes the editor. The selected image is
-        # imported back into the same persistent visual entity.
-        self.web_image_process = QProcess(self)
-        self.web_image_process.setWorkingDirectory(
-            str(ROOT)
-        )
-        self.web_image_process.setProcessEnvironment(
-            process_env
-        )
-        self.web_image_process.readyReadStandardOutput.connect(
-            self.read_web_image_output
-        )
-        self.web_image_process.readyReadStandardError.connect(
-            self.read_web_image_error
-        )
-        self.web_image_process.finished.connect(
-            self.web_image_finished
-        )
-        self.web_image_operation = ""
-        self.web_image_target_slot_id = ""
-        self.web_image_output_buffer = ""
-        self.web_image_search_results: list[dict] = []
-        self.web_image_results_path = (
-            ROOT
-            / "output"
-            / "ai_visual_assets"
-            / "web"
-            / "search_results.json"
-        )
-        self.web_image_selection_path = (
-            ROOT
-            / "output"
-            / "ai_visual_assets"
-            / "web"
-            / "selected_result.json"
-        )
-
-        self.image_status_process = QProcess(self)
-
-        self.image_status_process.setWorkingDirectory(
-            str(ROOT)
-        )
-
-        self.image_status_process.setProcessEnvironment(
-            process_env
-        )
-
-        self.image_status_process.readyReadStandardOutput.connect(
-            self.read_image_status_output
-        )
-
-        self.image_status_process.readyReadStandardError.connect(
-            self.read_image_status_error
-        )
-
-        self.image_status_process.finished.connect(
-            self.image_status_finished
-        )
-
-        self.image_status_stdout = ""
-        self.image_status_stderr = ""
-        self.pending_image_model_change = ""
 
         # Pre-render subject-aware 9:16 framing stage.
         self.reframe_process = QProcess(self)
@@ -424,15 +289,10 @@ class ShortsFactoryWindow(
         # User-fixed transcript text, keyed by absolute source segment timing.
         self.transcript_corrections: dict[tuple[int, int], str] = {}
 
-        self.image_ai_state = "not_checked"
-        self.image_ai_models: list[dict] = []
         self.current_image_model_title = ""
         self.selected_image_model_title = ""
         self.updating_image_model_combo = False
         self.image_quality = "BALANCED"
-        self.visual_asset_output_buffer = ""
-        self.visual_asset_provider = "auto"
-        self.selected_visual_slot_index: int | None = None
         self.updating_visual_inspector = False
         self.user_visual_edits = False
         self.updating_timeline_controls = False
@@ -763,14 +623,9 @@ class ShortsFactoryWindow(
             0,
             self.restore_layout_settings,
         )
-        self.update_image_ai_indicator()
-        self.load_selected_visual_into_inspector()
         self.load_editor_asset_plan_state()
         self.global_progress_timer.start()
         self.update_global_progress()
-        # Do not probe or auto-launch Forge when ShortsFactory starts.
-        # Image AI remains available only when the user explicitly invokes
-        # an Image AI action later.
 
     def build_ui(self):
 
@@ -811,6 +666,13 @@ class ShortsFactoryWindow(
         header_layout.addLayout(title_stack, 1)
         header_layout.addWidget(mode_badge)
 
+        self.generate_button = QPushButton("Render Final Video")
+        self.generate_button.setObjectName("GenerateButton")
+        self.generate_button.setEnabled(False)
+        self.generate_button.setToolTip("Select a clip first.")
+        self.generate_button.clicked.connect(self.generate_short)
+        header_layout.addWidget(self.generate_button)
+
         main_layout.addWidget(header_frame)
 
         # ====================================================
@@ -821,6 +683,7 @@ class ShortsFactoryWindow(
         workspace.setObjectName("MainSplitter")
         workspace.setChildrenCollapsible(False)
         self.main_splitter = workspace
+        self.workspace_splitter = workspace
 
         # ----------------------------------------------------
         # LEFT RAIL / SOURCE PANEL
@@ -828,7 +691,9 @@ class ShortsFactoryWindow(
 
         source_frame = QFrame()
         source_frame.setObjectName("Panel")
-        source_frame.setMinimumWidth(260)
+        # The source rail needs a stable working width, but it should not
+        # absorb the space the editor needs on larger desktop displays.
+        source_frame.setMinimumWidth(320)
         source_frame.setMaximumWidth(440)
 
         source_layout = QVBoxLayout(source_frame)
@@ -919,7 +784,7 @@ class ShortsFactoryWindow(
         auto_cuts_subtext.setWordWrap(True)
         edit_style_layout.addWidget(auto_cuts_subtext)
 
-        edit_style_buttons = QHBoxLayout()
+        edit_style_buttons = QVBoxLayout()
         edit_style_buttons.setSpacing(6)
 
         self.edit_style_group = QButtonGroup(self)
@@ -955,7 +820,7 @@ class ShortsFactoryWindow(
             )
             self.edit_style_group.addButton(button)
             self.edit_style_buttons[energy] = button
-            edit_style_buttons.addWidget(button, 1)
+            edit_style_buttons.addWidget(button)
 
         edit_style_layout.addLayout(edit_style_buttons)
 
@@ -981,8 +846,11 @@ class ShortsFactoryWindow(
         filters_subtext.setWordWrap(True)
         edit_style_layout.addWidget(filters_subtext)
 
-        fx_intensity_row = QHBoxLayout()
+        fx_intensity_row = QVBoxLayout()
         fx_intensity_row.setSpacing(8)
+
+        fx_intensity_header = QHBoxLayout()
+        fx_intensity_header.setSpacing(8)
 
         self.fx_intensity_title = QLabel("FILTER INTENSITY")
         self.fx_intensity_title.setObjectName("TinyLabel")
@@ -1005,9 +873,11 @@ class ShortsFactoryWindow(
         self.fx_intensity_slider.valueChanged.connect(self.fx_intensity_changed)
         self.fx_intensity_slider.setEnabled(self.filters_enabled)
 
-        fx_intensity_row.addWidget(self.fx_intensity_title)
-        fx_intensity_row.addWidget(self.fx_intensity_slider, 1)
-        fx_intensity_row.addWidget(self.fx_intensity_label)
+        fx_intensity_header.addWidget(self.fx_intensity_title)
+        fx_intensity_header.addStretch()
+        fx_intensity_header.addWidget(self.fx_intensity_label)
+        fx_intensity_row.addLayout(fx_intensity_header)
+        fx_intensity_row.addWidget(self.fx_intensity_slider)
 
         edit_style_layout.addLayout(fx_intensity_row)
 
@@ -1070,7 +940,7 @@ class ShortsFactoryWindow(
         self.recap_episode_label.setWordWrap(True)
         recap_layout.addWidget(self.recap_episode_label)
 
-        recap_script_source_row = QHBoxLayout()
+        recap_script_source_row = QVBoxLayout()
         recap_script_source_row.setSpacing(6)
         recap_script_source_label = QLabel("SCRIPT SOURCE")
         recap_script_source_label.setObjectName("TinyLabel")
@@ -1086,10 +956,10 @@ class ShortsFactoryWindow(
             self.recap_script_source_changed
         )
         recap_script_source_row.addWidget(recap_script_source_label)
-        recap_script_source_row.addWidget(self.recap_script_source_combo, 1)
+        recap_script_source_row.addWidget(self.recap_script_source_combo)
         recap_layout.addLayout(recap_script_source_row)
 
-        recap_import_row = QHBoxLayout()
+        recap_import_row = QVBoxLayout()
         recap_import_row.setSpacing(6)
         self.recap_import_script_button = QPushButton("Import JSON")
         self.recap_import_script_button.setObjectName("QuietButton")
@@ -1097,16 +967,16 @@ class ShortsFactoryWindow(
         self.recap_paste_script_button = QPushButton("Paste JSON")
         self.recap_paste_script_button.setObjectName("QuietButton")
         self.recap_paste_script_button.clicked.connect(self.open_recap_paste_dialog)
-        recap_import_row.addWidget(self.recap_import_script_button, 1)
-        recap_import_row.addWidget(self.recap_paste_script_button, 1)
+        recap_import_row.addWidget(self.recap_import_script_button)
+        recap_import_row.addWidget(self.recap_paste_script_button)
         recap_layout.addLayout(recap_import_row)
 
         self.recap_status_label = QLabel("Recap Intelligence: not checked.")
-        self.recap_status_label.setObjectName("ImageAIStatus")
+        self.recap_status_label.setObjectName("RecapStatus")
         self.recap_status_label.setWordWrap(True)
         recap_layout.addWidget(self.recap_status_label)
 
-        recap_duration_row = QHBoxLayout()
+        recap_duration_row = QVBoxLayout()
         recap_duration_row.setSpacing(8)
         recap_duration_label = QLabel("TARGET DURATION (s)")
         recap_duration_label.setObjectName("TinyLabel")
@@ -1124,7 +994,6 @@ class ShortsFactoryWindow(
         )
         recap_duration_row.addWidget(recap_duration_label)
         recap_duration_row.addWidget(self.recap_duration_spinbox)
-        recap_duration_row.addStretch()
         recap_layout.addLayout(recap_duration_row)
 
         recap_voice_row = QHBoxLayout()
@@ -1212,7 +1081,7 @@ class ShortsFactoryWindow(
         )
         recap_layout.addWidget(self.recap_script_preview)
 
-        recap_actions_row = QHBoxLayout()
+        recap_actions_row = QVBoxLayout()
         recap_actions_row.setSpacing(6)
         self.validate_recap_script_button = QPushButton("Validate Script")
         self.validate_recap_script_button.setObjectName("QuietButton")
@@ -1240,18 +1109,18 @@ class ShortsFactoryWindow(
             self.generate_recap_voiceover
         )
 
-        recap_actions_row.addWidget(self.validate_recap_script_button, 1)
-        recap_actions_row.addWidget(self.generate_recap_sequence_button, 1)
+        recap_actions_row.addWidget(self.validate_recap_script_button)
+        recap_actions_row.addWidget(self.generate_recap_sequence_button)
         recap_layout.addLayout(recap_actions_row)
 
-        recap_followup_actions_row = QHBoxLayout()
+        recap_followup_actions_row = QVBoxLayout()
         recap_followup_actions_row.setSpacing(6)
         self.recap_open_editor_button = QPushButton("Open in Editor")
         self.recap_open_editor_button.setObjectName("QuietButton")
         self.recap_open_editor_button.setEnabled(False)
         self.recap_open_editor_button.clicked.connect(self.open_recap_in_editor)
-        recap_followup_actions_row.addWidget(self.generate_recap_voiceover_button, 1)
-        recap_followup_actions_row.addWidget(self.recap_open_editor_button, 1)
+        recap_followup_actions_row.addWidget(self.generate_recap_voiceover_button)
+        recap_followup_actions_row.addWidget(self.recap_open_editor_button)
         recap_layout.addLayout(recap_followup_actions_row)
 
         self.recap_voiceover_list = QListWidget()
@@ -1307,14 +1176,38 @@ class ShortsFactoryWindow(
         recap_context_volume_row.addWidget(self.recap_voiceover_volume_slider, 1)
         recap_context_volume_row.addWidget(self.recap_voiceover_toggle_button)
 
-        recap_context_actions_row = QHBoxLayout()
+        recap_context_actions_row = QVBoxLayout()
         recap_context_actions_row.setSpacing(6)
-        recap_context_actions_row.addWidget(self.recap_voiceover_regenerate_button, 1)
-        recap_context_actions_row.addWidget(self.recap_voiceover_delete_button, 1)
+        recap_context_actions_row.addWidget(self.recap_voiceover_regenerate_button)
+        recap_context_actions_row.addWidget(self.recap_voiceover_delete_button)
 
         recap_context_row.addLayout(recap_context_volume_row)
         recap_context_row.addLayout(recap_context_actions_row)
         recap_layout.addLayout(recap_context_row)
+
+        for control in (
+            self.recap_browse_source_button,
+            self.recap_script_source_combo,
+            self.recap_import_script_button,
+            self.recap_paste_script_button,
+            self.recap_duration_spinbox,
+            self.recap_voice_combo,
+            self.recap_speed_combo,
+            self.recap_narration_pitch_spinbox,
+            self.recap_source_pitch_spinbox,
+            self.validate_recap_script_button,
+            self.generate_recap_sequence_button,
+            self.generate_recap_voiceover_button,
+            self.recap_open_editor_button,
+            self.recap_voiceover_toggle_button,
+            self.recap_voiceover_regenerate_button,
+            self.recap_voiceover_delete_button,
+        ):
+            control.setMinimumWidth(0)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
 
         self.recap_log = QTextEdit()
         self.recap_log.setReadOnly(True)
@@ -1323,6 +1216,11 @@ class ShortsFactoryWindow(
         recap_layout.addWidget(self.recap_log)
 
         self.standard_short_controls_frame = QWidget()
+        self.standard_short_controls_frame.setMinimumWidth(0)
+        self.standard_short_controls_frame.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         standard_short_mode_layout = QVBoxLayout(self.standard_short_controls_frame)
         standard_short_mode_layout.setContentsMargins(0, 0, 0, 0)
         standard_short_mode_layout.setSpacing(12)
@@ -1330,12 +1228,34 @@ class ShortsFactoryWindow(
         standard_short_mode_layout.addWidget(edit_style_frame)
         standard_short_mode_layout.addStretch()
 
+        edit_style_frame.setMinimumWidth(0)
+        edit_style_frame.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        for control in (
+            self.find_clips_button,
+            self.auto_cuts_button,
+            *self.edit_style_buttons.values(),
+            self.filters_button,
+            self.fx_intensity_slider,
+        ):
+            control.setMinimumWidth(0)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
+
         self.standard_short_mode_frame = QScrollArea()
         self.standard_short_mode_frame.setObjectName("PanelScroll")
         self.standard_short_mode_frame.setWidgetResizable(True)
         self.standard_short_mode_frame.setFrameShape(QFrame.Shape.NoFrame)
         self.standard_short_mode_frame.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.standard_short_mode_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
         )
         self.standard_short_mode_frame.setWidget(self.standard_short_controls_frame)
 
@@ -1344,7 +1264,7 @@ class ShortsFactoryWindow(
         self.recap_scroll_area.setWidgetResizable(True)
         self.recap_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.recap_scroll_area.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self.recap_scroll_area.setWidget(self.recap_frame)
 
@@ -1370,12 +1290,17 @@ class ShortsFactoryWindow(
 
         center_widget = QWidget()
         center_widget.setObjectName("CenterColumn")
-        center_widget.setMinimumWidth(520)
+        # The portrait program monitor is height-limited. Keeping the
+        # surrounding column bounded prevents oversized black gutters and
+        # leaves usable horizontal room for the timeline/editor column.
+        center_widget.setMinimumWidth(380)
 
         center_scroll = QScrollArea()
         center_scroll.setObjectName("CenterScroll")
         center_scroll.setWidgetResizable(True)
         center_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        center_scroll.setMinimumWidth(380)
+        center_scroll.setMaximumWidth(700)
         center_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
@@ -1396,72 +1321,33 @@ class ShortsFactoryWindow(
         preview_frame.setObjectName("PreviewPanel")
 
         preview_layout = QVBoxLayout(preview_frame)
-        preview_layout.setContentsMargins(16, 16, 16, 14)
-        preview_layout.setSpacing(10)
+        preview_layout.setContentsMargins(12, 12, 12, 10)
+        preview_layout.setSpacing(6)
 
         preview_header = QHBoxLayout()
         preview_header.setSpacing(10)
 
-        preview_title = QLabel("PREVIEW MONITOR")
+        preview_title = QLabel("PROGRAM MONITOR")
         preview_title.setObjectName("SectionTitle")
 
-        preview_tag = QLabel("TRIM / SEEK / AUDITION")
+        preview_tag = QLabel("9:16 EDIT PREVIEW")
         preview_tag.setObjectName("MicroBadge")
 
         preview_header.addWidget(preview_title)
         preview_header.addStretch()
         preview_header.addWidget(preview_tag)
 
+        self.program_monitor_viewport = AspectRatioContainer(9, 16)
+        self.program_monitor_viewport.setObjectName("ProgramMonitorViewport")
+
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("VideoPreview")
-        self.video_widget.setMinimumSize(520, 260)
-        self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.program_monitor_viewport.set_content(self.video_widget)
 
         self.player.setVideoOutput(self.video_widget)
 
-        # Live AI visual preview. These labels sit above the source preview
-        # and mirror the active AI_VISUAL clip at the current source time.
-        self.ai_visual_preview_dim = QLabel(self.video_widget)
-        self.ai_visual_preview_dim.setObjectName("VisualPreviewDim")
-        self.ai_visual_preview_dim.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
-        )
-        self.ai_visual_preview_dim.hide()
-
-        self.ai_visual_preview_overlay = QLabel(self.video_widget)
-        self.ai_visual_preview_overlay.setObjectName("VisualPreviewOverlay")
-        self.ai_visual_preview_overlay.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-        self.ai_visual_preview_overlay.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            False,
-        )
-        self.ai_visual_preview_overlay.setMouseTracking(True)
-        self.ai_visual_preview_overlay.setCursor(
-            Qt.CursorShape.OpenHandCursor
-        )
-        self.ai_visual_preview_overlay.setToolTip(
-            "Drag the active image to reposition it in the Short."
-        )
-        self.ai_visual_preview_overlay.hide()
-
-        self.ai_visual_preview_full_frame_tag = QLabel(
-            "FULL FRAME",
-            self.video_widget,
-        )
-        self.ai_visual_preview_full_frame_tag.setObjectName(
-            "VisualPreviewFullFrameTag"
-        )
-        self.ai_visual_preview_full_frame_tag.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
-        )
-        self.ai_visual_preview_full_frame_tag.hide()
-
         playback = QHBoxLayout()
-        playback.setSpacing(10)
+        playback.setSpacing(8)
 
         self.play_button = QPushButton("PLAY")
         self.play_button.setObjectName("PlayButton")
@@ -1482,7 +1368,7 @@ class ShortsFactoryWindow(
         self.preview_volume_slider.setObjectName("PreviewVolumeSlider")
         self.preview_volume_slider.setRange(0, 100)
         self.preview_volume_slider.setValue(self.preview_volume)
-        self.preview_volume_slider.setFixedWidth(120)
+        self.preview_volume_slider.setFixedWidth(104)
         self.preview_volume_slider.setToolTip(
             "Editor preview volume only. This does not change rendered output volume."
         )
@@ -1504,14 +1390,6 @@ class ShortsFactoryWindow(
         playback.addWidget(self.preview_volume_slider)
         playback.addWidget(self.preview_volume_label)
 
-        self.generate_button = QPushButton("Generate Final Video")
-        self.generate_button.setObjectName("GenerateButton")
-        self.generate_button.setEnabled(False)
-        self.generate_button.setToolTip(
-            "Select a clip first."
-        )
-        self.generate_button.clicked.connect(self.generate_short)
-
         self.render_features_summary_label = QLabel(
             self.render_features_summary_text()
         )
@@ -1528,11 +1406,9 @@ class ShortsFactoryWindow(
         video_stack.setObjectName("VideoStack")
         video_stack_layout = QVBoxLayout(video_stack)
         video_stack_layout.setContentsMargins(0, 0, 0, 0)
-        video_stack_layout.setSpacing(10)
-        video_stack_layout.addWidget(self.video_widget, 1)
+        video_stack_layout.setSpacing(6)
+        video_stack_layout.addWidget(self.program_monitor_viewport, 1)
         video_stack_layout.addLayout(playback)
-        video_stack_layout.addWidget(self.generate_button)
-        video_stack_layout.addWidget(self.render_features_summary_label)
 
         self.timeline = SuggestionSlider(Qt.Orientation.Horizontal)
         self.timeline.setRange(0, 0)
@@ -1550,25 +1426,28 @@ class ShortsFactoryWindow(
 
         timeline_panel = QWidget()
         timeline_panel.setObjectName("TimelinePanel")
-        # Reserve enough parent geometry for the timeline widget, its toolbar,
-        # and the full-source navigator. If the panel itself is shorter than
-        # those children, Qt clips the bottom of the timeline even though the
-        # timeline still reports its larger height; the SFX lane then exists
-        # off-screen. The center column is scrollable, so protect the editor
-        # lanes here instead of clipping them.
-        timeline_panel.setMinimumHeight(350)
+        self.timeline_panel = timeline_panel
         timeline_panel_layout = QVBoxLayout(timeline_panel)
         timeline_panel_layout.setContentsMargins(0, 0, 0, 0)
         timeline_panel_layout.setSpacing(8)
 
-        timeline_tools = QHBoxLayout()
-        timeline_tools.setSpacing(8)
+        timeline_tools = QVBoxLayout()
+        timeline_tools.setSpacing(4)
+        timeline_header_row = QHBoxLayout()
+        timeline_header_row.setSpacing(8)
+        timeline_zoom_row = QHBoxLayout()
+        timeline_zoom_row.setSpacing(8)
 
         timeline_title = QLabel("EDITOR TIMELINE")
         timeline_title.setObjectName("SectionTitle")
 
         self.timeline_time_label = QLabel("00:00.000 / 00:00.000")
         self.timeline_time_label.setObjectName("TimeLabel")
+        self.timeline_time_label.setMinimumWidth(0)
+        self.timeline_time_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
 
         zoom_out_label = QLabel("-")
         zoom_out_label.setObjectName("MicroLabel")
@@ -1577,7 +1456,11 @@ class ShortsFactoryWindow(
         self.timeline_zoom_slider.setObjectName("TimelineZoom")
         self.timeline_zoom_slider.setRange(0, 100)
         self.timeline_zoom_slider.setValue(0)
-        self.timeline_zoom_slider.setFixedWidth(140)
+        self.timeline_zoom_slider.setMinimumWidth(84)
+        self.timeline_zoom_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self.timeline_zoom_slider.valueChanged.connect(
             self.timeline_zoom_slider_changed
         )
@@ -1595,15 +1478,16 @@ class ShortsFactoryWindow(
         self.fit_source_button.setToolTip("Fit the entire source on the timeline. Shortcut: Ctrl+0")
         self.fit_source_button.clicked.connect(self.fit_timeline_source)
 
-        timeline_tools.addWidget(timeline_title)
-        timeline_tools.addSpacing(8)
-        timeline_tools.addWidget(self.timeline_time_label)
-        timeline_tools.addStretch()
-        timeline_tools.addWidget(zoom_out_label)
-        timeline_tools.addWidget(self.timeline_zoom_slider)
-        timeline_tools.addWidget(zoom_in_label)
-        timeline_tools.addWidget(self.fit_selection_button)
-        timeline_tools.addWidget(self.fit_source_button)
+        timeline_header_row.addWidget(timeline_title)
+        timeline_header_row.addStretch()
+        timeline_header_row.addWidget(self.timeline_time_label)
+        timeline_header_row.addWidget(self.fit_selection_button)
+        timeline_header_row.addWidget(self.fit_source_button)
+        timeline_zoom_row.addWidget(zoom_out_label)
+        timeline_zoom_row.addWidget(self.timeline_zoom_slider, 1)
+        timeline_zoom_row.addWidget(zoom_in_label)
+        timeline_tools.addLayout(timeline_header_row)
+        timeline_tools.addLayout(timeline_zoom_row)
 
         self.timeline_navigator = TimelineNavigator()
         self.timeline_navigator.setObjectName("TimelineNavigator")
@@ -1613,7 +1497,6 @@ class ShortsFactoryWindow(
 
         timeline_panel_layout.addLayout(timeline_tools)
         timeline_panel_layout.addWidget(self.timeline, 1)
-        timeline_panel_layout.addWidget(self.timeline_navigator)
 
         self.suggestions_label = QLabel("AI clips appear as purple ranges on V1. Click a range to load that pick, then drag IN / OUT handles to tune the cut.")
         self.suggestions_label.setObjectName("SuggestionLabel")
@@ -1625,53 +1508,81 @@ class ShortsFactoryWindow(
 
         selection_frame = QFrame()
         selection_frame.setObjectName("SubPanel")
-        selection_layout = QHBoxLayout(selection_frame)
-        selection_layout.setContentsMargins(12, 10, 12, 10)
-        selection_layout.setSpacing(10)
+        selection_layout = QVBoxLayout(selection_frame)
+        selection_layout.setContentsMargins(8, 5, 8, 5)
+        selection_layout.setSpacing(4)
+
+        selection_controls = QHBoxLayout()
+        selection_controls.setSpacing(8)
 
         self.start_button = QPushButton("Set Start")
         self.end_button = QPushButton("Set End")
+        self.start_button.setObjectName("TinyButton")
+        self.end_button.setObjectName("TinyButton")
         self.start_button.clicked.connect(self.set_start)
         self.end_button.clicked.connect(self.set_end)
 
         self.selection_label = QLabel("Selection: 00:00 → 00:00")
         self.selection_label.setObjectName("SelectionLabel")
+        self.selection_label.setWordWrap(True)
+        self.selection_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
 
-        selection_layout.addWidget(self.start_button)
-        selection_layout.addWidget(self.end_button)
-        selection_layout.addSpacing(8)
-        selection_layout.addWidget(self.selection_label, 1)
+        self.render_features_summary_label.setWordWrap(True)
+        self.render_features_summary_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.render_features_summary_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft
+            | Qt.AlignmentFlag.AlignVCenter
+        )
 
-        self.preview_timeline_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.preview_timeline_splitter.setObjectName("PreviewTimelineSplitter")
-        self.preview_timeline_splitter.setChildrenCollapsible(False)
-        self.preview_timeline_splitter.addWidget(video_stack)
-        self.preview_timeline_splitter.addWidget(timeline_panel)
-        self.preview_timeline_splitter.setStretchFactor(0, 1)
-        self.preview_timeline_splitter.setStretchFactor(1, 0)
-        # Give the protected timeline panel real space inside the splitter.
-        # Extra height scrolls in CenterScroll instead of cutting off SFX.
-        self.preview_timeline_splitter.setMinimumHeight(690)
-        self.preview_timeline_splitter.setSizes([330, 360])
+        selection_controls.addWidget(self.start_button)
+        selection_controls.addWidget(self.end_button)
+        selection_controls.addWidget(self.selection_label, 1)
+        selection_layout.addLayout(selection_controls)
+        selection_layout.addWidget(self.render_features_summary_label)
 
         preview_layout.addLayout(preview_header)
-        preview_layout.addWidget(self.preview_timeline_splitter, 1)
+        preview_layout.addWidget(video_stack, 1)
         preview_layout.addWidget(self.suggestions_label)
-        preview_layout.addWidget(selection_frame)
 
-        self.timeline_legend = QLabel(
-            "TIMELINE  //  CYAN SOURCE   RED CUT   AMBER EDITED   GOLD CAPTION   VIOLET MOTION   MAGENTA FX   GREEN VISUAL/GRAPHIC"
-        )
-        self.timeline_legend.setObjectName("MicroLabel")
-        self.timeline_legend.setToolTip(
-            "Red = transcript cut, amber = corrected transcript text, "
-            "bright cyan = real camera cut, violet = automatic motion, "
-            "magenta = filter/FX hit, green = planned graphic or AI visual."
-        )
+        timeline_footer = QFrame()
+        timeline_footer.setObjectName("TimelineFooter")
+        self.timeline_footer = timeline_footer
+        timeline_footer_layout = QVBoxLayout(timeline_footer)
+        timeline_footer_layout.setContentsMargins(8, 6, 8, 6)
+        timeline_footer_layout.setSpacing(6)
 
-        preview_layout.addWidget(
-            self.timeline_legend
+        # Keep navigator, legend, and selection feedback in distinct rows so
+        # each remains readable as the editor column changes width.
+        timeline_footer_layout.addWidget(self.timeline_navigator)
+
+        timeline_footer_layout.addWidget(selection_frame)
+        timeline_panel_layout.addWidget(timeline_footer)
+
+        # The timeline panel needs room for its five fixed lanes plus the
+        # editor controls around them. Derive that floor from the timeline's
+        # shared lane geometry instead of letting a parent splitter compress
+        # the lower lanes at compact desktop heights.
+        timeline_panel_minimum_height = (
+            self.timeline.required_lane_stack_height()
+            + timeline_tools.minimumSize().height()
+            + max(
+                timeline_footer.minimumSizeHint().height(),
+                timeline_footer.sizeHint().height(),
+            )
+            + (timeline_panel_layout.spacing() * 2)
         )
+        timeline_panel.setMinimumHeight(timeline_panel_minimum_height)
+        timeline_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        self.timeline_panel_minimum_height = timeline_panel_minimum_height
 
         center_editor_layout.addWidget(preview_frame, 1)
 
@@ -1681,11 +1592,16 @@ class ShortsFactoryWindow(
         audio_layout.setContentsMargins(16, 14, 16, 14)
         audio_layout.setSpacing(8)
 
-        audio_top_row = QHBoxLayout()
-        audio_top_row.setSpacing(10)
-
-        audio_bottom_row = QHBoxLayout()
-        audio_bottom_row.setSpacing(10)
+        audio_header_row = QHBoxLayout()
+        audio_header_row.setSpacing(8)
+        audio_sfx_mode_row = QHBoxLayout()
+        audio_sfx_mode_row.setSpacing(8)
+        audio_sfx_actions_row = QVBoxLayout()
+        audio_sfx_actions_row.setSpacing(8)
+        audio_music_actions_row = QVBoxLayout()
+        audio_music_actions_row.setSpacing(8)
+        audio_music_volume_row = QHBoxLayout()
+        audio_music_volume_row.setSpacing(8)
 
         audio_title = QLabel("AUDIO")
         audio_title.setObjectName("SectionTitle")
@@ -1734,6 +1650,7 @@ class ShortsFactoryWindow(
 
         self.music_label = QLabel("No background music")
         self.music_label.setObjectName("MusicLabel")
+        self.music_label.setWordWrap(True)
 
         self.music_volume_label = QLabel("18%")
         self.music_volume_label.setObjectName("MusicVolumeLabel")
@@ -1742,7 +1659,10 @@ class ShortsFactoryWindow(
         self.music_volume_slider.setObjectName("MusicVolumeSlider")
         self.music_volume_slider.setRange(0, 50)
         self.music_volume_slider.setValue(self.music_volume)
-        self.music_volume_slider.setFixedWidth(130)
+        self.music_volume_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         self.music_volume_slider.valueChanged.connect(self.music_volume_changed)
 
         self.clear_music_button = QPushButton("Remove")
@@ -1851,32 +1771,37 @@ class ShortsFactoryWindow(
         emoji_context_layout.addWidget(self.disable_emoji_button)
         emoji_context_layout.addWidget(self.delete_emoji_button)
 
-        audio_top_row.addWidget(audio_title)
-        audio_top_row.addSpacing(12)
-        audio_top_row.addWidget(sfx_mode_label)
-        audio_top_row.addWidget(self.sfx_mode_combo)
-        audio_top_row.addWidget(self.generate_sfx_button)
-        audio_top_row.addWidget(self.open_sfx_folder_button)
-        audio_top_row.addStretch()
+        audio_header_row.addWidget(audio_title)
+        audio_header_row.addStretch()
+        audio_sfx_mode_row.addWidget(sfx_mode_label)
+        audio_sfx_mode_row.addWidget(self.sfx_mode_combo, 1)
+        audio_sfx_actions_row.addWidget(self.generate_sfx_button)
+        audio_sfx_actions_row.addWidget(self.open_sfx_folder_button)
+        audio_music_actions_row.addWidget(self.music_button)
+        audio_music_actions_row.addWidget(self.clear_music_button)
+        audio_music_volume_row.addWidget(QLabel("Music"))
+        audio_music_volume_row.addWidget(self.music_volume_slider, 1)
+        audio_music_volume_row.addWidget(self.music_volume_label)
 
-        audio_bottom_row.addWidget(self.music_button)
-        audio_bottom_row.addWidget(self.music_label, 1)
-        audio_bottom_row.addWidget(QLabel("Music"))
-        audio_bottom_row.addWidget(self.music_volume_slider)
-        audio_bottom_row.addWidget(self.music_volume_label)
-        audio_bottom_row.addWidget(self.clear_music_button)
-        audio_bottom_row.addSpacing(10)
-        audio_bottom_row.addWidget(self.narrator_button)
+        self.narrator_button.setMinimumWidth(0)
+        self.narrator_button.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
 
-        audio_layout.addLayout(audio_top_row)
-        audio_layout.addLayout(audio_bottom_row)
+        audio_layout.addLayout(audio_header_row)
+        audio_layout.addLayout(audio_sfx_mode_row)
+        audio_layout.addLayout(audio_sfx_actions_row)
+        audio_layout.addLayout(audio_music_actions_row)
+        audio_layout.addWidget(self.music_label)
+        audio_layout.addLayout(audio_music_volume_row)
+        audio_layout.addWidget(self.narrator_button)
         audio_layout.addWidget(self.sfx_context_frame)
 
-        center_editor_layout.addWidget(audio_frame, 0)
-
         log_frame = QFrame()
-        log_frame.setObjectName("Panel")
-        log_frame.setMinimumHeight(190)
+        log_frame.setObjectName("RenderLogPanel")
+        self.render_log_frame = log_frame
+        log_frame.setMinimumHeight(180)
         log_layout = QVBoxLayout(log_frame)
         log_layout.setContentsMargins(16, 14, 16, 14)
         log_layout.setSpacing(8)
@@ -1884,13 +1809,14 @@ class ShortsFactoryWindow(
         log_header = QHBoxLayout()
         log_header.setSpacing(10)
 
-        log_title = QLabel("RENDER STATUS")
+        log_title = QLabel("RENDER LOG")
         log_title.setObjectName("SectionTitle")
 
         log_header.addWidget(log_title)
         log_header.addStretch()
 
         self.render_log = QTextEdit()
+        self.render_log.setObjectName("RenderLog")
         self.render_log.setReadOnly(True)
         self.render_log.setMinimumHeight(112)
         self.render_log.setSizePolicy(
@@ -1902,31 +1828,41 @@ class ShortsFactoryWindow(
         log_layout.addLayout(log_header)
         log_layout.addWidget(self.render_log, 1)
 
-        center_column.addWidget(
-            center_editor_stack,
-            1,
-        )
-        center_column.addWidget(log_frame, 0)
+        center_column.addWidget(center_editor_stack, 1)
 
         workspace.addWidget(center_scroll)
 
         # ----------------------------------------------------
-        # RIGHT RAIL / AI + TRANSCRIPT
+        # RIGHT EDITOR COLUMN
         # ----------------------------------------------------
 
-        right_column = QSplitter(Qt.Orientation.Vertical)
-        right_column.setObjectName("RightSplitter")
-        right_column.setChildrenCollapsible(False)
-        right_column.setMinimumWidth(360)
-        self.right_splitter = right_column
+        right_column = QWidget()
+        right_column.setObjectName("RightEditorContent")
+        # Compact desktops can still keep the source rail and portrait
+        # preview usable, while ordinary desktop widths give this editor
+        # column the larger share of the workspace.
+        # The scroll area's outer width is protected below. Its content is a
+        # fixed-height vertical stack, so compact desktops scroll instead of
+        # collapsing the timeline's lower lanes behind splitter handles.
+        right_column.setMinimumWidth(0)
+        right_column.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        right_column_layout = QVBoxLayout(right_column)
+        right_column_layout.setContentsMargins(0, 0, 0, 0)
+        right_column_layout.setSpacing(12)
+        right_column_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.right_editor_content = right_column
 
         ai_frame = QFrame()
         ai_frame.setObjectName("Panel")
+        self.ai_clip_hunter_frame = ai_frame
         ai_layout = QVBoxLayout(ai_frame)
-        ai_layout.setContentsMargins(16, 16, 16, 16)
+        ai_layout.setContentsMargins(12, 14, 12, 14)
         ai_layout.setSpacing(10)
 
-        ai_header = QHBoxLayout()
+        ai_header = QVBoxLayout()
         ai_title = QLabel("AI CLIP HUNTER")
         ai_title.setObjectName("SectionTitle")
 
@@ -1934,12 +1870,12 @@ class ShortsFactoryWindow(
         ai_hint.setObjectName("MicroBadge")
 
         ai_header.addWidget(ai_title)
-        ai_header.addStretch()
         ai_header.addWidget(ai_hint)
 
         self.clip_cards_layout = QGridLayout()
-        self.clip_cards_layout.setHorizontalSpacing(10)
+        self.clip_cards_layout.setHorizontalSpacing(0)
         self.clip_cards_layout.setVerticalSpacing(10)
+        self.clip_cards_layout.setColumnStretch(0, 1)
 
         self.clip_cards = []
         for index in range(6):
@@ -1947,169 +1883,51 @@ class ShortsFactoryWindow(
             card.setObjectName("ClipCard")
             card.setProperty("selected", False)
             card.setMinimumHeight(92)
+            card.setMinimumWidth(0)
+            card.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Minimum,
+            )
             card.setEnabled(False)
             card.setVisible(False)
             card.clicked.connect(lambda checked=False, card_index=index: (self.select_ai_card(card_index)))
             self.clip_cards.append(card)
-            row = index // 2
-            column = index % 2
-            self.clip_cards_layout.addWidget(card, row, column)
+            self.clip_cards_layout.addWidget(card, index, 0)
 
         ai_layout.addLayout(ai_header)
         ai_layout.addLayout(self.clip_cards_layout)
 
         visual_frame = QFrame()
         visual_frame.setObjectName("Panel")
+        self.visual_effects_frame = visual_frame
 
-        visual_layout = QVBoxLayout(
-            visual_frame
-        )
-
-        visual_layout.setContentsMargins(
-            16,
-            14,
-            16,
-            14,
-        )
-
-        visual_layout.setSpacing(
-            8
-        )
+        visual_layout = QVBoxLayout(visual_frame)
+        visual_layout.setContentsMargins(12, 14, 12, 14)
+        visual_layout.setSpacing(8)
 
         visual_header = QHBoxLayout()
-
-        visual_title = QLabel(
-            "AI VISUAL CUTAWAYS"
-        )
-        visual_title.setObjectName(
-            "SectionTitle"
-        )
-
-        visual_header.addWidget(
-            visual_title
-        )
+        visual_title = QLabel("VISUALS & REACTIONS")
+        visual_title.setObjectName("SectionTitle")
+        visual_header.addWidget(visual_title)
         visual_header.addStretch()
 
-        # Title's own row -- three action buttons get their own row each
-        # below (visual_action_row_top/middle/bottom) instead of sharing
-        # this header, which overflowed a narrow right column before any
-        # of them could shrink below their own minimum width. Even two
-        # per row overflowed at the right column's minimum width, so
-        # each gets a full row to itself.
-        visual_action_row_top = QHBoxLayout()
-        visual_action_row_top.setSpacing(8)
-        visual_action_row_middle = QHBoxLayout()
-        visual_action_row_middle.setSpacing(8)
-        visual_action_row_bottom = QHBoxLayout()
-        visual_action_row_bottom.setSpacing(8)
+        visual_hint = QLabel(
+            "Smart motion and visual FX render with emoji reactions."
+        )
+        visual_hint.setObjectName("HintLabel")
+        visual_hint.setWordWrap(True)
 
-        self.plan_visuals_button = QPushButton(
-            "✦ PLAN VISUALS"
-        )
-        self.plan_visuals_button.setObjectName(
-            "QuietButton"
-        )
-        self.plan_visuals_button.setToolTip(
-            "Add 0-2 new AI visual entities for the current selected clip. "
-            "Existing image entities stay until you delete them."
-        )
-        self.plan_visuals_button.setEnabled(
-            False
-        )
-        self.plan_visuals_button.clicked.connect(
-            self.plan_ai_visuals
-        )
-
-        visual_action_row_top.addWidget(
-            self.plan_visuals_button
-        )
-        visual_action_row_top.addStretch(1)
-
-        self.generate_visual_assets_button = QPushButton(
-            "⬡ GENERATE ASSETS"
-        )
-        self.generate_visual_assets_button.setObjectName(
-            "QuietButton"
-        )
-        self.generate_visual_assets_button.setToolTip(
-            "Generate local image assets for the planned green cutaway slots. "
-            "If no compatible image API is running, preview placeholders are created "
-            "so the compositing pipeline can still be tested."
-        )
-        self.generate_visual_assets_button.setEnabled(
-            False
-        )
-        self.generate_visual_assets_button.clicked.connect(
-            self.generate_visual_assets
-        )
-
-        visual_action_row_middle.addWidget(
-            self.generate_visual_assets_button
-        )
-        visual_action_row_middle.addStretch(1)
-
-        self.generate_emoji_button = QPushButton(
-            "😀 GENERATE EMOJI"
-        )
-        self.generate_emoji_button.setObjectName(
-            "QuietButton"
-        )
+        emoji_actions = QHBoxLayout()
+        emoji_actions.setSpacing(8)
+        self.generate_emoji_button = QPushButton("GENERATE EMOJI")
+        self.generate_emoji_button.setObjectName("QuietButton")
         self.generate_emoji_button.setToolTip(
-            "Lock in the current emoji reactions -- including any drags or "
-            "swaps you've made -- and pre-resolve their asset files, so the "
-            "final render reuses this exact plan instead of recomputing one."
+            "Resolve emoji reactions for the current selection so their "
+            "timing and placements are ready before rendering."
         )
-        self.generate_emoji_button.setEnabled(
-            False
-        )
-        self.generate_emoji_button.clicked.connect(
-            self.generate_emoji
-        )
-
-        visual_action_row_bottom.addWidget(
-            self.generate_emoji_button
-        )
-        visual_action_row_bottom.addStretch(1)
-
-        emoji_min_label = QLabel(
-            "MIN EMOJI"
-        )
-        emoji_min_label.setObjectName(
-            "TinyLabel"
-        )
-
-        self.min_emoji_events_spinbox = QSpinBox()
-        self.min_emoji_events_spinbox.setObjectName(
-            "CompactSpinBox"
-        )
-        self.min_emoji_events_spinbox.setRange(
-            0,
-            10,
-        )
-        self.min_emoji_events_spinbox.setValue(
-            self.min_emoji_events
-        )
-        self.min_emoji_events_spinbox.setToolTip(
-            "Minimum number of emoji reactions to generate, even if "
-            "fewer natural keyword matches were found. 0 = no forced "
-            "minimum (today's behavior). Applies both to Generate Emoji "
-            "and to a final render's own automatic emoji selection."
-        )
-        self.min_emoji_events_spinbox.valueChanged.connect(
-            self.min_emoji_events_changed
-        )
-
-        emoji_min_row = QHBoxLayout()
-        emoji_min_row.setSpacing(
-            8
-        )
-        emoji_min_row.addWidget(
-            emoji_min_label
-        )
-        emoji_min_row.addWidget(
-            self.min_emoji_events_spinbox
-        )
-        emoji_min_row.addStretch()
+        self.generate_emoji_button.setEnabled(False)
+        self.generate_emoji_button.clicked.connect(self.generate_emoji)
+        emoji_actions.addWidget(self.generate_emoji_button, 1)
 
         self.emoji_button = QPushButton(
             "EMOJI: ON" if self.emoji_enabled else "EMOJI: OFF"
@@ -2118,611 +1936,42 @@ class ShortsFactoryWindow(
         self.emoji_button.setCheckable(True)
         self.emoji_button.setChecked(self.emoji_enabled)
         self.emoji_button.setToolTip(
-            "Turns off all emoji reactions for this render. Planned emoji "
-            "stay saved and reappear exactly as placed if you turn this "
-            "back on."
+            "Turns emoji reactions on or off for the next render."
         )
         self.emoji_button.clicked.connect(self.emoji_toggled)
+        emoji_actions.addWidget(self.emoji_button)
 
-        emoji_subtext = QLabel(
-            "Turns off emoji reactions for this render only. Nothing "
-            "planned is lost -- Generate Emoji, dragging/retiming, and "
-            "swapping reactions all keep working while this is off."
+        emoji_min_row = QHBoxLayout()
+        emoji_min_row.setSpacing(8)
+        emoji_min_label = QLabel("MIN EMOJI")
+        emoji_min_label.setObjectName("TinyLabel")
+        self.min_emoji_events_spinbox = QSpinBox()
+        self.min_emoji_events_spinbox.setObjectName("CompactSpinBox")
+        self.min_emoji_events_spinbox.setRange(0, 10)
+        self.min_emoji_events_spinbox.setValue(self.min_emoji_events)
+        self.min_emoji_events_spinbox.setToolTip(
+            "Minimum number of emoji reactions for the current render."
         )
-        emoji_subtext.setObjectName("HintLabel")
-        emoji_subtext.setWordWrap(True)
+        self.min_emoji_events_spinbox.valueChanged.connect(
+            self.min_emoji_events_changed
+        )
+        emoji_min_row.addWidget(emoji_min_label)
+        emoji_min_row.addWidget(self.min_emoji_events_spinbox)
+        emoji_min_row.addStretch()
 
-        self.check_image_ai_button = QPushButton(
-            "CHECK IMAGE AI"
-        )
-        self.check_image_ai_button.setObjectName(
-            "QuietButton"
-        )
-        self.check_image_ai_button.setToolTip(
-            "Refresh the local image generator connection state."
-        )
-        self.check_image_ai_button.clicked.connect(
-            self.check_image_ai
-        )
-
-        self.image_ai_status_label = QLabel(
-            "● IMAGE AI NOT CHECKED"
-        )
-        self.image_ai_status_label.setObjectName(
-            "ImageAIStatus"
-        )
-        self.image_ai_status_label.setProperty(
-            "state",
-            "not_checked",
-        )
-
-        image_status_row = QHBoxLayout()
-        image_status_row.setSpacing(
-            8
-        )
-        image_status_row.addWidget(
-            self.image_ai_status_label,
-            1,
-        )
-        image_status_row.addWidget(
-            self.check_image_ai_button
-        )
-
-        self.image_model_combo = QComboBox()
-        self.image_model_combo.setObjectName(
-            "CompactCombo"
-        )
-        self.image_model_combo.setEnabled(
-            False
-        )
-        self.image_model_combo.addItem(
-            "No image model",
-            "",
-        )
-        self.image_model_combo.currentIndexChanged.connect(
-            self.image_model_changed
-        )
-
-        self.quality_combo = QComboBox()
-        self.quality_combo.setObjectName(
-            "CompactCombo"
-        )
-        self.quality_combo.addItems(
-            [
-                "FAST",
-                "BALANCED",
-                "HIGH",
-            ]
-        )
-        self.quality_combo.setCurrentText(
-            "BALANCED"
-        )
-        self.quality_combo.currentTextChanged.connect(
-            self.quality_changed
-        )
-
-        model_row = QGridLayout()
-        model_row.setHorizontalSpacing(
-            8
-        )
-        model_row.setVerticalSpacing(
-            6
-        )
-
-        image_model_label = QLabel(
-            "IMAGE MODEL"
-        )
-        image_model_label.setObjectName(
-            "MicroLabel"
-        )
-
-        quality_label = QLabel(
-            "QUALITY"
-        )
-        quality_label.setObjectName(
-            "MicroLabel"
-        )
-
-        model_row.addWidget(
-            image_model_label,
-            0,
-            0,
-        )
-        model_row.addWidget(
-            self.image_model_combo,
-            0,
-            1,
-        )
-        model_row.addWidget(
-            quality_label,
-            1,
-            0,
-        )
-        model_row.addWidget(
-            self.quality_combo,
-            1,
-            1,
-        )
-
-        self.visual_status_label = QLabel(
-            "Load a transcript, then plan visuals for the active selection."
-        )
-        self.visual_status_label.setObjectName(
-            "TranscriptStatus"
-        )
-
-        self.visual_slots_list = QListWidget()
-        self.visual_slots_list.setObjectName(
-            "TranscriptList"
-        )
-        self.visual_slots_list.setMinimumHeight(
-            190
-        )
-        self.visual_slots_list.itemClicked.connect(
-            self.visual_slot_clicked
-        )
-
-        self.visual_inspector = QFrame()
-        self.visual_inspector.setObjectName(
-            "SubPanel"
-        )
-        inspector_layout = QVBoxLayout(
-            self.visual_inspector
-        )
-        inspector_layout.setContentsMargins(
-            10,
-            10,
-            10,
-            10,
-        )
-        inspector_layout.setSpacing(
-            7
-        )
-
-        self.visual_inspector_title = QLabel(
-            "SELECT IMAGE ENTITY"
-        )
-        self.visual_inspector_title.setObjectName(
-            "SectionTitle"
-        )
-
-        inspector_grid = QGridLayout()
-        inspector_grid.setHorizontalSpacing(
-            8
-        )
-        inspector_grid.setVerticalSpacing(
-            6
-        )
-
-        self.visual_label_edit = QLineEdit()
-        self.visual_label_edit.setObjectName(
-            "CompactLineEdit"
-        )
-        self.visual_start_edit = QLineEdit()
-        self.visual_start_edit.setObjectName(
-            "CompactLineEdit"
-        )
-        self.visual_end_edit = QLineEdit()
-        self.visual_end_edit.setObjectName(
-            "CompactLineEdit"
-        )
-        self.visual_type_edit = QLineEdit()
-        self.visual_type_edit.setObjectName(
-            "CompactLineEdit"
-        )
-
-        # Image acquisition is separate from the visual entity itself.
-        # Every entity keeps its timing/transform/asset while this preference
-        # decides which backend should supply its next image.
-        self.visual_image_source_combo = QComboBox()
-        self.visual_image_source_combo.setObjectName(
-            "CompactCombo"
-        )
-        self.visual_image_source_combo.addItem(
-            "FORGE · LOCAL AI",
-            "FORGE",
-        )
-        self.visual_image_source_combo.addItem(
-            "WEB IMAGE SEARCH",
-            "WEB",
-        )
-        self.visual_image_source_combo.addItem(
-            "CHATGPT IMAGE",
-            "CHATGPT",
-        )
-        self.visual_image_source_combo.setToolTip(
-            "Choose where the selected visual entity should get its next image."
-        )
-
-        self.visual_display_mode_combo = QComboBox()
-        self.visual_display_mode_combo.setObjectName(
-            "CompactCombo"
-        )
-        self.visual_display_mode_combo.addItems(
-            [
-                "OVERLAY_CARD",
-                "FULL_FRAME_CONTAIN",
-                "FULL_FRAME_COVER",
-            ]
-        )
-
-        self.visual_scale_slider = QSlider(
-            Qt.Orientation.Horizontal
-        )
-        self.visual_scale_slider.setObjectName(
-            "MusicVolumeSlider"
-        )
-        self.visual_scale_slider.setRange(
-            60,
-            140,
-        )
-        self.visual_scale_slider.setValue(
-            100
-        )
-
-        self.visual_scale_label = QLabel(
-            "100%"
-        )
-        self.visual_scale_label.setObjectName(
-            "MusicVolumeLabel"
-        )
-
-        self.visual_x_slider = QSlider(
-            Qt.Orientation.Horizontal
-        )
-        self.visual_x_slider.setObjectName(
-            "MusicVolumeSlider"
-        )
-        self.visual_x_slider.setRange(
-            -100,
-            100,
-        )
-        self.visual_x_slider.setValue(
-            0
-        )
-        self.visual_x_label = QLabel(
-            "0"
-        )
-        self.visual_x_label.setObjectName(
-            "MusicVolumeLabel"
-        )
-
-        self.visual_y_slider = QSlider(
-            Qt.Orientation.Horizontal
-        )
-        self.visual_y_slider.setObjectName(
-            "MusicVolumeSlider"
-        )
-        self.visual_y_slider.setRange(
-            -100,
-            100,
-        )
-        self.visual_y_slider.setValue(
-            0
-        )
-        self.visual_y_label = QLabel(
-            "0"
-        )
-        self.visual_y_label.setObjectName(
-            "MusicVolumeLabel"
-        )
-
-        self.visual_label_edit.editingFinished.connect(
-            self.visual_inspector_fields_changed
-        )
-        self.visual_start_edit.editingFinished.connect(
-            self.visual_inspector_fields_changed
-        )
-        self.visual_end_edit.editingFinished.connect(
-            self.visual_inspector_fields_changed
-        )
-        self.visual_type_edit.editingFinished.connect(
-            self.visual_inspector_fields_changed
-        )
-        self.visual_image_source_combo.currentIndexChanged.connect(
-            self.visual_inspector_fields_changed
-        )
-        self.visual_display_mode_combo.currentTextChanged.connect(
-            self.visual_inspector_fields_changed
-        )
-        self.visual_scale_slider.valueChanged.connect(
-            self.visual_scale_changed
-        )
-        self.visual_x_slider.valueChanged.connect(
-            self.visual_position_slider_changed
-        )
-        self.visual_y_slider.valueChanged.connect(
-            self.visual_position_slider_changed
-        )
-
-        inspector_grid.addWidget(
-            QLabel("Label"),
-            0,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_label_edit,
-            0,
-            1,
-            1,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("Start"),
-            1,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_start_edit,
-            1,
-            1,
-        )
-        inspector_grid.addWidget(
-            QLabel("End"),
-            1,
-            2,
-        )
-        inspector_grid.addWidget(
-            self.visual_end_edit,
-            1,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("Type"),
-            2,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_type_edit,
-            2,
-            1,
-            1,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("Source"),
-            3,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_image_source_combo,
-            3,
-            1,
-            1,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("Mode"),
-            4,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_display_mode_combo,
-            4,
-            1,
-            1,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("Scale"),
-            5,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_scale_slider,
-            5,
-            1,
-            1,
-            2,
-        )
-        inspector_grid.addWidget(
-            self.visual_scale_label,
-            5,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("X"),
-            6,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_x_slider,
-            6,
-            1,
-            1,
-            2,
-        )
-        inspector_grid.addWidget(
-            self.visual_x_label,
-            6,
-            3,
-        )
-        inspector_grid.addWidget(
-            QLabel("Y"),
-            7,
-            0,
-        )
-        inspector_grid.addWidget(
-            self.visual_y_slider,
-            7,
-            1,
-            1,
-            2,
-        )
-        inspector_grid.addWidget(
-            self.visual_y_label,
-            7,
-            3,
-        )
-
-        self.visual_reason_label = QLabel(
-            "Select an image thumbnail or green timeline block to edit it."
-        )
-        self.visual_reason_label.setObjectName(
-            "HintLabel"
-        )
-        self.visual_reason_label.setWordWrap(
-            True
-        )
-
-        self.visual_prompt_edit = QTextEdit()
-        self.visual_prompt_edit.setObjectName(
-            "PromptEdit"
-        )
-        self.visual_prompt_edit.setMaximumHeight(
-            86
-        )
-        self.visual_prompt_edit.textChanged.connect(
-            self.visual_prompt_changed
-        )
-
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(
-            10
-        )
-
-        self.visual_preview_label = QLabel(
-            "NO IMAGE"
-        )
-        self.visual_preview_label.setObjectName(
-            "VisualPreviewThumb"
-        )
-        self.visual_preview_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-        self.visual_preview_label.setFixedSize(
-            86,
-            122,
-        )
-
-        action_column = QVBoxLayout()
-        action_column.setSpacing(
-            7
-        )
-
-        self.regenerate_visual_button = QPushButton(
-            "REGENERATE"
-        )
-        self.regenerate_visual_button.setObjectName(
-            "QuietButton"
-        )
-        self.regenerate_visual_button.clicked.connect(
-            self.regenerate_selected_visual_asset
-        )
-
-        self.generate_more_visual_button = QPushButton(
-            "GENERATE NEW IMAGE"
-        )
-        self.generate_more_visual_button.setObjectName(
-            "QuietButton"
-        )
-        self.generate_more_visual_button.setToolTip(
-            "Create another independent image entity with its own timeline clip and properties."
-        )
-        self.generate_more_visual_button.clicked.connect(
-            self.generate_more_selected_visual_variant
-        )
-
-        self.disable_visual_button = QPushButton(
-            "DISABLE"
-        )
-        self.disable_visual_button.setObjectName(
-            "QuietButton"
-        )
-        self.disable_visual_button.clicked.connect(
-            self.toggle_selected_visual_enabled
-        )
-
-        self.delete_visual_button = QPushButton(
-            "DELETE"
-        )
-        self.delete_visual_button.setObjectName(
-            "CutButton"
-        )
-        self.delete_visual_button.clicked.connect(
-            self.delete_selected_visual
-        )
-
-        action_column.addWidget(
-            self.regenerate_visual_button
-        )
-        action_column.addWidget(
-            self.generate_more_visual_button
-        )
-        action_column.addWidget(
-            self.disable_visual_button
-        )
-        action_column.addWidget(
-            self.delete_visual_button
-        )
-        action_column.addStretch()
-
-        preview_row.addWidget(
-            self.visual_preview_label
-        )
-        preview_row.addLayout(
-            action_column,
-            1,
-        )
-
-        inspector_layout.addWidget(
-            self.visual_inspector_title
-        )
-        inspector_layout.addLayout(
-            inspector_grid
-        )
-        inspector_layout.addWidget(
-            self.visual_reason_label
-        )
-        inspector_layout.addWidget(
-            self.visual_prompt_edit
-        )
-        inspector_layout.addLayout(
-            preview_row
-        )
-
-        visual_layout.addLayout(
-            visual_header
-        )
-        visual_layout.addLayout(
-            visual_action_row_top
-        )
-        visual_layout.addLayout(
-            visual_action_row_middle
-        )
-        visual_layout.addLayout(
-            visual_action_row_bottom
-        )
-        visual_layout.addLayout(
-            emoji_min_row
-        )
-        visual_layout.addWidget(
-            self.emoji_button
-        )
-        visual_layout.addWidget(
-            emoji_subtext
-        )
-        visual_layout.addLayout(
-            image_status_row
-        )
-        visual_layout.addLayout(
-            model_row
-        )
-        visual_layout.addWidget(
-            self.visual_status_label
-        )
-        visual_layout.addWidget(
-            self.visual_slots_list
-        )
-        visual_layout.addWidget(
-            self.visual_inspector
-        )
-        visual_layout.addWidget(
-            self.emoji_context_frame
-        )
+        visual_layout.addLayout(visual_header)
+        visual_layout.addWidget(visual_hint)
+        visual_layout.addLayout(emoji_actions)
+        visual_layout.addLayout(emoji_min_row)
 
         transcript_frame = QFrame()
         transcript_frame.setObjectName("Panel")
+        self.transcript_frame = transcript_frame
+        transcript_frame.setMinimumHeight(300)
+        transcript_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
         transcript_layout = QVBoxLayout(transcript_frame)
         transcript_layout.setContentsMargins(16, 16, 16, 16)
         transcript_layout.setSpacing(10)
@@ -2788,6 +2037,18 @@ class ShortsFactoryWindow(
         transcript_actions_bottom.addWidget(self.cut_transcript_button, 1)
         transcript_actions_bottom.addWidget(self.restore_transcript_button, 1)
 
+        for control in (
+            self.edit_transcript_button,
+            self.reset_transcript_text_button,
+            self.cut_transcript_button,
+            self.restore_transcript_button,
+        ):
+            control.setMinimumWidth(0)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+
         self.transcript_list = QListWidget()
         self.transcript_list.setObjectName("TranscriptList")
         self.transcript_list.setMinimumHeight(160)
@@ -2806,29 +2067,44 @@ class ShortsFactoryWindow(
         transcript_layout.addLayout(transcript_actions_bottom)
         transcript_layout.addWidget(self.transcript_list, 1)
 
-        ai_scroll = QScrollArea()
-        ai_scroll.setObjectName("PanelScroll")
-        ai_scroll.setWidgetResizable(True)
-        ai_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        ai_scroll.setWidget(ai_frame)
+        # The workflow controls remain in the left rail. The right side owns
+        # the editing and render-observation surfaces only.
+        standard_short_mode_layout.takeAt(standard_short_mode_layout.count() - 1)
+        standard_short_mode_layout.addWidget(ai_frame)
+        standard_short_mode_layout.addWidget(visual_frame)
+        standard_short_mode_layout.addWidget(audio_frame)
+        standard_short_mode_layout.addStretch()
 
-        visual_scroll = QScrollArea()
-        visual_scroll.setObjectName("PanelScroll")
-        visual_scroll.setWidgetResizable(True)
-        visual_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        visual_scroll.setWidget(visual_frame)
+        log_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        right_column_layout.addWidget(timeline_panel)
+        right_column_layout.addWidget(transcript_frame)
+        right_column_layout.addWidget(log_frame)
+        right_column.setMinimumHeight(
+            timeline_panel.minimumHeight()
+            + transcript_frame.minimumHeight()
+            + log_frame.minimumHeight()
+            + (right_column_layout.spacing() * 2)
+        )
 
-        right_column.addWidget(ai_scroll)
-        right_column.addWidget(visual_scroll)
-        right_column.addWidget(transcript_frame)
-        right_column.setSizes([180, 360, 520])
+        right_scroll = QScrollArea()
+        right_scroll.setObjectName("RightEditorScroll")
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setMinimumWidth(520)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        right_scroll.setWidget(right_column)
+        self.right_editor_scroll = right_scroll
 
-        workspace.addWidget(right_column)
-        workspace.setStretchFactor(0, 0)
-        workspace.setStretchFactor(1, 1)
-        workspace.setStretchFactor(2, 0)
-        workspace.setSizes([280, 760, 440])
-        self._default_main_splitter_sizes = [280, 760, 440]
+        workspace.addWidget(right_scroll)
+        workspace.setStretchFactor(0, 20)
+        workspace.setStretchFactor(1, 37)
+        workspace.setStretchFactor(2, 43)
+        workspace.setSizes([340, 680, 760])
+        self._default_main_splitter_sizes = [340, 680, 760]
 
         main_layout.addWidget(workspace, 1)
 
@@ -2947,127 +2223,11 @@ class ShortsFactoryWindow(
         event,
     ):
 
-        overlay = getattr(
-            self,
-            "ai_visual_preview_overlay",
-            None,
-        )
         video_widget = getattr(
             self,
             "video_widget",
             None,
         )
-
-        # Resize-handle hover: keep the corner/edge handles visible while the
-        # pointer is over the overlay or a handle itself, even when the
-        # native video surface swallows Enter/Leave on the child overlay
-        # widget (see the comment below on the move-drag path for why that
-        # matters).
-        if (
-            event.type() == QEvent.Type.Enter
-            and (
-                watched is overlay
-                or watched in getattr(self, "ai_visual_resize_handles", {}).values()
-                or watched in getattr(self, "ai_visual_resize_edge_handles", {}).values()
-            )
-        ):
-            self.set_ai_visual_resize_hover(True)
-        elif (
-            event.type() == QEvent.Type.Leave
-            and (
-                watched is overlay
-                or watched in getattr(self, "ai_visual_resize_handles", {}).values()
-                or watched in getattr(self, "ai_visual_resize_edge_handles", {}).values()
-            )
-        ):
-            self.set_ai_visual_resize_hover(False)
-        elif (
-            event.type() == QEvent.Type.MouseMove
-            and watched is video_widget
-            and overlay is not None
-            and overlay.isVisible()
-            and not self.visual_preview_dragging
-            and not getattr(self, "visual_resize_dragging", False)
-        ):
-            try:
-                hovering = overlay.geometry().adjusted(
-                    -8, -8, 8, 8
-                ).contains(event.position().toPoint())
-            except Exception:
-                hovering = False
-            self.set_ai_visual_resize_hover(hovering)
-
-        # Resize-handle drag takes priority over the overlay's own move-drag
-        # when a corner/edge handle overlaps the overlay's own geometry.
-        if (
-            event.type() == QEvent.Type.MouseButtonPress
-            and event.button() == Qt.MouseButton.LeftButton
-            and hasattr(self, "ai_visual_resize_handles")
-        ):
-            if self.begin_visual_resize_drag(event, watched):
-                event.accept()
-                return True
-
-        if (
-            getattr(self, "visual_resize_dragging", False)
-            and event.type() == QEvent.Type.MouseMove
-        ):
-            self.update_visual_resize_drag(event)
-            event.accept()
-            return True
-
-        if (
-            getattr(self, "visual_resize_dragging", False)
-            and event.type() == QEvent.Type.MouseButtonRelease
-        ):
-            self.finish_visual_resize_drag()
-            event.accept()
-            return True
-
-        # QVideoWidget can use a native video surface on Windows, so mouse
-        # events do not always arrive on the child QLabel overlay. Accept the
-        # drag from either the overlay itself or the video widget when the
-        # pointer is over the visible image geometry, then keep tracking by
-        # global mouse position until release.
-        if (
-            overlay is not None
-            and event.type()
-            == QEvent.Type.MouseButtonPress
-            and event.button()
-            == Qt.MouseButton.LeftButton
-        ):
-            should_begin = watched is overlay
-            if watched is video_widget and overlay.isVisible():
-                try:
-                    should_begin = overlay.geometry().contains(
-                        event.position().toPoint()
-                    )
-                except Exception:
-                    should_begin = False
-
-            if should_begin and self.begin_visual_preview_drag(
-                event
-            ):
-                event.accept()
-                return True
-
-        if (
-            self.visual_preview_dragging
-            and event.type() == QEvent.Type.MouseMove
-        ):
-            self.update_visual_preview_drag(
-                event
-            )
-            event.accept()
-            return True
-
-        if (
-            self.visual_preview_dragging
-            and event.type() == QEvent.Type.MouseButtonRelease
-        ):
-            self.finish_visual_preview_drag()
-            event.accept()
-            return True
 
         emoji_handle_widgets = [
             handle
@@ -3154,8 +2314,7 @@ class ShortsFactoryWindow(
             return True
 
         if (
-            not self.visual_preview_dragging
-            and event.type() == QEvent.Type.MouseButtonPress
+            event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
             and (
                 watched is video_widget
@@ -3278,8 +2437,7 @@ class ShortsFactoryWindow(
             return True
 
         if (
-            not self.visual_preview_dragging
-            and not getattr(self, "emoji_preview_dragging", False)
+            not getattr(self, "emoji_preview_dragging", False)
             and event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
             and (
@@ -3311,16 +2469,6 @@ class ShortsFactoryWindow(
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.RightButton
         ):
-            if watched is overlay or (
-                watched is video_widget
-                and overlay is not None
-                and overlay.isVisible()
-                and self._point_in_widget(overlay, event)
-            ):
-                if self.reset_active_visual_preview_position():
-                    event.accept()
-                    return True
-
             for slot_index, label in enumerate(
                 getattr(self, "emoji_preview_labels", [])
             ):
@@ -3348,14 +2496,7 @@ class ShortsFactoryWindow(
         if (
             watched is video_widget
             and event.type() == QEvent.Type.Resize
-            and hasattr(self, "ai_visual_preview_overlay")
         ):
-            QTimer.singleShot(
-                0,
-                lambda: self.update_ai_visual_preview_overlay(
-                    self.player.position()
-                ),
-            )
             QTimer.singleShot(
                 0,
                 lambda: self.update_emoji_preview_overlay(
@@ -3445,22 +2586,6 @@ class ShortsFactoryWindow(
                 event.accept()
                 return True
 
-            selected_visual = self.selected_visual_slot()
-            if selected_visual is not None:
-                visual_index = self.selected_visual_slot_index
-                if visual_index is not None:
-                    visual_clip_id = self.visual_clip_id(
-                        selected_visual,
-                        visual_index,
-                    )
-                    if str(
-                        self.timeline.selected_asset_clip_id
-                        or ""
-                    ) == visual_clip_id:
-                        self.delete_selected_visual()
-                        event.accept()
-                        return True
-
         if (
             key == Qt.Key.Key_Space
             and modifiers == Qt.KeyboardModifier.NoModifier
@@ -3493,7 +2618,6 @@ class ShortsFactoryWindow(
 
         for key, splitter_name in (
             ("main_splitter", "main_splitter"),
-            ("right_splitter", "right_splitter"),
             ("preview_timeline_splitter", "preview_timeline_splitter"),
         ):
             splitter = getattr(
@@ -3504,6 +2628,12 @@ class ShortsFactoryWindow(
             state = self.settings.value(
                 f"layout/{key}"
             )
+            if (
+                key == "main_splitter"
+                and self.settings.value("layout/main_splitter_schema")
+                != "phase1d"
+            ):
+                continue
             if splitter is not None and state:
                 splitter.restoreState(
                     state
@@ -3517,14 +2647,13 @@ class ShortsFactoryWindow(
         default_main_sizes = getattr(self, "_default_main_splitter_sizes", None)
         if self.main_splitter is not None and default_main_sizes:
             sizes = self.main_splitter.sizes()
-            if len(sizes) == 3 and (sizes[0] < 260 or sizes[2] < 360):
+            if len(sizes) == 3 and (sizes[0] < 320 or sizes[2] < 520):
                 self.main_splitter.setSizes(default_main_sizes)
 
     def save_layout_settings(self):
 
         for key, splitter_name in (
             ("main_splitter", "main_splitter"),
-            ("right_splitter", "right_splitter"),
             ("preview_timeline_splitter", "preview_timeline_splitter"),
         ):
             splitter = getattr(
@@ -3537,6 +2666,7 @@ class ShortsFactoryWindow(
                     f"layout/{key}",
                     splitter.saveState(),
                 )
+        self.settings.setValue("layout/main_splitter_schema", "phase1d")
 
     def closeEvent(
         self,

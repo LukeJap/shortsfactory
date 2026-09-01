@@ -14,8 +14,8 @@ against their own footage.
 It automates the parts of Shorts-editing a human would tediously do by
 hand: picking a strong moment, tightening it (cutting dead air and
 redundant speech), captioning it karaoke-style, adding punch-in camera
-motion, color grading, AI-generated visual cutaway images, emoji
-reactions, sound effects, and background music.
+motion, color grading, emoji reactions, sound effects, and background
+music.
 
 **The one design rule that matters most:** every automated/AI decision —
 which clip, which cuts, which captions, which effects, which emoji —
@@ -29,11 +29,9 @@ here's how you change it," not "click render and hope."
   developed/run on macOS (Apple Silicon), originally built on Windows.
 - **FFmpeg** does all actual video/audio processing. The app shells out
   to `ffmpeg`/`ffprobe` directly.
-- **Whisper** (local) for transcription, **Ollama** (a local LLM,
-  `llama3.1:8b`) for clip selection / content decisions / AI visual
-  planning — no cloud AI calls, everything runs on-device.
-- Optional local Stable Diffusion backend (Forge/Automatic1111) for
-  generating the AI visual cutaway images.
+- **Whisper** (local) for transcription and **Ollama** (a local LLM,
+  `llama3.1:8b`) for clip selection / content decisions — no cloud AI
+  calls, everything runs on-device.
 
 Because everything runs locally and a full render does several real
 video encodes, **render time is a real UX constraint** — this is why the
@@ -48,24 +46,22 @@ on every tweak.
 2. **Find Best Clips** — AI scans the source and proposes candidate
    clips (with scores/reasoning) in the right panel.
 3. **Select and trim a clip** on the timeline (or accept an AI pick).
-4. **Plan Visuals** — kicks off AI visual cutaway planning *and* a first
-   pass of emoji placement, so both are visible in the preview before
-   any render happens.
+4. **Generate Emoji** plans local emoji reactions that remain visible and
+   editable in the preview before any render happens.
 5. **Placement Editor** — with the clip selected, the user can directly
-   drag captions, emoji, and AI-visual cutaways around on the video
-   preview itself (see §5) to reposition/retime/swap them, and use
-   dedicated "Generate Assets" / "Generate Emoji" / "Generate SFX"
-   buttons to lock in and pre-resolve those choices.
+   drag captions and emoji around on the video preview to reposition or
+   retime them, and use dedicated "Generate Emoji" / "Generate SFX"
+   buttons to pre-resolve those choices.
 6. **Adjust settings** — edit energy/pace, filter intensity, sound FX
    mode, background music.
-7. **Generate Final Video** — runs the full render pipeline (cuts,
-   transcript, punch-in motion, color grade, AI visuals, captions, emoji,
-   sound effects, music) and produces the final MP4.
+7. **Generate Final Video** runs the full render pipeline (cuts,
+   transcript, punch-in motion, color grade, captions, emoji, sound
+   effects, music) and produces the final MP4.
 
 ## 4. Current UI layout
 
-Three-column layout inside a single main window (`QSplitter`, roughly
-280px / 760px / 440px by default, all resizable/collapsible):
+Three-column layout inside a single main window (`QSplitter`, all
+resizable with stable minimum working widths):
 
 **Left — "SOURCE FEED"**
 - Video drop zone / file picker
@@ -75,35 +71,34 @@ Three-column layout inside a single main window (`QSplitter`, roughly
 - **FILTER INTENSITY** slider (controls the color-grade/FX strength)
 
 **Center**
-- Video preview player — this is also the canvas for the drag-to-reposition
-  **Placement Editor** overlays (captions, emoji, AI-visual cutaways — see
-  §5)
+- Portrait video preview player — also the canvas for the drag-to-reposition
+  **Placement Editor** overlays (captions and emoji)
 - Playback controls (play/pause, timestamp, preview-only volume)
 - **Generate Final Video** button — lives right next to playback controls,
   not off in a settings panel, since it's the single most important action
   in the app
-- Below the preview, in a vertical splitter: the **timeline widget**
-  (see §6) and its zoom/pan controls
-- **AUDIO** panel: Sound FX mode selector, **Generate SFX** button, SFX
-  folder shortcut, a context panel (appears when an SFX clip is selected
-  on the timeline: swap / disable / delete / volume), background music
-  add/volume/remove, an "AI Narrator" feature placeholder (not yet built)
+- Below the preview: playback and selection controls
+
+**Right — editor workspace**
+- A simple five-lane timeline with SOURCE, VISUALS, SFX, EMOJI, and
+  VOICEOVER lanes, its navigator, selection status, and zoom controls
+- Transcript editor — click a line to correct or cut it
 - Render log panel (live-streamed render output + persisted to
   `output/render_log.txt`)
 
-**Right**
-- **AI CLIP HUNTER** — up to 6 AI-proposed clip candidate cards
-- **AI VISUAL CUTAWAYS** panel: **Plan Visuals** / **Generate Assets** /
-  **Generate Emoji** buttons, a list of planned visual slots, an
-  inspector (position/scale/display-mode controls for the selected
-  visual), and a context panel for the selected emoji (swap / disable /
-  delete — appears when an emoji clip is selected on the timeline)
-- Transcript editor — click a line to correct or cut it
+**Workflow controls**
+- AI Clip Hunter cards live with Standard workflow controls.
+- **VISUALS & REACTIONS** keeps emoji generation/toggling available without
+  a separate image-asset workflow.
+- **AUDIO** provides the Sound FX mode selector, **Generate SFX** button, SFX
+  folder shortcut, a context panel (appears when an SFX clip is selected
+  on the timeline: swap / disable / delete / volume), background music
+  add/volume/remove, an "AI Narrator" feature placeholder (not yet built)
 
 ## 5. The Placement Editor (drag-on-video interaction pattern)
 
 This is the app's signature interaction and probably the most
-design-relevant system to understand. Three kinds of overlay can be
+design-relevant system to understand. Two kinds of overlay can be
 dragged **directly on the video preview**, live, before any render:
 
 - **Captions** — drag to reposition the caption block; clamped to a safe
@@ -117,11 +112,7 @@ dragged **directly on the video preview**, live, before any render:
   now caption-aware (see §9) — it auto-picks a spot above or below
   wherever the caption currently sits, including a caption the user has
   manually dragged, rather than a fixed spot that could land on top of it.
-- **AI visual cutaways** — drag to reposition/scale; a "FULL FRAME" tag
-  toggle for cutaways meant to cover the whole canvas rather than sit as
-  a card.
-
-All three write into shared plan files that the final render then
+Both write into shared plan files that the final render then
 reuses **exactly as previewed** — the render never silently
 recomputes/overrides a manual placement.
 
@@ -131,19 +122,13 @@ A fully custom-drawn (not a stock Qt widget) multi-lane, zoomable/
 pannable editor surface — `app/gui_app/timeline_widget.py`. Currently 5
 lanes, top to bottom:
 
-1. **V1 SOURCE** — the source video strip, with trim handles for the
-   selected clip range
-2. **EDITS** — transcript cut markers, manual edits, motion/FX/graphic
-   event markers — six marker categories split across two rows (cuts/
-   transcript/caption-impact on top, motion/FX/graphics below) so they
-   don't visually overlap each other
-3. **VISUALS** — AI visual cutaway clips (draggable to retime; overlap
-   stacks into rows)
-4. **SFX** — sound effect clips (orange; overlap stacks into rows, same
-   as VISUALS)
-5. **EMOJI** — emoji reaction clips (gold) — click to select/seek, drag
-   edges to retime, double-click to swap, plus a Disable/Delete context
-   panel in the right column; overlap stacks into rows, same as VISUALS/SFX
+1. **SOURCE** — the source video strip, with trim handles for the selected
+   clip range.
+2. **VISUALS** — smart-motion and visual-FX edit markers.
+3. **SFX** — sound effect clips.
+4. **EMOJI** — emoji reaction clips; click to select/seek, drag edges to
+   retime, or double-click to swap.
+5. **VOICEOVER** — recap narration clips.
 
 Selecting a clip in any of these lanes seeks the video preview to that
 moment and syncs the corresponding placement-editor overlay, so the
@@ -162,30 +147,31 @@ aesthetic:
 - Minimal corner rounding (3–5px) — reads as sharp/structural, not soft
 - Section headers use a bold, small-caps-style label pattern
   ("SOURCE FEED", "EDIT STYLE", "AI CLIP HUNTER", etc.)
-- Color-coded timeline lanes (green-ish for AI visuals, orange for SFX,
-  gold for emoji) so clip kind is identifiable at a glance without
-  reading a label
+- Semantic lane labels and restrained clip colors keep the timeline
+  scannable without a permanent color-key legend
 
 ## 8. Data model worth knowing about (affects what's feasible to design)
 
-Three "editor asset" kinds — **AI_VISUAL**, **SFX**, **EMOJI** — all live
-as clips in one shared file, `output/editor_asset_plan.json`, keyed by
+Supported editable asset kinds — **SFX**, **EMOJI**, **VOICEOVER**, and
+recap effects — live as clips in `output/editor_asset_plan.json`, keyed by
 source-video time with a stable id, an active/enabled flag, and a
-"manually overridden" flag. This is *why* the three timeline lanes and
-their context panels (swap/disable/delete) behave identically — they're
-the same underlying mechanism with different visual/audio content.
-Anything proposed for one of these three tends to be straightforward to
-extend to the other two, since the plumbing is already shared.
+"manually overridden" flag. Legacy image-cutaway entities are ignored when
+an old plan is opened, so they cannot re-enter the editor or renderer.
 
 ## 9. Recent / current state (most recent work, roughly newest first)
+
+- **Phase 1E cleanup:** the timeline is the compact five-lane editor
+  surface again, without a permanent color-key legend. The retired image
+  cutaway subsystem has no GUI, planning, preview, or render path; old
+  plan entities are ignored safely.
 
 - **Emoji auto-placement now avoids the caption:** emoji default
   positions used to come from one fixed 4-slot table with zero awareness
   of where the caption actually sits, so a caption dragged toward the
   bottom of its allowed range (a normal thing to do) could end up
   directly under an auto-placed emoji. Fixed at the source: whenever a
-  *new* default position gets assigned (a fresh render, the pre-render
-  "Plan Visuals" preview, or right-click "reset to default" in the
+  *new* default position gets assigned (a fresh render, emoji planning,
+  or right-click "reset to default" in the
   editor), the app now computes the caption's current position first and
   picks an above-caption or below-caption spot instead. Existing/
   manually-placed emoji are left exactly where they are — this only
@@ -217,7 +203,7 @@ extend to the other two, since the plumbing is already shared.
   preview emoji overlay with it bidirectionally — all new this cycle.
   Also fixed a bug where a manually-retimed emoji's on-screen duration
   wasn't actually respected by the final render.
-- **Overlay Placement Editor** (§5) — captions/emoji/AI-visual drag
+- **Overlay Placement Editor** (§5) — captions/emoji drag
   repositioning directly on the video preview, plus the filter-intensity
   slider and the "Generate Final Video" button's relocation next to
   playback controls, shipped together as one feature.
@@ -235,12 +221,12 @@ extend to the other two, since the plumbing is already shared.
 - `app/gui_app/timeline_widget.py` — the custom timeline canvas
 - `app/gui_app/style.py` — the entire visual design system (one QSS string)
 - `app/gui_app/mixins/` — one file per feature area's *behavior*
-  (`editor_assets.py`, `emoji_preview.py`, `ai_visual_preview.py`,
-  `caption_preview.py`, `render_pipeline.py`, `playback.py`, etc.) —
+  (`editor_assets.py`, `emoji_preview.py`, `caption_preview.py`,
+  `render_pipeline.py`, `playback.py`, etc.) —
   `main_window.py`'s window class is composed from all of these
 - `app/render.py` and the rest of `app/*.py` — the actual video pipeline
   (11 steps: crop/select → transcript → cuts → semantic edit → transcript
-  remap → motion/FX/AI-visuals → captions → emoji → SFX → sanitize →
+  remap → motion/FX → captions → emoji → SFX → sanitize →
   organize output)
 - `output/` — everything a render produces/reads: plans (JSON), the
   transcript, intermediate and final rendered video files, the render log

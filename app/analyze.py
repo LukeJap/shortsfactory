@@ -4,8 +4,8 @@ and uses a local Ollama LLM to identify and score candidate short-form
 clip windows (hooks, self-contained moments, pacing). Largest standalone
 script in the pipeline. Discovers whichever Ollama model is actually
 installed rather than assuming a fixed model name, unlike the other
-Ollama-calling scripts (plan_short.py, content_edit.py, semantic_edit.py,
-ai_visual_planner.py) -- that's intentional, not an inconsistency to fix.
+Ollama-calling scripts (plan_short.py, content_edit.py, and semantic_edit.py)
+-- that's intentional, not an inconsistency to fix.
 """
 
 from __future__ import annotations

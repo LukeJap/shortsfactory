@@ -2,7 +2,7 @@
 Preview-only emoji planner: computes default emoji reaction events for
 the current clip selection before any render has happened, so they're
 visible to drag/edit in the GUI placement editor immediately (triggered
-from gui_app/mixins/ai_visual_pipeline.py's "Plan Visuals" action, via
+from the GUI's emoji planning action, via
 gui_app/mixins/emoji_preview.py). Writes output/emoji_events.json in
 absolute source-video time (time_base: "absolute") since the clip hasn't
 been cropped yet -- unlike the real render pass's make_captions.py, which

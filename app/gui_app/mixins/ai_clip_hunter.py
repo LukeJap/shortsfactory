@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import textwrap
 
 from PySide6.QtCore import QProcess
 
@@ -22,6 +23,23 @@ from ..helpers import (
 
 
 class AIClipHunterMixin:
+
+    @staticmethod
+    def _card_text_lines(text: str, width: int = 28) -> str:
+        """Bound candidate-card text so it fits the narrow workflow sidebar."""
+
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return ""
+
+        return "\n".join(
+            textwrap.wrap(
+                normalized,
+                width=width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            )
+        )
 
     def reset_clip_cards(self):
 
@@ -204,8 +222,8 @@ class AIClipHunterMixin:
             ) / 1000
 
             headline = (
-                f"\"{quote or title}\"\n"
-                f"{grounded_reason}"
+                f"\"{self._card_text_lines(quote or title)}\"\n"
+                f"{self._card_text_lines(grounded_reason)}"
             )
 
             card.setText(

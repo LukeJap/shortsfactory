@@ -1237,7 +1237,7 @@ def maybe_apply_temporal_edit(
     Apply output-time manipulation after the final tight transcript exists.
 
     The temporal pass rewrites subtitles.json through its time map before
-    smart motion, AI visuals, visual FX, captions, and emoji timing are built.
+    smart motion, visual FX, captions, and emoji timing are built.
     """
 
     if video_path.name.lower() != "short1_tight.mp4":
@@ -1288,70 +1288,12 @@ def maybe_apply_temporal_edit(
 
 
 
-def maybe_apply_ai_visuals(
-    video_path: Path,
-) -> None:
-    """
-    Composite any pre-generated AI visual assets into the final tight clip
-    after smart motion, but before captions/emojis are rendered.
-    """
-
-    if video_path.name.lower() != "short1_tight.mp4":
-        return
-
-    script_path = (
-        ROOT
-        / "app"
-        / "apply_ai_visuals.py"
-    )
-
-    if not script_path.exists():
-        return
-
-    print(
-        "",
-        flush=True,
-    )
-
-    print(
-        "Applying planned AI visual cutaways...",
-        flush=True,
-    )
-
-    try:
-
-        subprocess.run(
-            [
-                sys.executable,
-                str(
-                    script_path
-                ),
-            ],
-            cwd=ROOT,
-            check=True,
-        )
-
-    except subprocess.CalledProcessError as exc:
-
-        print(
-            (
-                "WARNING: AI visual compositor returned "
-                f"exit code {exc.returncode}; "
-                "continuing with source footage."
-            ),
-            flush=True,
-        )
-
-
-
-
-
 def finish_pipeline_stages(
     video_path: Path,
 ) -> int:
     """
     Run every downstream post-transcription pipeline stage (transcript
-    corrections, temporal edit, smart motion, AI visuals, visual FX) and
+    corrections, temporal edit, smart motion, and visual FX) and
     report success. Shared by every main() exit path that produced a
     usable transcript -- remap-through-cuts, a cache hit, and a fresh
     Whisper transcription all end the same way.
@@ -1360,14 +1302,6 @@ def finish_pipeline_stages(
         video_path
     )
     maybe_apply_temporal_edit(
-        video_path
-    )
-    # AI visual cutaways now run before the combined motion+FX pass
-    # (rather than between smart motion and visual FX, as when the two
-    # were separate stages) so a composited cutaway still gets the same
-    # zoompan/color-grade treatment as the rest of the frame instead of
-    # being pasted on ungraded afterward.
-    maybe_apply_ai_visuals(
         video_path
     )
     maybe_apply_motion_and_fx(

@@ -6,12 +6,12 @@ recap_media package (B1-B7) into the app: a toggleable recap panel,
 Track A status, sequence generation, Orpheus voiceover generation, and
 per-segment VOICEOVER clip management (enable/disable/delete/volume/
 regenerate) sharing the exact same editor_asset_plan.json mechanism
-SFX/AI_VISUAL/EMOJI already use -- including preserve_manual=True on
+SFX/EMOJI already use -- including preserve_manual=True on
 replace_kind_clips(), which is what makes "manual edits are authoritative
 and must survive unrelated regeneration" (the shared contract's own
 words) true here for free, not something reimplemented per-kind.
 
-Deliberately NOT wired into the existing SFX/EMOJI/AI_VISUAL selection
+Deliberately NOT wired into the existing SFX/EMOJI selection
 state machine (editor_asset_clip_selected() et al. in editor_assets.py,
 whose mutual-exclusion resets are scattered across five files) --
 VOICEOVER clips appear on the timeline (a real, dedicated lane; see

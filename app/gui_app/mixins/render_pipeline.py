@@ -105,6 +105,29 @@ class RenderPipelineMixin:
             pass
 
 
+    def append_live_render_log(
+        self,
+        text: str,
+        *,
+        persist: bool = False,
+    ):
+        """Append live process output without overriding a user's scroll position."""
+
+        if not text:
+            return
+
+        scrollbar = self.render_log.verticalScrollBar()
+        follow_output = scrollbar.value() >= scrollbar.maximum() - 2
+        self.render_log.moveCursor(
+            self.render_log.textCursor().MoveOperation.End
+        )
+        self.render_log.insertPlainText(text)
+        if follow_output:
+            scrollbar.setValue(scrollbar.maximum())
+        if persist:
+            self.append_render_log_file(text)
+
+
     def write_render_log_snapshot(self):
         """
         Overwrite output/render_log.txt with the full contents of the
@@ -217,33 +240,6 @@ class RenderPipelineMixin:
                 )
 
         add_if_running(
-            self.web_image_process,
-            92,
-            (
-                "DOWNLOADING WEB IMAGE"
-                if self.web_image_operation == "download"
-                else "SEARCHING WEB IMAGES"
-            ),
-        )
-        add_if_running(
-            self.visual_asset_process,
-            90,
-            (
-                "GENERATING CHATGPT IMAGE"
-                if getattr(
-                    self,
-                    "visual_asset_provider",
-                    "auto",
-                ) == "openai"
-                else "GENERATING IMAGES"
-            ),
-        )
-        add_if_running(
-            self.visual_process,
-            80,
-            "PLANNING VISUALS",
-        )
-        add_if_running(
             self.analysis_process,
             75,
             (
@@ -261,15 +257,6 @@ class RenderPipelineMixin:
             self.transcript_preload_process,
             65,
             "TRANSCRIBING SOURCE",
-        )
-        add_if_running(
-            self.image_status_process,
-            60,
-            (
-                "LOADING IMAGE MODEL"
-                if self.pending_image_model_change
-                else "STARTING IMAGE AI"
-            ),
         )
         add_if_running(
             self.reframe_process,
@@ -932,26 +919,7 @@ class RenderPipelineMixin:
         )
 
         if data:
-
-            self.render_log.moveCursor(
-                self.render_log
-                .textCursor()
-                .MoveOperation
-                .End
-            )
-
-            self.render_log.insertPlainText(
-                data
-            )
-
-            scrollbar = (
-                self.render_log
-                .verticalScrollBar()
-            )
-
-            scrollbar.setValue(
-                scrollbar.maximum()
-            )
+            self.append_live_render_log(data)
 
 
     def read_reframe_error(self):
@@ -967,26 +935,7 @@ class RenderPipelineMixin:
         )
 
         if data:
-
-            self.render_log.moveCursor(
-                self.render_log
-                .textCursor()
-                .MoveOperation
-                .End
-            )
-
-            self.render_log.insertPlainText(
-                data
-            )
-
-            scrollbar = (
-                self.render_log
-                .verticalScrollBar()
-            )
-
-            scrollbar.setValue(
-                scrollbar.maximum()
-            )
+            self.append_live_render_log(data)
 
 
     def reframe_finished(
@@ -1052,13 +1001,7 @@ class RenderPipelineMixin:
         )
 
         if data:
-            self.render_log.moveCursor(
-                self.render_log.textCursor().MoveOperation.End
-            )
-            self.render_log.insertPlainText(data)
-            scrollbar = self.render_log.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
-            self.append_render_log_file(data)
+            self.append_live_render_log(data, persist=True)
 
     def read_render_error(self):
 
@@ -1070,13 +1013,7 @@ class RenderPipelineMixin:
         )
 
         if data:
-            self.render_log.moveCursor(
-                self.render_log.textCursor().MoveOperation.End
-            )
-            self.render_log.insertPlainText(data)
-            scrollbar = self.render_log.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
-            self.append_render_log_file(data)
+            self.append_live_render_log(data, persist=True)
 
     def render_finished(
         self,

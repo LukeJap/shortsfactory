@@ -28,7 +28,7 @@ STYLESHEET =            """
                 border-radius: 5px;
             }
 
-            QFrame#Panel, QFrame#PreviewPanel, QFrame#SubPanel {
+            QFrame#Panel, QFrame#PreviewPanel, QFrame#RenderLogPanel, QFrame#SubPanel {
                 background: #101012;
                 border: 1px solid #252429;
                 border-radius: 5px;
@@ -37,6 +37,11 @@ STYLESHEET =            """
             QFrame#PreviewPanel {
                 border: 1px solid #40333A;
                 border-top: 2px solid #733B2D;
+            }
+
+            QFrame#RenderLogPanel {
+                background: #0C0C0E;
+                border-top: 2px solid #3A3030;
             }
 
             QFrame#SubPanel {
@@ -54,10 +59,6 @@ STYLESHEET =            """
                 width: 8px;
             }
 
-            QSplitter::handle:vertical {
-                height: 8px;
-            }
-
             QSplitter::handle:hover {
                 background: #741C28;
                 border: 1px solid #C9384F;
@@ -69,6 +70,11 @@ STYLESHEET =            """
             }
 
             QScrollArea#CenterScroll {
+                background: transparent;
+                border: none;
+            }
+
+            QScrollArea#RightEditorScroll {
                 background: transparent;
                 border: none;
             }
@@ -249,42 +255,6 @@ STYLESHEET =            """
                 background: transparent;
             }
 
-            QLabel#ImageAIStatus {
-                color: #8d8580;
-                background: #0b0d0f;
-                border: 1px solid #242226;
-                border-radius: 8px;
-                padding: 7px 9px;
-                font-size: 10px;
-                font-weight: 900;
-                letter-spacing: 1px;
-            }
-
-            QLabel#ImageAIStatus[state="ready"] {
-                color: #bdf8d2;
-                border: 1px solid #315c40;
-                background: #0b1610;
-            }
-
-            QLabel#ImageAIStatus[state="generating"] {
-                color: #e5d49a;
-                border: 1px solid #5d4f28;
-                background: #171408;
-            }
-
-            QLabel#ImageAIStatus[state="offline"],
-            QLabel#ImageAIStatus[state="error"] {
-                color: #ffbac4;
-                border: 1px solid #64303a;
-                background: #1a0e12;
-            }
-
-            QLabel#ImageAIStatus[state="connected_no_model"] {
-                color: #d4c5a7;
-                border: 1px solid #5a4930;
-                background: #17120d;
-            }
-
             QComboBox#CompactCombo, QLineEdit#CompactLineEdit, QSpinBox#CompactSpinBox {
                 color: #ded7cf;
                 background: #09090A;
@@ -292,6 +262,16 @@ STYLESHEET =            """
                 border-radius: 3px;
                 padding: 6px 8px;
                 min-height: 24px;
+            }
+
+            QLabel#RecapStatus {
+                color: #c7c0b7;
+                background: #0b0d0f;
+                border: 1px solid #242226;
+                border-radius: 4px;
+                padding: 7px 9px;
+                font-size: 10px;
+                font-weight: 800;
             }
 
             QComboBox#CompactCombo:disabled,
@@ -331,85 +311,11 @@ STYLESHEET =            """
                 selection-background-color: #6E1E2B;
             }
 
-            QFrame#VisualSlotCard {
-                background: #0A0D0B;
-                border: 1px solid #24302A;
-                border-left: 3px solid #315C40;
-                border-radius: 4px;
-            }
-
-            QFrame#VisualSlotCard[selected="true"] {
-                background: #101713;
-                border: 1px solid #55c783;
-                border-left: 3px solid #55C783;
-            }
-
-            QLabel#VisualSlotThumb, QLabel#VisualPreviewThumb {
-                color: #8f9d92;
-                background: #050706;
-                border: 1px solid #25342b;
-                border-radius: 7px;
-                font-size: 9px;
-                font-weight: 900;
-            }
-
-            QLabel#VisualSlotTitle {
-                color: #e3ddd4;
-                font-size: 11px;
-                font-weight: 900;
-            }
-
-            QLabel#VisualSlotMeta {
-                color: #83c99d;
-                font-size: 10px;
-                font-weight: 800;
-            }
-
-            QLabel#VisualPreviewDim {
-                border: none;
-                background: transparent;
-            }
-
-            QLabel#VisualPreviewDim[displayMode="OVERLAY_CARD"] {
-                background: rgba(0, 0, 0, 46);
-            }
-
-            QLabel#VisualPreviewDim[displayMode="FULL_FRAME_CONTAIN"] {
-                background: rgba(0, 0, 0, 61);
-            }
-
-            QLabel#VisualPreviewOverlay {
-                color: #DFF8E7;
-                background: transparent;
-                border: none;
-                font-size: 13px;
-                font-weight: 900;
-            }
-
-            QLabel#VisualPreviewOverlay[displayMode="OVERLAY_CARD"] {
-                background: #F4EFE6;
-                border: 3px solid #F4EFE6;
-                border-radius: 5px;
-                color: #111111;
-            }
-
-            QLabel#VisualPreviewOverlay:hover,
             QLabel#EmojiPreviewOverlay:hover,
             QLabel#CaptionPreviewOverlay:hover {
                 border: 2px solid #C9384F;
             }
 
-            QLabel#VisualPreviewFullFrameTag {
-                background: #741C28;
-                color: #F4EFE6;
-                border: 1px solid #C9384F;
-                border-radius: 4px;
-                font-size: 10px;
-                font-weight: 900;
-                padding: 2px 6px;
-            }
-
-            QLabel#VisualResizeHandle,
             QLabel#EmojiResizeHandle,
             QLabel#CaptionResizeHandle {
                 background: #C9384F;
@@ -417,7 +323,6 @@ STYLESHEET =            """
                 border-radius: 2px;
             }
 
-            QLabel#VisualResizeReadout,
             QLabel#EmojiResizeReadout,
             QLabel#CaptionResizeReadout {
                 background: #741C28;
@@ -432,13 +337,52 @@ STYLESHEET =            """
             QVideoWidget#VideoPreview {
                 background: #020203;
                 border: 1px solid #2e272b;
-                border-radius: 18px;
+                border-radius: 5px;
+            }
+
+            QWidget#ProgramMonitorViewport {
+                background: #080809;
+                border: 1px solid #252429;
+                border-radius: 5px;
+            }
+
+            QTextEdit#RenderLog {
+                background: #070708;
+                color: #CFC8C1;
+                border: 1px solid #252429;
+                border-radius: 3px;
+                font-family: Consolas;
+                font-size: 10px;
             }
 
             QWidget#TimelinePanel {
                 background: #080809;
                 border: 1px solid #2E2927;
             }
+
+            QFrame#TimelineFooter {
+                background: #0B0B0D;
+                border-top: 1px solid #2A2527;
+            }
+
+            QLabel#TimelineLegendItem {
+                background: #151417;
+                border: 1px solid #302A2E;
+                border-radius: 3px;
+                color: #D8D1C8;
+                font-family: Consolas;
+                font-size: 9px;
+                font-weight: 700;
+                padding: 3px 5px;
+            }
+
+            QLabel#TimelineLegendItem[tone="cyan"] { border-left: 3px solid #37C8E5; }
+            QLabel#TimelineLegendItem[tone="red"] { border-left: 3px solid #D64959; }
+            QLabel#TimelineLegendItem[tone="amber"] { border-left: 3px solid #D58B3A; }
+            QLabel#TimelineLegendItem[tone="gold"] { border-left: 3px solid #E3BE57; }
+            QLabel#TimelineLegendItem[tone="violet"] { border-left: 3px solid #9B71DB; }
+            QLabel#TimelineLegendItem[tone="magenta"] { border-left: 3px solid #D25AA6; }
+            QLabel#TimelineLegendItem[tone="green"] { border-left: 3px solid #5CAA74; }
 
             QWidget#VideoStack {
                 background: transparent;

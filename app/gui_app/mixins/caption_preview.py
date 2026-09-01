@@ -257,7 +257,7 @@ class CaptionPreviewMixin:
         label = self.caption_preview_label
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
-            self.ai_visual_preview_canvas_rect()
+            self.preview_canvas_rect()
         )
 
         label.setText(self.representative_caption_text(position_ms))
@@ -498,7 +498,7 @@ class CaptionPreviewMixin:
             return
 
         canvas_x, canvas_y, canvas_width, canvas_height = (
-            self.ai_visual_preview_canvas_rect()
+            self.preview_canvas_rect()
         )
 
         delta = event.globalPosition().toPoint() - self.caption_preview_drag_origin
