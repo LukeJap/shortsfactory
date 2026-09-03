@@ -22,6 +22,8 @@ from typing import Any
 
 try:
     from .visual_emphasis import (
+        auto_cut_aggression_from_energy,
+        coerce_auto_cut_aggression,
         DEFAULT_ENERGY,
         load_render_settings,
         normalize_energy,
@@ -30,6 +32,8 @@ try:
     )
 except ImportError:
     from visual_emphasis import (
+        auto_cut_aggression_from_energy,
+        coerce_auto_cut_aggression,
         DEFAULT_ENERGY,
         load_render_settings,
         normalize_energy,
@@ -38,16 +42,19 @@ except ImportError:
     )
 
 try:
+    from .standard_audio_pitch import build_standard_audio_pitch_filter
+except ImportError:
+    from standard_audio_pitch import build_standard_audio_pitch_filter
+
+try:
     from .canvas_config import (
         OUTPUT_HEIGHT,
         OUTPUT_WIDTH,
-        crop_to_fill_filter,
     )
 except ImportError:
     from canvas_config import (
         OUTPUT_HEIGHT,
         OUTPUT_WIDTH,
-        crop_to_fill_filter,
     )
 
 try:
@@ -612,13 +619,10 @@ def get_clip_timestamps() -> tuple[str, str]:
 # ============================================================
 # CONTENT RECT
 #
-# render_base_video() below letterboxes the source into the 1080x1920
-# canvas at its native aspect ratio rather than cropping to fill. Every
-# later pipeline stage (smart motion zoom/pan and semantic visual effects) operates
-# on that already-letterboxed video, so they need to know where the real
-# (non-black-bar) content actually sits within the canvas -- these two
-# helpers compute that and render_base_video() persists it to
-# render_settings.json for those downstream stages to read.
+# The shared portrait-framing helper uses this geometry to contain the active
+# source picture inside its blurred 9:16 composition. Keep this small helper
+# here because the Standard renderer and the Recap portrait-plan module both
+# need the exact same aspect-preserving math.
 # ============================================================
 
 def ffprobe_source_dimensions(
@@ -735,31 +739,71 @@ def content_rect_for_source(
 # ============================================================
 
 def base_video_filter_chain() -> str:
-    filters = [
-        crop_to_fill_filter(),
-    ]
+    """Return Standard's production-polish filter tail.
 
-    filters.extend(
-        polish_filters(
-            PRODUCTION_POLISH_PRESET
-        )
-    )
-    filters.append(
-        "setsar=1"
-    )
-    filters.append(
-        "format=yuv420p"
-    )
+    The shared portrait path applies the color/sharpening filters before its
+    source split, so the blurred background and sharp foreground remain a
+    matched treatment. This utility remains the standalone production-finish
+    contract used by existing callers/tests.
+    """
 
-    return ",".join(
-        filters
+    return ",".join([*polish_filters(PRODUCTION_POLISH_PRESET), "setsar=1", "format=yuv420p"])
+
+
+def standard_portrait_framing_plan_for_video(source_video: Path) -> dict[str, Any]:
+    """Build Standard Mode's source-aware plan with the shared Recap helper."""
+
+    # Import lazily: recap_media.portrait_framing reuses this module's
+    # ffprobe/content-rect helpers, so importing it at module load would make
+    # the otherwise harmless relationship circular.
+    from recap_media.portrait_framing import build_portrait_framing_plan_for_video
+
+    return build_portrait_framing_plan_for_video(source_video)
+
+
+def standard_portrait_filter_complex(portrait_plan: dict[str, Any]) -> str:
+    """Compose Standard's active source over its blurred 9:16 background.
+
+    This deliberately uses the exact Recap filter primitive. Standard still
+    owns its normal pipeline and later effects/caption stages; only the
+    source-picture geometry and background treatment are shared.
+    """
+
+    from recap_media.portrait_framing import build_portrait_filter_chain
+
+    required = ("content_x", "content_y", "content_width", "content_height")
+    if not all(key in portrait_plan for key in required):
+        raise ValueError("Standard portrait plan is missing content geometry.")
+
+    active_rect = portrait_plan.get("active_rect")
+    source_width = portrait_plan.get("source_width")
+    source_height = portrait_plan.get("source_height")
+    if (
+        not isinstance(active_rect, dict)
+        or active_rect == {"x": 0, "y": 0, "width": source_width, "height": source_height}
+    ):
+        active_rect = None
+
+    composition = build_portrait_filter_chain(
+        int(portrait_plan["content_x"]),
+        int(portrait_plan["content_y"]),
+        int(portrait_plan["content_width"]),
+        int(portrait_plan["content_height"]),
+        canvas_width=int(portrait_plan.get("canvas_width", OUTPUT_WIDTH)),
+        canvas_height=int(portrait_plan.get("canvas_height", OUTPUT_HEIGHT)),
+        blur_sigma=float(portrait_plan.get("blur_sigma", 25.0)),
+        background_dim=float(portrait_plan.get("background_dim", 0.0)),
+        active_rect=active_rect,
+        pre_split_filters=polish_filters(PRODUCTION_POLISH_PRESET),
     )
+    return f"{composition};[recap_out]setsar=1,format=yuv420p[standard_out]"
 
 
 def render_base_video(
     source_video: Path,
     start: str,
     end: str,
+    audio_pitch_semitones: float = 0.0,
 ) -> None:
 
     print()
@@ -769,14 +813,10 @@ def render_base_video(
     )
     print()
 
-    # Fill the entire 9:16 canvas with real video -- source content is
-    # scaled up and center-cropped to cover the frame edge-to-edge, at the
-    # cost of losing the source's left/right (or top/bottom) edges. No
-    # letterboxing, so there's no separate "content rect" to track: the
-    # video content always fills the whole canvas, and every downstream
-    # effect (smart motion zoom and semantic FX)
-    # already treats a full-canvas content rect as its default, so this
-    # needs no further changes there.
+    # Standard and Recap share the active-picture crop, aspect-preserving
+    # foreground geometry, and moving blurred source background. The later
+    # Standard stages still work on the same full 1080x1920 canvas.
+    portrait_plan = standard_portrait_framing_plan_for_video(source_video)
     settings = load_render_settings()
     settings["content_x"] = 0
     settings["content_y"] = 0
@@ -797,12 +837,15 @@ def render_base_video(
         "-i",
         str(source_video),
 
+        "-filter_complex",
+        standard_portrait_filter_complex(portrait_plan),
+
         # ShortsFactory exports only the primary video plus optional primary
         # audio. Some source files carry long timecode/data tracks; allowing
         # FFmpeg to auto-select those can make a 6-second Short report as
         # several minutes long in media players.
         "-map",
-        "0:v:0",
+        "[standard_out]",
 
         "-map",
         "0:a:0?",
@@ -817,9 +860,6 @@ def render_base_video(
         # derives its file from this one.
         "-map_chapters",
         "-1",
-
-        "-vf",
-        base_video_filter_chain(),
 
         "-c:v",
         "libx264",
@@ -845,6 +885,11 @@ def render_base_video(
 
         str(BASE_OUTPUT_PATH),
     ]
+
+    pitch_filter = build_standard_audio_pitch_filter(audio_pitch_semitones)
+    if pitch_filter:
+        audio_map_index = command.index("0:a:0?")
+        command[audio_map_index + 2:audio_map_index + 2] = ["-af", pitch_filter]
 
     run_command(
         command
@@ -1617,14 +1662,24 @@ def main() -> int:
         args
     )
 
+    raw_auto_cut_aggression = render_settings.get("auto_cut_aggression")
+    auto_cut_aggression = (
+        auto_cut_aggression_from_energy(edit_energy)
+        if raw_auto_cut_aggression is None
+        else coerce_auto_cut_aggression(raw_auto_cut_aggression)
+    )
     auto_cuts_enabled = bool(
         render_settings.get(
             "auto_cuts_enabled",
             True,
         )
-    )
+    ) and auto_cut_aggression > 0
     print(
         f"Auto Cuts: {'ON' if auto_cuts_enabled else 'OFF'}"
+    )
+    print(f"AutoCut aggression: {auto_cut_aggression}")
+    standard_audio_pitch_semitones = render_settings.get(
+        "standard_audio_pitch_semitones", 0.0
     )
 
     OUTPUT_DIR.mkdir(
@@ -1654,6 +1709,7 @@ def main() -> int:
         source_video,
         start,
         end,
+        audio_pitch_semitones=standard_audio_pitch_semitones,
     )
 
     # --------------------------------------------------------

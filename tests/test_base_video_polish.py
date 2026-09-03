@@ -6,7 +6,7 @@ from base_video_polish import (
     polish_filters,
 )
 from compare_base_video_polish import VARIANTS, base_filter_chain
-from render import base_video_filter_chain
+from render import base_video_filter_chain, standard_portrait_filter_complex
 from visual_fx import (
     build_filter_chain,
     build_semantic_filter_chain,
@@ -108,21 +108,40 @@ def test_comparison_chain_uses_crop_polish_setsar_and_format():
     assert chain.endswith(",setsar=1,format=yuv420p")
 
 
-def test_production_base_video_chain_uses_viral_pop_polish():
+def test_production_base_video_finish_uses_viral_pop_polish():
     assert PRODUCTION_POLISH_PRESET == "VIRAL_POP"
 
     chain = base_video_filter_chain()
 
     assert chain.startswith(
-        "crop=if(gte(iw/ih\\,0.5625)\\,ih*0.5625\\,iw):"
-        "if(gte(iw/ih\\,0.5625)\\,ih\\,iw*1.7778):"
-        "(iw-ow)/2:(ih-oh)/2,"
-        "scale=1080:1920:flags=bicubic,"
         "eq=contrast=1.1800:brightness=0.0080:saturation=1.3000:gamma=0.9800,"
     )
     assert "colorbalance=rs=0.1200:rm=0.1200:rh=0.0600:bs=-0.1200:bm=-0.1200:bh=-0.0600" in chain
     assert "unsharp=5:5:0.7000:3:3:0.0000" in chain
     assert chain.endswith(",setsar=1,format=yuv420p")
+
+
+def test_standard_portrait_filter_complex_reuses_shared_blurred_composition():
+    plan = {
+        "source_width": 1920,
+        "source_height": 1080,
+        "active_rect": {"x": 240, "y": 0, "width": 1440, "height": 1080},
+        "content_x": 0,
+        "content_y": 555,
+        "content_width": 1080,
+        "content_height": 810,
+        "canvas_width": 1080,
+        "canvas_height": 1920,
+    }
+
+    chain = standard_portrait_filter_complex(plan)
+
+    assert chain.startswith("[0:v]crop=1440:1080:240:0[recap_active_src];")
+    assert "split=2" in chain
+    assert "gblur=sigma=" in chain
+    assert "overlay=0:555[recap_out]" in chain
+    assert "[recap_out]setsar=1,format=yuv420p[standard_out]" in chain
+    assert chain.count("eq=contrast=1.1800") == 1
 
 
 def test_existing_visual_fx_chain_keeps_baseline_and_semantic_events():

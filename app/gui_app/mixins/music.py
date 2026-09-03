@@ -16,6 +16,13 @@ from PySide6.QtWidgets import QFileDialog
 from ..constants import ROOT
 
 
+def music_picker_start_directory() -> Path:
+    """Prefer the project music library without retaining a prior browse path."""
+
+    music_directory = ROOT / "assets" / "music"
+    return music_directory if music_directory.is_dir() else ROOT
+
+
 class MusicMixin:
 
     def choose_music(self):
@@ -23,7 +30,7 @@ class MusicMixin:
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Choose Background Music",
-            str(ROOT),
+            str(music_picker_start_directory()),
             (
                 "Audio Files "
                 "(*.mp3 *.wav *.m4a *.aac *.flac *.ogg)"

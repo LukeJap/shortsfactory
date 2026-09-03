@@ -18,9 +18,65 @@ from PySide6.QtMultimedia import QMediaPlayer
 
 from ..helpers import format_precise_time, format_time
 from ..settings_keys import PREVIEW_VOLUME
+from standard_audio_pitch import build_standard_audio_pitch_filter
 
 
 class PlaybackMixin:
+
+    def standard_pitch_preview_enabled(self) -> bool:
+        return bool(
+            getattr(self, "recap_mode", "standard") == "standard"
+            and build_standard_audio_pitch_filter(
+                self.current_standard_audio_pitch_semitones()
+            )
+        )
+
+    def update_native_preview_audio_mute(self):
+        self.audio_output.setMuted(self.standard_pitch_preview_enabled())
+
+    def stop_standard_pitch_preview(self):
+        timer = getattr(self, "standard_pitch_preview_restart_timer", None)
+        if timer is not None:
+            timer.stop()
+        preview = getattr(self, "standard_pitch_preview", None)
+        if preview is not None:
+            preview.stop()
+
+    def restart_standard_pitch_preview(self):
+        if not self.standard_pitch_preview_enabled():
+            self.stop_standard_pitch_preview()
+            self.update_native_preview_audio_mute()
+            return
+        if (
+            not getattr(self, "video_path", None)
+            or self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
+        ):
+            return
+        preview = getattr(self, "standard_pitch_preview", None)
+        if preview is None:
+            return
+        started = preview.start(
+            self.video_path,
+            self.player.position(),
+            self.current_standard_audio_pitch_semitones(),
+            self.preview_volume / 100,
+        )
+        if started:
+            self.update_native_preview_audio_mute()
+        else:
+            # A missing/unreadable source must retain the normal Qt preview
+            # instead of becoming silent just because pitch was selected.
+            self.audio_output.setMuted(False)
+
+    def schedule_standard_pitch_preview_restart(self):
+        if getattr(self, "recap_mode", "standard") != "standard":
+            return
+        if not self.standard_pitch_preview_enabled():
+            self.stop_standard_pitch_preview()
+            self.update_native_preview_audio_mute()
+            return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.standard_pitch_preview_restart_timer.start()
 
     def configure_program_monitor_framing(self, source_path: Path):
         """Reuse Recap's active-picture geometry for the live monitor."""
@@ -74,6 +130,7 @@ class PlaybackMixin:
             return
 
         self.cancel_paused_seek_refresh()
+        self.stop_standard_pitch_preview()
         self.play_request_counter += 1
         if (
             hasattr(self, "clear_recap_artifact_context")
@@ -309,6 +366,8 @@ class PlaybackMixin:
 
             self.play_request_counter += 1
             self.player.pause()
+            self.stop_standard_pitch_preview()
+            self.update_native_preview_audio_mute()
 
         else:
 
@@ -320,9 +379,7 @@ class PlaybackMixin:
                     self.player.position()
                 )
             )
-            self.audio_output.setMuted(
-                False
-            )
+            self.update_native_preview_audio_mute()
 
             if (
                 self.player.duration() > 0
@@ -337,6 +394,7 @@ class PlaybackMixin:
             )
 
             self.player.play()
+            self.restart_standard_pitch_preview()
             self.update_play_button(
                 QMediaPlayer.PlaybackState.PlayingState
             )
@@ -407,9 +465,11 @@ class PlaybackMixin:
             and self.has_active_selection()
             and position >= self.end_ms - 45
         ):
+            self.stop_standard_pitch_preview()
             self.player.setPosition(
                 self.start_ms
             )
+            self.schedule_standard_pitch_preview_restart()
             self.timeline.setValue(
                 self.start_ms
             )
@@ -577,6 +637,9 @@ class PlaybackMixin:
         self.player.setPosition(
             position
         )
+        if was_playing:
+            self.stop_standard_pitch_preview()
+            self.schedule_standard_pitch_preview_restart()
 
         # Some Qt multimedia backends (confirmed: the FFmpeg-based one used
         # here) never repaint a paused video after a bare setPosition() --
@@ -598,9 +661,7 @@ class PlaybackMixin:
             QCoreApplication.processEvents()
 
             self.player.pause()
-            self.audio_output.setMuted(
-                False
-            )
+            self.update_native_preview_audio_mute()
             self.paused_seek_refresh_pending = False
 
     def finish_paused_seek(self):
@@ -608,18 +669,14 @@ class PlaybackMixin:
         if self.paused_seek_refresh_pending:
             self.player.pause()
 
-            self.audio_output.setMuted(
-                False
-            )
+            self.update_native_preview_audio_mute()
 
         self.paused_seek_refresh_pending = False
 
     def cancel_paused_seek_refresh(self):
 
         self.paused_seek_refresh_pending = False
-        self.audio_output.setMuted(
-            False
-        )
+        self.update_native_preview_audio_mute()
 
     def verify_playback_started(
         self,
@@ -1004,9 +1061,7 @@ class PlaybackMixin:
                     QCoreApplication.processEvents()
 
                     self.player.pause()
-                    self.audio_output.setMuted(
-                        False
-                    )
+                    self.update_native_preview_audio_mute()
                     self.paused_seek_refresh_pending = False
 
         self.timeline.set_selected_suggestion(
@@ -1169,6 +1224,9 @@ class PlaybackMixin:
             self.preview_volume
             / 100
         )
+        preview = getattr(self, "standard_pitch_preview", None)
+        if preview is not None:
+            preview.set_volume(self.preview_volume / 100)
         if hasattr(
             self,
             "sfx_preview_audio",

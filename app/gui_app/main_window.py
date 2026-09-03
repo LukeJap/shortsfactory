@@ -48,11 +48,24 @@ from PySide6.QtWidgets import (
 )
 
 from editor_asset_plan import load_editor_asset_plan
-from visual_emphasis import DEFAULT_ENERGY, normalize_energy, normalize_sfx_mode
+from visual_emphasis import (
+    DEFAULT_ENERGY,
+    auto_cut_aggression_from_energy,
+    coerce_auto_cut_aggression,
+    normalize_energy,
+    normalize_sfx_mode,
+)
+from visual_fx import coerce_visual_fx_strength, visual_fx_strength_from_energy
+from standard_audio_pitch import (
+    DEFAULT_STANDARD_AUDIO_PITCH_SEMITONES,
+    coerce_standard_audio_pitch,
+    format_standard_audio_pitch,
+)
 
 from .constants import ROOT
 from .settings_keys import (
     AUTO_CUTS_ENABLED,
+    AUTO_CUT_AGGRESSION,
     EDIT_ENERGY,
     EMOJI_ENABLED,
     FILTERS_ENABLED,
@@ -67,10 +80,13 @@ from .settings_keys import (
     RECAP_TARGET_DURATION_SECONDS,
     RECAP_VOICE,
     SFX_MODE,
+    STANDARD_AUDIO_PITCH_SEMITONES,
     TRANSCRIPTION_QUALITY,
+    VISUAL_FX_STRENGTH,
 )
 from .style import STYLESHEET
 from .timeline_widget import SuggestionSlider
+from .standard_pitch_preview import StandardPitchPreview
 from .widgets import (
     AspectRatioContainer,
     DropZone,
@@ -362,6 +378,18 @@ class ShortsFactoryWindow(
                 True,
             )
         ).strip().lower() not in ("false", "0", "")
+        stored_auto_cut_aggression = self.settings.value(AUTO_CUT_AGGRESSION, None)
+        self.auto_cut_aggression = (
+            auto_cut_aggression_from_energy(self.edit_energy)
+            if stored_auto_cut_aggression is None
+            else coerce_auto_cut_aggression(stored_auto_cut_aggression)
+        )
+        self.standard_audio_pitch_semitones = coerce_standard_audio_pitch(
+            self.settings.value(
+                STANDARD_AUDIO_PITCH_SEMITONES,
+                DEFAULT_STANDARD_AUDIO_PITCH_SEMITONES,
+            )
+        )
 
         self.filters_enabled = str(
             self.settings.value(
@@ -431,6 +459,12 @@ class ShortsFactoryWindow(
         self.recap_narration_pitch_semitones = max(
             pitch_low,
             min(pitch_high, self.recap_narration_pitch_semitones),
+        )
+        stored_visual_fx_strength = self.settings.value(VISUAL_FX_STRENGTH, None)
+        self.visual_fx_strength = (
+            visual_fx_strength_from_energy(self.edit_energy)
+            if stored_visual_fx_strength is None
+            else coerce_visual_fx_strength(stored_visual_fx_strength)
         )
         try:
             self.recap_source_pitch_semitones = float(
@@ -605,6 +639,13 @@ class ShortsFactoryWindow(
         )
 
         self.player = QMediaPlayer()
+        self.standard_pitch_preview = StandardPitchPreview(self)
+        self.standard_pitch_preview_restart_timer = QTimer(self)
+        self.standard_pitch_preview_restart_timer.setSingleShot(True)
+        self.standard_pitch_preview_restart_timer.setInterval(120)
+        self.standard_pitch_preview_restart_timer.timeout.connect(
+            self.restart_standard_pitch_preview
+        )
 
         self.player.setAudioOutput(
             self.audio_output
@@ -808,6 +849,62 @@ class ShortsFactoryWindow(
         auto_cuts_subtext.setWordWrap(True)
         edit_style_layout.addWidget(auto_cuts_subtext)
 
+        auto_cut_aggression_row = QVBoxLayout()
+        auto_cut_aggression_row.setSpacing(8)
+        auto_cut_aggression_header = QHBoxLayout()
+        auto_cut_aggression_header.setSpacing(8)
+        self.auto_cut_aggression_title = QLabel("AUTOCUT AGGRESSION")
+        self.auto_cut_aggression_title.setObjectName("TinyLabel")
+        self.auto_cut_aggression_label = QLabel(str(self.auto_cut_aggression))
+        self.auto_cut_aggression_label.setObjectName("MusicVolumeLabel")
+        self.auto_cut_aggression_slider = QSlider(Qt.Orientation.Horizontal)
+        self.auto_cut_aggression_slider.setObjectName("AutoCutAggressionSlider")
+        self.auto_cut_aggression_slider.setRange(0, 100)
+        self.auto_cut_aggression_slider.setValue(self.auto_cut_aggression)
+        self.auto_cut_aggression_slider.setToolTip(
+            "Controls only automatic pause and redundancy cuts. "
+            "25 matches Low, 50 matches Punchy, 75 matches Maximum."
+        )
+        self.auto_cut_aggression_slider.valueChanged.connect(
+            self.auto_cut_aggression_changed
+        )
+        auto_cut_aggression_header.addWidget(self.auto_cut_aggression_title)
+        auto_cut_aggression_header.addStretch()
+        auto_cut_aggression_header.addWidget(self.auto_cut_aggression_label)
+        auto_cut_aggression_row.addLayout(auto_cut_aggression_header)
+        auto_cut_aggression_row.addWidget(self.auto_cut_aggression_slider)
+        edit_style_layout.addLayout(auto_cut_aggression_row)
+
+        audio_pitch_row = QVBoxLayout()
+        audio_pitch_row.setSpacing(8)
+        audio_pitch_header = QHBoxLayout()
+        audio_pitch_header.setSpacing(8)
+        self.standard_audio_pitch_title = QLabel("AUDIO PITCH")
+        self.standard_audio_pitch_title.setObjectName("TinyLabel")
+        self.standard_audio_pitch_label = QLabel(
+            format_standard_audio_pitch(self.standard_audio_pitch_semitones)
+        )
+        self.standard_audio_pitch_label.setObjectName("MusicVolumeLabel")
+        self.standard_audio_pitch_slider = QSlider(Qt.Orientation.Horizontal)
+        self.standard_audio_pitch_slider.setObjectName("StandardAudioPitchSlider")
+        self.standard_audio_pitch_slider.setRange(-40, 40)
+        self.standard_audio_pitch_slider.setSingleStep(1)
+        self.standard_audio_pitch_slider.setValue(
+            round(self.standard_audio_pitch_semitones * 10)
+        )
+        self.standard_audio_pitch_slider.setToolTip(
+            "Pitch shift for Standard Mode source audio. It preserves playback speed and clip duration."
+        )
+        self.standard_audio_pitch_slider.valueChanged.connect(
+            self.standard_audio_pitch_changed
+        )
+        audio_pitch_header.addWidget(self.standard_audio_pitch_title)
+        audio_pitch_header.addStretch()
+        audio_pitch_header.addWidget(self.standard_audio_pitch_label)
+        audio_pitch_row.addLayout(audio_pitch_header)
+        audio_pitch_row.addWidget(self.standard_audio_pitch_slider)
+        edit_style_layout.addLayout(audio_pitch_row)
+
         edit_style_buttons = QVBoxLayout()
         edit_style_buttons.setSpacing(6)
 
@@ -847,6 +944,34 @@ class ShortsFactoryWindow(
             edit_style_buttons.addWidget(button)
 
         edit_style_layout.addLayout(edit_style_buttons)
+
+        visual_fx_strength_row = QVBoxLayout()
+        visual_fx_strength_row.setSpacing(8)
+        visual_fx_strength_header = QHBoxLayout()
+        visual_fx_strength_header.setSpacing(8)
+
+        self.visual_fx_strength_title = QLabel("VISUAL FX STRENGTH")
+        self.visual_fx_strength_title.setObjectName("TinyLabel")
+        self.visual_fx_strength_label = QLabel(str(self.visual_fx_strength))
+        self.visual_fx_strength_label.setObjectName("MusicVolumeLabel")
+        self.visual_fx_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.visual_fx_strength_slider.setObjectName("VisualFxStrengthSlider")
+        self.visual_fx_strength_slider.setRange(0, 100)
+        self.visual_fx_strength_slider.setValue(self.visual_fx_strength)
+        self.visual_fx_strength_slider.setToolTip(
+            "Controls only automatic semantic visual effects. "
+            "25 matches Low, 50 matches Punchy, 75 matches Maximum."
+        )
+        self.visual_fx_strength_slider.valueChanged.connect(
+            self.visual_fx_strength_changed
+        )
+
+        visual_fx_strength_header.addWidget(self.visual_fx_strength_title)
+        visual_fx_strength_header.addStretch()
+        visual_fx_strength_header.addWidget(self.visual_fx_strength_label)
+        visual_fx_strength_row.addLayout(visual_fx_strength_header)
+        visual_fx_strength_row.addWidget(self.visual_fx_strength_slider)
+        edit_style_layout.addLayout(visual_fx_strength_row)
 
         self.filters_button = QPushButton(
             "FILTERS: ON" if self.filters_enabled else "FILTERS: OFF"
@@ -1260,6 +1385,8 @@ class ShortsFactoryWindow(
         for control in (
             self.find_clips_button,
             self.auto_cuts_button,
+            self.auto_cut_aggression_slider,
+            self.standard_audio_pitch_slider,
             *self.edit_style_buttons.values(),
             self.filters_button,
             self.fx_intensity_slider,
@@ -1365,6 +1492,9 @@ class ShortsFactoryWindow(
         self.program_monitor_viewport.setObjectName("ProgramMonitorViewport")
 
         self.program_monitor_composition = ProgramMonitorComposition()
+        self.program_monitor_composition.overlay_stack_invalidated.connect(
+            self.restore_program_monitor_overlay_stack
+        )
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("VideoPreview")
         self.program_monitor_composition.set_foreground_video(self.video_widget)
@@ -1376,6 +1506,7 @@ class ShortsFactoryWindow(
             video_sink.videoFrameChanged.connect(
                 self.program_monitor_composition.set_background_frame
             )
+        self.refresh_program_monitor_filter_preview()
 
         playback = QHBoxLayout()
         playback.setSpacing(8)
@@ -1628,10 +1759,35 @@ class ShortsFactoryWindow(
         emoji_controls.addWidget(QLabel("Scale"), 0, 4)
         emoji_controls.addWidget(self.timeline_inspector_emoji_scale, 0, 5)
 
+        self.timeline_inspector_sfx_controls = QWidget()
+        sfx_controls = QHBoxLayout(self.timeline_inspector_sfx_controls)
+        sfx_controls.setContentsMargins(0, 0, 0, 0)
+        sfx_controls.setSpacing(7)
+        self.timeline_inspector_sfx_gain_slider = QSlider(Qt.Orientation.Horizontal)
+        self.timeline_inspector_sfx_gain_slider.setObjectName("SfxGainSlider")
+        self.timeline_inspector_sfx_gain_slider.setRange(-300, 120)
+        self.timeline_inspector_sfx_gain_slider.setSingleStep(5)
+        self.timeline_inspector_sfx_gain_slider.setToolTip("Selected SFX gain in decibels.")
+        self.timeline_inspector_sfx_gain_db = QDoubleSpinBox()
+        self.timeline_inspector_sfx_gain_db.setObjectName("SfxGainDb")
+        self.timeline_inspector_sfx_gain_db.setRange(-30.0, 12.0)
+        self.timeline_inspector_sfx_gain_db.setDecimals(1)
+        self.timeline_inspector_sfx_gain_db.setSingleStep(0.5)
+        self.timeline_inspector_sfx_gain_db.setSuffix(" dB")
+        self.timeline_inspector_sfx_gain_db.setMinimumWidth(82)
+        self.timeline_inspector_sfx_gain_slider.valueChanged.connect(
+            lambda value: self.timeline_inspector_sfx_gain_changed(value / 10.0)
+        )
+        self.timeline_inspector_sfx_gain_db.valueChanged.connect(self.timeline_inspector_sfx_gain_changed)
+        sfx_controls.addWidget(QLabel("Volume"))
+        sfx_controls.addWidget(self.timeline_inspector_sfx_gain_slider, 1)
+        sfx_controls.addWidget(self.timeline_inspector_sfx_gain_db)
+
         timeline_item_inspector_layout.addWidget(self.timeline_item_inspector_header)
         timeline_item_inspector_layout.addWidget(self.timeline_item_inspector_summary)
         timeline_item_inspector_layout.addLayout(inspector_common)
         timeline_item_inspector_layout.addWidget(self.timeline_inspector_emoji_controls)
+        timeline_item_inspector_layout.addWidget(self.timeline_inspector_sfx_controls)
         timeline_panel_layout.addWidget(self.timeline_item_inspector)
 
         self.suggestions_label = QLabel("AI clips appear as purple ranges on V1. Click a range to load that pick, then drag IN / OUT handles to tune the cut.")
@@ -1815,17 +1971,6 @@ class ShortsFactoryWindow(
             QSizePolicy.Policy.Preferred,
         )
 
-        self.sfx_volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self.sfx_volume_slider.setObjectName("MusicVolumeSlider")
-        self.sfx_volume_slider.setRange(0, 80)
-        self.sfx_volume_slider.setValue(25)
-        self.sfx_volume_slider.setFixedWidth(96)
-        self.sfx_volume_slider.setEnabled(False)
-        self.sfx_volume_slider.setToolTip(
-            "Selected SFX clip volume. This affects preview and final SFX mix."
-        )
-        self.sfx_volume_slider.valueChanged.connect(self.sfx_volume_changed)
-
         self.swap_sfx_button = QPushButton("Swap")
         self.swap_sfx_button.setObjectName("QuietButton")
         self.swap_sfx_button.setEnabled(False)
@@ -1846,7 +1991,6 @@ class ShortsFactoryWindow(
 
         sfx_context_layout.addWidget(sfx_selected_label)
         sfx_context_layout.addWidget(self.sfx_clip_label, 1)
-        sfx_context_layout.addWidget(self.sfx_volume_slider)
         sfx_context_layout.addWidget(self.swap_sfx_button)
         sfx_context_layout.addWidget(self.disable_sfx_button)
         sfx_context_layout.addWidget(self.delete_sfx_button)
@@ -1919,6 +2063,7 @@ class ShortsFactoryWindow(
         audio_layout.addLayout(audio_music_volume_row)
         audio_layout.addWidget(self.narrator_button)
         audio_layout.addWidget(self.sfx_context_frame)
+        audio_layout.addWidget(self.emoji_context_frame)
 
         log_frame = QFrame()
         log_frame.setObjectName("RenderLogPanel")

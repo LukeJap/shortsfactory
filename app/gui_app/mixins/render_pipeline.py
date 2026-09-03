@@ -758,10 +758,9 @@ class RenderPipelineMixin:
             duration_seconds
         )
 
-        # Feed the original source directly to the renderer; render.py owns
-        # the final 9:16 crop-to-fill composition (scales up and
-        # center-crops to cover the frame edge-to-edge, no letterboxing --
-        # see render_base_video()).
+        # Feed the original source directly to the renderer. render.py owns
+        # the shared source-aware 9:16 composition used by Standard and
+        # Recap: active foreground picture over a moving blurred background.
         self.pending_render_source = None
 
         self.start_render_progress(
@@ -839,11 +838,11 @@ class RenderPipelineMixin:
             )
 
         self.render_log.append(
-            "=== PRE-RENDER: 9:16 CROP-TO-FILL ==="
+            "=== PRE-RENDER: SHARED 9:16 PORTRAIT FRAMING ==="
         )
         self.render_log.append(
-            "Scaling up and center-cropping to fill the frame edge-to-edge; "
-            "left/right (or top/bottom) source edges outside 9:16 will be cut off."
+            "Cropping only embedded pillarbox bars, then keeping the active "
+            "source picture sharp over a moving blurred source background."
         )
 
         self.start_main_render(

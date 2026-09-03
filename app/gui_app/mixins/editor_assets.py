@@ -45,7 +45,12 @@ from recap_media.effects import (
 )
 from emoji_overlay import normalize_emoji
 from make_captions import load_local_reaction_assets
-from sfx_engine import asset_metadata_for_path
+from sfx_engine import (
+    asset_metadata_for_path,
+    clamp_sfx_gain_db,
+    sfx_gain_db_for_clip,
+    sfx_linear_gain_for_clip,
+)
 
 from ..constants import ROOT
 
@@ -449,6 +454,7 @@ class EditorAssetsMixin:
             self.timeline_inspector_duration.setVisible(not is_source)
             self.timeline_inspector_locked.setVisible(not is_source)
             self.timeline_inspector_emoji_controls.setVisible(kind == "EMOJI")
+            self.timeline_inspector_sfx_controls.setVisible(kind == "SFX")
 
             if kind == "EMOJI" and clip is not None:
                 self.timeline_inspector_emoji_x.setValue(
@@ -460,6 +466,14 @@ class EditorAssetsMixin:
                 self.timeline_inspector_emoji_scale.setValue(
                     self._timeline_item_seconds(clip.get("scale"), 1.0)
                 )
+            elif kind == "SFX" and clip is not None:
+                gain_db = sfx_gain_db_for_clip(clip)
+                self.timeline_inspector_sfx_gain_slider.blockSignals(True)
+                self.timeline_inspector_sfx_gain_db.blockSignals(True)
+                self.timeline_inspector_sfx_gain_slider.setValue(round(gain_db * 10))
+                self.timeline_inspector_sfx_gain_db.setValue(gain_db)
+                self.timeline_inspector_sfx_gain_slider.blockSignals(False)
+                self.timeline_inspector_sfx_gain_db.blockSignals(False)
 
             self.timeline_item_inspector.setVisible(True)
         finally:
@@ -524,6 +538,19 @@ class EditorAssetsMixin:
         clip["position_y"] = round(float(self.timeline_inspector_emoji_y.value()), 3)
         clip["scale"] = round(float(self.timeline_inspector_emoji_scale.value()), 2)
         self.commit_timeline_item_inspector_clip(clip)
+
+
+    def timeline_inspector_sfx_gain_changed(self, value: float):
+        if getattr(self, "updating_timeline_item_inspector", False):
+            return
+        clip = self.selected_timeline_item_clip()
+        if clip is None or str(clip.get("kind", "")).upper() != "SFX":
+            return
+        clip["gain_db"] = round(clamp_sfx_gain_db(value), 1)
+        # An explicit editor adjustment supersedes the legacy linear field.
+        clip.pop("volume", None)
+        self.commit_timeline_item_inspector_clip(clip)
+        self.play_sfx_preview_clip(clip)
 
 
     def editor_asset_clip_selected(
@@ -809,7 +836,6 @@ class EditorAssetsMixin:
             self.swap_sfx_button.setEnabled(False)
             self.disable_sfx_button.setEnabled(False)
             self.delete_sfx_button.setEnabled(False)
-            self.sfx_volume_slider.setEnabled(False)
             self.disable_sfx_button.setText("Disable")
             return
 
@@ -838,38 +864,6 @@ class EditorAssetsMixin:
             is False
             else "Disable"
         )
-
-        try:
-            volume = float(
-                clip.get(
-                    "volume",
-                    0.25,
-                )
-                or 0.25
-            )
-        except (
-            TypeError,
-            ValueError,
-        ):
-            volume = 0.25
-        self.sfx_volume_slider.blockSignals(True)
-        self.sfx_volume_slider.setValue(
-            int(
-                round(
-                    max(
-                        0.0,
-                        min(
-                            0.8,
-                            volume,
-                        ),
-                    )
-                    * 100
-                )
-            )
-        )
-        self.sfx_volume_slider.blockSignals(False)
-        self.sfx_volume_slider.setEnabled(True)
-
 
     def available_sfx_files(self) -> list[Path]:
 
@@ -1057,38 +1051,6 @@ class EditorAssetsMixin:
         self.selected_sfx_clip_id = None
         self.save_editor_asset_plan_state()
         self.refresh_editor_asset_timeline()
-
-
-    def sfx_volume_changed(
-        self,
-        value: int,
-    ):
-
-        clip = self.selected_sfx_clip()
-        if clip is None:
-            return
-
-        clip["volume"] = round(
-            max(
-                0,
-                min(
-                    80,
-                    int(
-                        value
-                    ),
-                ),
-            )
-            / 100,
-            3,
-        )
-        clip["manual_override"] = True
-        clip["locked"] = True
-        self.editor_asset_plan = upsert_clip(
-            self.editor_asset_plan,
-            clip,
-        )
-        self.save_editor_asset_plan_state()
-        self.update_sfx_inspector()
 
 
     def update_emoji_inspector(self):
@@ -1375,26 +1337,12 @@ class EditorAssetsMixin:
         if not asset_path.exists():
             return
 
-        try:
-            volume = float(
-                clip.get(
-                    "volume",
-                    0.25,
-                )
-                or 0.25
-            )
-        except (
-            TypeError,
-            ValueError,
-        ):
-            volume = 0.25
-
         self.sfx_preview_audio.setVolume(
             max(
                 0.0,
                 min(
                     1.0,
-                    volume
+                    sfx_linear_gain_for_clip(clip)
                     * max(
                         0.0,
                         min(

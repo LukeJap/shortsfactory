@@ -21,12 +21,18 @@ from typing import Any
 
 try:
     from .visual_emphasis import (
+        auto_cut_aggression_from_energy,
+        auto_cut_profile,
+        coerce_auto_cut_aggression,
         energy_profile,
         load_render_settings,
         normalize_energy,
     )
 except ImportError:
     from visual_emphasis import (
+        auto_cut_aggression_from_energy,
+        auto_cut_profile,
+        coerce_auto_cut_aggression,
         energy_profile,
         load_render_settings,
         normalize_energy,
@@ -1461,19 +1467,28 @@ def load_and_merge_cuts(
             "PUNCHY",
         )
     )
-    profile = energy_profile(
-        energy
+    raw_aggression = settings.get("auto_cut_aggression")
+    aggression = (
+        auto_cut_aggression_from_energy(energy)
+        if raw_aggression is None
+        else coerce_auto_cut_aggression(raw_aggression)
     )
+    profile = auto_cut_profile(aggression)
 
-    pause_cuts, semantic_cuts, automatic_warning = (
-        apply_automatic_cut_safety(
+    if aggression <= 0:
+        pause_cuts = []
+        semantic_cuts = []
+
+    if aggression > 0:
+        pause_cuts, semantic_cuts, automatic_warning = apply_automatic_cut_safety(
             pause_cuts,
             semantic_cuts,
             duration,
             profile=profile,
             energy=energy,
         )
-    )
+    else:
+        automatic_warning = None
 
     manual_cuts = manual_cuts_relative_to_base(
         manual_plan,

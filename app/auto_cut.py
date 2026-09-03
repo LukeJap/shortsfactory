@@ -27,13 +27,17 @@ from pathlib import Path
 
 try:
     from .visual_emphasis import (
-        energy_profile,
+        auto_cut_aggression_from_energy,
+        auto_cut_profile,
+        coerce_auto_cut_aggression,
         load_render_settings,
         normalize_energy,
     )
 except ImportError:
     from visual_emphasis import (
-        energy_profile,
+        auto_cut_aggression_from_energy,
+        auto_cut_profile,
+        coerce_auto_cut_aggression,
         load_render_settings,
         normalize_energy,
     )
@@ -361,9 +365,13 @@ def main() -> int:
             "PUNCHY",
         )
     )
-    profile = energy_profile(
-        energy
+    raw_aggression = settings.get("auto_cut_aggression")
+    aggression = (
+        auto_cut_aggression_from_energy(energy)
+        if raw_aggression is None
+        else coerce_auto_cut_aggression(raw_aggression)
     )
+    profile = auto_cut_profile(aggression)
 
     min_gap_to_edit = float(
         profile.get(
@@ -385,6 +393,7 @@ def main() -> int:
     print(
         f"Edit style: {energy}"
     )
+    print(f"AutoCut aggression: {aggression}")
     print(
         "Pause rule: edit gaps >= "
         f"{min_gap_to_edit:.2f}s and retain "
@@ -392,10 +401,14 @@ def main() -> int:
     )
     print()
 
-    cuts = detect_pause_cuts(
-        words,
-        min_gap_to_edit=min_gap_to_edit,
-        keep_gap_seconds=keep_gap_seconds,
+    cuts = (
+        []
+        if aggression <= 0
+        else detect_pause_cuts(
+            words,
+            min_gap_to_edit=min_gap_to_edit,
+            keep_gap_seconds=keep_gap_seconds,
+        )
     )
 
     # Apply the same natural pacing guard STEP 5 (apply_smart_edit.py)
@@ -441,6 +454,7 @@ def main() -> int:
     edit_plan = {
         "mode": "light",
         "edit_energy": energy,
+        "auto_cut_aggression": aggression,
         "pause_settings": {
             "minimum_gap_seconds": round(
                 min_gap_to_edit,

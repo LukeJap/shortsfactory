@@ -4,7 +4,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QMouseEvent, QPixmap
 from PySide6.QtWidgets import QApplication, QSplitter
 
 from gui_app.main_window import ShortsFactoryWindow
@@ -130,6 +131,151 @@ def test_program_monitor_active_picture_crop_fills_width_without_side_matte():
         _close(app, window)
 
 
+def test_program_monitor_filter_preview_uses_shared_grade_values():
+    app, window = _window()
+    try:
+        composition = window.program_monitor_composition
+        source = QPixmap(48, 48)
+        source.fill(QColor(70, 155, 220))
+
+        composition.set_filter_preview(enabled=False, energy="PUNCHY", intensity=2.0)
+        neutral = composition._filtered_preview_pixmap(source).toImage().pixelColor(24, 24)
+        assert neutral == source.toImage().pixelColor(24, 24)
+
+        composition.set_filter_preview(enabled=True, energy="PUNCHY", intensity=1.0)
+        normal = composition._filtered_preview_pixmap(source).toImage().pixelColor(24, 24)
+        composition.set_filter_preview(enabled=True, energy="PUNCHY", intensity=2.0)
+        assert composition._filter_refresh_timer.isActive()
+        aggressive = composition._filtered_preview_pixmap(source).toImage().pixelColor(24, 24)
+
+        assert normal != neutral
+        assert aggressive != normal
+    finally:
+        _close(app, window)
+
+
+def test_program_monitor_filter_preview_never_processes_the_blurred_background():
+    app, window = _window()
+    try:
+        composition = window.program_monitor_composition
+        composition.resize(48, 80)
+        source = QPixmap(48, 48)
+        source.fill(QColor(70, 155, 220))
+        composition._background_frame = source
+        calls = []
+        composition._filtered_preview_pixmap = lambda pixmap: calls.append(pixmap) or pixmap
+
+        composition._update_background_pixmap(source)
+
+        assert calls == []
+    finally:
+        _close(app, window)
+
+
+def test_filter_controls_refresh_the_program_monitor_preview_immediately():
+    app, window = _window()
+    try:
+        calls = []
+        window.program_monitor_composition.set_filter_preview = lambda **values: calls.append(values)
+        window.save_render_settings = lambda: None
+
+        window.fx_intensity_changed(150)
+        assert calls[-1] == {
+            "enabled": window.current_filters_enabled(),
+            "energy": window.current_edit_energy(),
+            "intensity": 1.5,
+        }
+
+        window.filters_toggled(False)
+        assert calls[-1]["enabled"] is False
+        assert calls[-1]["intensity"] == 1.5
+    finally:
+        _close(app, window)
+
+
+def test_visual_fx_strength_slider_is_independent_from_edit_style_tier():
+    app, window = _window()
+    try:
+        class SettingsStub:
+            def __init__(self):
+                self.values = {}
+
+            def setValue(self, key, value):
+                self.values[key] = value
+
+        settings = SettingsStub()
+        window.settings = settings
+        window.save_render_settings = lambda: None
+        original_energy = window.current_edit_energy()
+
+        assert window.visual_fx_strength_slider.minimum() == 0
+        assert window.visual_fx_strength_slider.maximum() == 100
+
+        window.visual_fx_strength_slider.setValue(100)
+
+        assert window.current_visual_fx_strength() == 100
+        assert window.visual_fx_strength_label.text() == "100"
+        assert window.current_edit_energy() == original_energy
+        assert settings.values["render/visual_fx_strength"] == 100
+    finally:
+        _close(app, window)
+
+
+def test_auto_cut_aggression_slider_is_independent_from_edit_style_tier():
+    app, window = _window()
+    try:
+        class SettingsStub:
+            def __init__(self):
+                self.values = {}
+
+            def setValue(self, key, value):
+                self.values[key] = value
+
+        settings = SettingsStub()
+        window.settings = settings
+        window.save_render_settings = lambda: None
+        original_energy = window.current_edit_energy()
+
+        assert window.auto_cut_aggression_slider.minimum() == 0
+        assert window.auto_cut_aggression_slider.maximum() == 100
+
+        window.auto_cut_aggression_slider.setValue(100)
+
+        assert window.current_auto_cut_aggression() == 100
+        assert window.auto_cut_aggression_label.text() == "100"
+        assert window.current_edit_energy() == original_energy
+        assert settings.values["render/auto_cut_aggression"] == 100
+    finally:
+        _close(app, window)
+
+
+def test_standard_audio_pitch_slider_persists_without_changing_edit_style():
+    app, window = _window()
+    try:
+        class SettingsStub:
+            def __init__(self):
+                self.values = {}
+
+            def setValue(self, key, value):
+                self.values[key] = value
+
+        settings = SettingsStub()
+        window.settings = settings
+        window.save_render_settings = lambda: None
+        original_energy = window.current_edit_energy()
+
+        assert window.standard_audio_pitch_slider.minimum() == -40
+        assert window.standard_audio_pitch_slider.maximum() == 40
+        window.standard_audio_pitch_slider.setValue(18)
+
+        assert window.current_standard_audio_pitch_semitones() == 1.8
+        assert window.standard_audio_pitch_label.text() == "+1.8 st"
+        assert settings.values["render/standard_audio_pitch_semitones"] == 1.8
+        assert window.current_edit_energy() == original_energy
+    finally:
+        _close(app, window)
+
+
 def test_program_monitor_title_and_preview_only_shorts_shell_are_independent():
     app, window = _window()
     try:
@@ -158,6 +304,30 @@ def test_program_monitor_title_and_preview_only_shorts_shell_are_independent():
         app.processEvents()
         assert not window.youtube_shorts_mock_overlay.isVisible()
         assert window.persistent_title_preview_label.isVisible()
+    finally:
+        _close(app, window)
+
+
+def test_foreground_preview_restore_keeps_persistent_title_above_decoded_frame():
+    app, window = _window()
+    try:
+        window.save_editor_asset_plan_state = lambda: None
+        window.editor_asset_plan = {"version": 1, "clips": []}
+        window.resize(1600, 900)
+        window.show()
+        window.persistent_title_input.setText("Gary chooses Patrick")
+        window.youtube_ui_preview_toggle.setChecked(False)
+        app.processEvents()
+
+        composition = window.program_monitor_composition
+        title = window.persistent_title_preview_label
+        title_point = title.geometry().center()
+
+        composition.foreground_preview.raise_()
+        assert composition.childAt(title_point) is composition.foreground_preview
+
+        composition.overlay_stack_invalidated.emit()
+        assert composition.childAt(title_point) is title
     finally:
         _close(app, window)
 
@@ -536,11 +706,16 @@ def test_timeline_item_inspector_switches_by_selected_asset_kind_and_clears():
         assert window.timeline_item_inspector_header.text().startswith("SELECTED: SFX")
         assert "whoosh.wav" in window.timeline_item_inspector_summary.text()
         assert not window.timeline_inspector_emoji_controls.isVisible()
+        assert not window.timeline_inspector_sfx_controls.isHidden()
+        assert window.timeline_inspector_sfx_gain_db.value() == 0.0
 
         window.editor_asset_clip_selected("EMOJI", "emoji")
         assert window.timeline_item_inspector_header.text().startswith("SELECTED: EMOJI")
         assert not window.timeline_inspector_emoji_controls.isHidden()
+        assert window.timeline_inspector_sfx_controls.isHidden()
         assert window.timeline_inspector_emoji_x.value() == 0.25
+        assert window.emoji_context_frame.parentWidget() is not None
+        assert not window.emoji_context_frame.isWindow()
 
         window.editor_asset_clip_selected("RECAP_MOTION", "motion")
         assert window.timeline_item_inspector_header.text().startswith("SELECTED: SMART MOTION")
@@ -561,6 +736,29 @@ def test_timeline_item_inspector_switches_by_selected_asset_kind_and_clears():
         window.timeline.assetClipSelected.emit("", "")
         assert window.timeline_item_inspector.isHidden()
         assert window.timeline.selected_asset_clip_id is None
+    finally:
+        _close(app, window)
+
+
+def test_timeline_sfx_gain_marks_only_the_selected_clip_as_manual_locked():
+    app, window = _window()
+    try:
+        clips = _timeline_inspector_clips()
+        clips.append({"id": "second-sfx", "kind": "SFX", "start": 7.0, "end": 7.2, "gain_db": 0.0})
+        window.editor_asset_plan = {"version": 1, "clips": clips}
+        window.save_editor_asset_plan_state = lambda: None
+        window.editor_asset_clip_selected("SFX", "sfx")
+
+        window.timeline_inspector_sfx_gain_db.setValue(-12.0)
+
+        selected = window.find_editor_clip("SFX", "sfx")
+        untouched = window.find_editor_clip("SFX", "second-sfx")
+        assert selected is not None and untouched is not None
+        assert selected["gain_db"] == -12.0
+        assert "volume" not in selected
+        assert selected["manual_override"] is True
+        assert selected["locked"] is True
+        assert untouched["gain_db"] == 0.0
     finally:
         _close(app, window)
 
@@ -586,5 +784,115 @@ def test_timeline_item_inspector_preserves_manual_override_for_existing_emoji_ed
         assert clip["manual_override"] is True
         assert clip["locked"] is True
         assert window.timeline.selected_asset_clip_id == "emoji"
+    finally:
+        _close(app, window)
+
+
+def _timeline_asset_center(timeline, clip):
+    x, y, width, height = timeline.asset_clip_geometry(clip)
+    return QPoint(round(x + width / 2), round(y + height / 2))
+
+
+def _timeline_mouse_event(event_type, position, *, buttons=Qt.MouseButton.LeftButton):
+    point = QPointF(position)
+    return QMouseEvent(
+        event_type,
+        point,
+        point,
+        point,
+        Qt.MouseButton.LeftButton,
+        buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def test_emoji_timeline_clicks_select_without_swap_and_double_click_swaps_once():
+    app, window = _window()
+    try:
+        clips = _timeline_inspector_clips()
+        emoji = next(clip for clip in clips if clip["kind"] == "EMOJI")
+        window.editor_asset_plan = {"version": 1, "clips": clips}
+        window.timeline.setRange(0, 10_000)
+        window.timeline.fit_source()
+        window.timeline.set_asset_clips(clips)
+        swaps = []
+        window.swap_selected_emoji_clip = lambda: swaps.append(window.selected_emoji_clip_id)
+        position = _timeline_asset_center(window.timeline, emoji)
+
+        window.timeline.mousePressEvent(_timeline_mouse_event(QEvent.Type.MouseButtonPress, position))
+        window.timeline.mouseReleaseEvent(_timeline_mouse_event(QEvent.Type.MouseButtonRelease, position, buttons=Qt.MouseButton.NoButton))
+        window.timeline.mousePressEvent(_timeline_mouse_event(QEvent.Type.MouseButtonPress, position))
+        window.timeline.mouseReleaseEvent(_timeline_mouse_event(QEvent.Type.MouseButtonRelease, position, buttons=Qt.MouseButton.NoButton))
+        assert window.timeline.selected_asset_clip_id == "emoji"
+        assert window.selected_emoji_clip_id == "emoji"
+        assert swaps == []
+
+        window.timeline.mouseDoubleClickEvent(_timeline_mouse_event(QEvent.Type.MouseButtonDblClick, position))
+        assert swaps == ["emoji"]
+        assert window.timeline.selected_asset_clip_id == "emoji"
+    finally:
+        _close(app, window)
+
+
+def test_emoji_drag_and_resize_never_emit_swap_and_preserve_manual_edits():
+    app, window = _window()
+    try:
+        clips = _timeline_inspector_clips()
+        emoji = next(clip for clip in clips if clip["kind"] == "EMOJI")
+        window.editor_asset_plan = {"version": 1, "clips": clips}
+        window.save_editor_asset_plan_state = lambda: None
+        window.timeline.setRange(0, 10_000)
+        window.timeline.fit_source()
+        window.timeline.set_asset_clips(clips)
+        swaps = []
+        window.swap_selected_emoji_clip = lambda: swaps.append(window.selected_emoji_clip_id)
+        x, y, width, height = window.timeline.asset_clip_geometry(emoji)
+        body = QPoint(round(x + width / 2), round(y + height / 2))
+        moved = QPoint(body.x() + 24, body.y())
+        window.timeline.mousePressEvent(_timeline_mouse_event(QEvent.Type.MouseButtonPress, body))
+        window.timeline.mouseMoveEvent(_timeline_mouse_event(QEvent.Type.MouseMove, moved))
+        window.timeline.mouseReleaseEvent(_timeline_mouse_event(QEvent.Type.MouseButtonRelease, moved, buttons=Qt.MouseButton.NoButton))
+
+        moved_clip = window.find_editor_clip("EMOJI", "emoji")
+        assert moved_clip is not None
+        assert moved_clip["manual_override"] is True
+        assert moved_clip["locked"] is True
+        assert swaps == []
+
+        x, y, width, height = window.timeline.asset_clip_geometry(moved_clip)
+        end_handle = QPoint(round(x + width - 2), round(y + height / 2))
+        resized = QPoint(end_handle.x() + 18, end_handle.y())
+        window.timeline.mousePressEvent(_timeline_mouse_event(QEvent.Type.MouseButtonPress, end_handle))
+        window.timeline.mouseMoveEvent(_timeline_mouse_event(QEvent.Type.MouseMove, resized))
+        window.timeline.mouseReleaseEvent(_timeline_mouse_event(QEvent.Type.MouseButtonRelease, resized, buttons=Qt.MouseButton.NoButton))
+        assert swaps == []
+    finally:
+        _close(app, window)
+
+
+def test_non_emoji_timeline_double_click_never_requests_emoji_swap():
+    app, window = _window()
+    try:
+        clips = _timeline_inspector_clips()
+        window.editor_asset_plan = {"version": 1, "clips": clips}
+        window.save_editor_asset_plan_state = lambda: None
+        window.timeline.setRange(0, 10_000)
+        window.timeline.fit_source()
+        window.timeline.set_asset_clips(clips)
+        swaps = []
+        window.swap_selected_emoji_clip = lambda: swaps.append("emoji")
+        window.swap_selected_sfx_clip = lambda: swaps.append("sfx")
+        for kind in ("SFX", "RECAP_MOTION", "RECAP_VISUAL_FX", "VOICEOVER"):
+            clip = next(candidate for candidate in clips if candidate["kind"] == kind)
+            window.timeline.mouseDoubleClickEvent(
+                _timeline_mouse_event(QEvent.Type.MouseButtonDblClick, _timeline_asset_center(window.timeline, clip))
+            )
+
+        empty_position = QPoint(window.timeline.width() - 4, window.timeline.height() - 4)
+        window.timeline.mouseDoubleClickEvent(
+            _timeline_mouse_event(QEvent.Type.MouseButtonDblClick, empty_position)
+        )
+
+        assert swaps == ["sfx"]
     finally:
         _close(app, window)

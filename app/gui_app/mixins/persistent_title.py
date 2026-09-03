@@ -156,17 +156,39 @@ class PersistentTitleMixin:
         anchor_y = canvas_y + round(canvas_height * state["y"])
         label.move(anchor_x - width // 2, anchor_y)
         label.show()
-        label.raise_()
-        self.layout_persistent_title_resize_handles()
-
-        # Captions stay above export content; mock chrome is above both.
-        caption = getattr(self, "caption_preview_label", None)
-        if caption is not None and caption.isVisible():
-            caption.raise_()
         self.update_youtube_ui_preview()
+        self.restore_program_monitor_overlay_stack()
         # Editor-only handles stay visible while a title is selected even
         # though the preview-only platform chrome is the top content layer.
         self.layout_persistent_title_resize_handles()
+
+    def restore_program_monitor_overlay_stack(self):
+        """Restore monitor overlays after the decoded foreground is raised."""
+
+        title = getattr(self, "persistent_title_preview_label", None)
+        if title is not None and title.isVisible():
+            title.raise_()
+
+        caption = getattr(self, "caption_preview_label", None)
+        if caption is not None and caption.isVisible():
+            caption.raise_()
+
+        mock_ui = getattr(self, "youtube_shorts_mock_overlay", None)
+        if mock_ui is not None and mock_ui.isVisible():
+            mock_ui.raise_()
+
+        for handle in getattr(self, "persistent_title_resize_handles", {}).values():
+            if handle.isVisible():
+                handle.raise_()
+        for handle in getattr(self, "caption_resize_handles", {}).values():
+            if handle.isVisible():
+                handle.raise_()
+        readout = getattr(self, "persistent_title_resize_readout", None)
+        if readout is not None and readout.isVisible():
+            readout.raise_()
+        readout = getattr(self, "caption_resize_readout", None)
+        if readout is not None and readout.isVisible():
+            readout.raise_()
 
     def set_youtube_ui_preview_enabled(self, enabled: bool):
         self.youtube_ui_preview_enabled = bool(enabled)

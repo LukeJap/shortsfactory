@@ -103,6 +103,43 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".flac",
 }
 
+# The editor stores per-SFX adjustment in dB. Legacy plans may still carry
+# the old linear ``volume`` multiplier; it is read only as a compatibility
+# fallback so reopening an older project does not change its audible level.
+SFX_GAIN_DB_MIN = -30.0
+SFX_GAIN_DB_MAX = 12.0
+DEFAULT_SFX_GAIN_DB = 0.0
+MAX_SFX_LINEAR_GAIN = 10 ** (SFX_GAIN_DB_MAX / 20.0)
+
+
+def clamp_sfx_gain_db(value: Any) -> float:
+    try:
+        gain_db = float(value)
+    except (TypeError, ValueError):
+        gain_db = DEFAULT_SFX_GAIN_DB
+    return max(SFX_GAIN_DB_MIN, min(SFX_GAIN_DB_MAX, gain_db))
+
+
+def sfx_gain_db_for_clip(clip: dict[str, Any]) -> float:
+    if "gain_db" in clip:
+        return clamp_sfx_gain_db(clip.get("gain_db"))
+    try:
+        legacy_volume = max(0.0, float(clip.get("volume", 1.0)))
+    except (TypeError, ValueError):
+        legacy_volume = 1.0
+    if legacy_volume <= 0.0:
+        return SFX_GAIN_DB_MIN
+    return clamp_sfx_gain_db(20.0 * math.log10(legacy_volume))
+
+
+def sfx_linear_gain_for_clip(clip: dict[str, Any]) -> float:
+    if "gain_db" in clip:
+        return min(MAX_SFX_LINEAR_GAIN, 10 ** (sfx_gain_db_for_clip(clip) / 20.0))
+    try:
+        return max(0.0, min(MAX_SFX_LINEAR_GAIN, float(clip.get("volume", 1.0))))
+    except (TypeError, ValueError):
+        return 1.0
+
 # Deliberately separate from visual_emphasis.py's ENERGY_PROFILES (the
 # canonical LOW/PUNCHY/MAXIMUM energy-tier table used for captions/visual
 # grade/motion) -- SFX event density and volume are tuned independently
@@ -2919,6 +2956,14 @@ def sfx_clip_from_event(
         ),
     }
 
+    gain_db = (
+        clamp_sfx_gain_db(event.get("gain_db"))
+        if "gain_db" in event
+        else clamp_sfx_gain_db(
+            20.0 * math.log10(max(0.0001, float(event.get("volume", 1.0) or 1.0)))
+        )
+    )
+
     return {
         "id": str(
             event.get(
@@ -2991,13 +3036,7 @@ def sfx_clip_from_event(
             )
             or ""
         ),
-        "volume": float(
-            event.get(
-                "volume",
-                0.25,
-            )
-            or 0.25
-        ),
+        "gain_db": round(gain_db, 1),
         "active": bool(
             event.get(
                 "active",
@@ -3221,19 +3260,8 @@ def event_from_sfx_clip(
             )
             or ""
         ),
-        "volume": max(
-            0.0,
-            min(
-                0.8,
-                as_float(
-                    clip.get(
-                        "volume",
-                        0.25,
-                    ),
-                    0.25,
-                ),
-            ),
-        ),
+        "gain_db": round(sfx_gain_db_for_clip(clip), 1),
+        "volume": sfx_linear_gain_for_clip(clip),
         "asset_path": asset_path,
         "asset_source": str(
             clip.get(
@@ -3371,7 +3399,7 @@ def build_sfx_mix_filter_complex(
         delay_ms = max(0, int(round(float(event.get("start", 0.0)) * 1000)))
         duration = max(0.06, float(event.get("duration", 0.25)))
         trim_in = max(0.0, float(event.get("trim_in", 0.0) or 0.0))
-        volume = max(0.0, min(0.8, float(event.get("volume", 0.25))))
+        volume = max(0.0, min(MAX_SFX_LINEAR_GAIN, float(event.get("volume", 1.0))))
         label = f"sfx{offset}"
         filter_parts.append(
             (

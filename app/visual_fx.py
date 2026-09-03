@@ -565,26 +565,100 @@ def stack_id_for_moment(
     )
 
 
+VISUAL_FX_STRENGTH_BY_ENERGY = {
+    "LOW": 25,
+    "PUNCHY": 50,
+    "MAXIMUM": 75,
+}
+
+
+def coerce_visual_fx_strength(value: Any) -> int:
+    if isinstance(value, str):
+        legacy_energy = value.strip().upper()
+        if legacy_energy in VISUAL_FX_STRENGTH_BY_ENERGY:
+            return VISUAL_FX_STRENGTH_BY_ENERGY[legacy_energy]
+    try:
+        return min(100, max(0, int(round(float(value)))))
+    except (TypeError, ValueError, OverflowError):
+        return VISUAL_FX_STRENGTH_BY_ENERGY[DEFAULT_ENERGY]
+
+
+def visual_fx_strength_from_energy(energy: Any) -> int:
+    return VISUAL_FX_STRENGTH_BY_ENERGY[normalize_energy(energy)]
+
+
+def visual_fx_energy_for_strength(strength: Any) -> str:
+    value = coerce_visual_fx_strength(strength)
+    if value <= 37:
+        return "LOW"
+    if value <= 62:
+        return "PUNCHY"
+    return "MAXIMUM"
+
+
+def _interpolate_visual_fx_strength(
+    strength: int,
+    anchors: tuple[tuple[int, float], ...],
+) -> float:
+    for (left_strength, left_value), (right_strength, right_value) in zip(anchors, anchors[1:]):
+        if strength <= right_strength:
+            span = max(1, right_strength - left_strength)
+            ratio = (strength - left_strength) / span
+            return left_value + ((right_value - left_value) * ratio)
+    return anchors[-1][1]
+
+
+def visual_fx_planning_settings(strength: Any) -> dict[str, float | int]:
+    """Interpolate existing LOW/PUNCHY/MAXIMUM density without changing them."""
+
+    value = coerce_visual_fx_strength(strength)
+    return {
+        "max_moments": int(round(_interpolate_visual_fx_strength(
+            value,
+            ((0, 0.0), (25, 2.0), (50, 4.0), (75, 7.0), (100, 10.0)),
+        ))),
+        "spacing": _interpolate_visual_fx_strength(
+            value,
+            ((0, 12.0), (25, 8.0), (50, 4.0), (75, 2.25), (100, 1.25)),
+        ),
+        "max_hero_moments": int(round(_interpolate_visual_fx_strength(
+            value,
+            ((0, 0.0), (25, 1.0), (50, 1.0), (75, 3.0), (100, 4.0)),
+        ))),
+        "short_clip_cap": int(round(_interpolate_visual_fx_strength(
+            value,
+            ((0, 0.0), (25, 2.0), (50, 3.0), (75, 4.0), (100, 5.0)),
+        ))),
+    }
+
+
+def visual_fx_effect_strength_scale(strength: Any) -> float:
+    value = coerce_visual_fx_strength(strength)
+    if value <= 75:
+        return 1.0
+    return 1.0 + ((value - 75) / 25.0 * 0.6)
+
+
 def build_semantic_moments(
     words: list[dict[str, Any]],
     energy: str,
+    visual_fx_strength: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
 
-    energy = normalize_energy(
-        energy
+    strength = (
+        visual_fx_strength_from_energy(energy)
+        if visual_fx_strength is None
+        else coerce_visual_fx_strength(visual_fx_strength)
     )
+    if strength <= 0:
+        return [], []
+
+    energy = visual_fx_energy_for_strength(strength)
     duration = clip_duration_from_words(
         words
     )
-    profile = energy_profile(
-        energy
-    )
-    max_moments = int(
-        profile.get(
-            "max_filter_events",
-            4,
-        )
-    )
+    planning = visual_fx_planning_settings(strength)
+    max_moments = int(planning["max_moments"])
     if duration < 9:
         max_moments = min(
             1,
@@ -596,27 +670,10 @@ def build_semantic_moments(
             max_moments,
         )
     elif duration < 30:
-        max_moments = min(
-            3
-            if energy != "MAXIMUM"
-            else 4,
-            max_moments,
-        )
+        max_moments = min(int(planning["short_clip_cap"]), max_moments)
 
-    max_hero_moments = int(
-        profile.get(
-            "max_hero_moments",
-            1,
-        )
-    )
-    spacing = {
-        "LOW": 8.0,
-        "PUNCHY": 4.0,
-        "MAXIMUM": 2.25,
-    }.get(
-        energy,
-        4.0,
-    )
+    max_hero_moments = int(planning["max_hero_moments"])
+    spacing = float(planning["spacing"])
 
     candidates: list[dict[str, Any]] = []
 
@@ -1306,11 +1363,19 @@ def event_from_moment(
 def expand_moments_to_events(
     moments: list[dict[str, Any]],
     energy: str,
+    visual_fx_strength: int | None = None,
 ) -> list[dict[str, Any]]:
 
-    energy = normalize_energy(
-        energy
+    strength = (
+        visual_fx_strength_from_energy(energy)
+        if visual_fx_strength is None
+        else coerce_visual_fx_strength(visual_fx_strength)
     )
+    if strength <= 0:
+        return []
+
+    energy = visual_fx_energy_for_strength(strength)
+    strength_scale = visual_fx_effect_strength_scale(strength)
     events: list[dict[str, Any]] = []
 
     for index, moment in enumerate(
@@ -1375,24 +1440,25 @@ def expand_moments_to_events(
             ]
 
         for effect in effects:
-            events.append(
-                event_from_moment(
-                    moment,
+            event = event_from_moment(
+                moment,
+                effect,
+                "filter",
+                stack_id,
+                duration=event_duration(
                     effect,
-                    "filter",
-                    stack_id,
-                    duration=event_duration(
-                        effect,
-                        str(
-                            moment.get(
-                                "level",
-                                "NORMAL",
-                            )
-                        ),
-                        energy,
+                    str(
+                        moment.get(
+                            "level",
+                            "NORMAL",
+                        )
                     ),
-                )
+                    energy,
+                ),
             )
+            if strength_scale != 1.0:
+                event["visual_fx_strength_scale"] = round(strength_scale, 3)
+            events.append(event)
 
         if moment_should_have_graphic(
             moment,
@@ -1409,6 +1475,8 @@ def expand_moments_to_events(
                     else 1.05
                 ),
             )
+            if strength_scale != 1.0:
+                graphic["visual_fx_strength_scale"] = round(strength_scale, 3)
             graphic["text"] = raw_word.upper()
             events.append(
                 graphic
@@ -1437,15 +1505,18 @@ def expand_moments_to_events(
 def build_fx_events(
     words: list[dict[str, Any]],
     energy: str,
+    visual_fx_strength: int | None = None,
 ) -> list[dict[str, Any]]:
 
     moments, _curve = build_semantic_moments(
         words,
-        energy
+        energy,
+        visual_fx_strength,
     )
     return expand_moments_to_events(
         moments,
         energy,
+        visual_fx_strength,
     )
 
 
@@ -1472,6 +1543,46 @@ def coerce_fx_intensity(
     )
 
 
+def fx_intensity_strength(
+    value: Any,
+) -> float:
+    """Map the 0-200% UI value to a neutral-safe visual-FX strength.
+
+    The lower half remains literal so 100% preserves the established
+    production look. Above that point, a short quadratic ramp gives the
+    upper half a meaningful creative range: 150% is 1.8x and 200% is 3.0x.
+    """
+
+    intensity = coerce_fx_intensity(value)
+    if intensity <= 1.0:
+        return intensity
+
+    overdrive = intensity - 1.0
+    return min(
+        3.0,
+        1.0 + (1.2 * overdrive) + (0.8 * overdrive * overdrive),
+    )
+
+
+def _scale_from_neutral(
+    value: float,
+    neutral: float,
+    strength: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Scale an effect delta while keeping FFmpeg parameters in safe bounds."""
+
+    return min(
+        maximum,
+        max(
+            minimum,
+            neutral + ((value - neutral) * strength),
+        ),
+    )
+
+
 def _scaled_eq(
     contrast: float,
     saturation: float,
@@ -1484,14 +1595,44 @@ def _scaled_eq(
     # (contrast=1.0, saturation=1.0, brightness=0.0, gamma=1.0) by
     # intensity, so intensity=1.0 reproduces the tier's original values
     # exactly and intensity=0.0 fully neutralizes the color grade.
+    scaled_contrast = _scale_from_neutral(
+        contrast,
+        1.0,
+        intensity,
+        minimum=0.5,
+        maximum=2.25,
+    )
+    scaled_saturation = _scale_from_neutral(
+        saturation,
+        1.0,
+        intensity,
+        minimum=0.0,
+        maximum=3.0,
+    )
+    scaled_brightness = _scale_from_neutral(
+        brightness,
+        0.0,
+        intensity,
+        minimum=-0.25,
+        maximum=0.25,
+    )
     parts = (
-        f"contrast={1.0 + (contrast - 1.0) * intensity:.4f}:"
-        f"saturation={1.0 + (saturation - 1.0) * intensity:.4f}:"
-        f"brightness={brightness * intensity:.4f}"
+        f"contrast={scaled_contrast:.4f}:"
+        f"saturation={scaled_saturation:.4f}:"
+        f"brightness={scaled_brightness:.4f}"
     )
 
     if gamma is not None:
-        parts += f":gamma={1.0 + (gamma - 1.0) * intensity:.4f}"
+        scaled_gamma = _scale_from_neutral(
+            gamma,
+            1.0,
+            intensity,
+            minimum=0.5,
+            maximum=1.5,
+        )
+        parts += (
+            f":gamma={scaled_gamma:.4f}"
+        )
 
     return f"eq={parts}"
 
@@ -1502,21 +1643,54 @@ def _scaled_unsharp(
     intensity: float,
 ) -> str:
 
-    return (
-        f"unsharp=5:5:{amount * intensity:.4f}:"
-        f"3:3:{camount * intensity:.4f}"
-    )
+    luma_amount = min(1.5, max(-1.5, amount * intensity))
+    chroma_amount = min(0.75, max(-0.75, camount * intensity))
+    return f"unsharp=5:5:{luma_amount:.4f}:3:3:{chroma_amount:.4f}"
 
 
-def _scaled_vignette(
-    denominator: float,
-    intensity: float,
-) -> str | None:
+def baseline_filter_values(
+    energy: str,
+    intensity: float = 1.0,
+) -> dict[str, float | None]:
+    """Return the shared baseline-grade values for render and monitor preview."""
 
-    if intensity <= 0.0:
-        return None
+    energy = normalize_energy(energy)
+    strength = fx_intensity_strength(intensity)
 
-    return f"vignette=PI/{denominator / intensity:.4f}"
+    if energy == "LOW":
+        return {
+            "contrast": _scale_from_neutral(1.08, 1.0, strength, minimum=0.5, maximum=2.25),
+            "saturation": _scale_from_neutral(1.12, 1.0, strength, minimum=0.0, maximum=3.0),
+            "brightness": _scale_from_neutral(0.004, 0.0, strength, minimum=-0.25, maximum=0.25),
+            "gamma": None,
+            "unsharp_amount": min(1.5, 0.32 * strength),
+            "unsharp_chroma_amount": min(0.75, 0.12 * strength),
+            "darken_alpha": 0.0,
+            "vignette_denominator": None,
+        }
+
+    if energy == "MAXIMUM":
+        return {
+            "contrast": _scale_from_neutral(1.42, 1.0, strength, minimum=0.5, maximum=2.25),
+            "saturation": _scale_from_neutral(1.62, 1.0, strength, minimum=0.0, maximum=3.0),
+            "brightness": _scale_from_neutral(0.010, 0.0, strength, minimum=-0.25, maximum=0.25),
+            "gamma": _scale_from_neutral(0.96, 1.0, strength, minimum=0.5, maximum=1.5),
+            "unsharp_amount": min(1.5, 0.86 * strength),
+            "unsharp_chroma_amount": min(0.75, 0.26 * strength),
+            "darken_alpha": min(1.0, 0.035 * strength),
+            "vignette_denominator": 4.2 / strength if strength > 0.0 else None,
+        }
+
+    return {
+        "contrast": _scale_from_neutral(1.18, 1.0, strength, minimum=0.5, maximum=2.25),
+        "saturation": _scale_from_neutral(1.28, 1.0, strength, minimum=0.0, maximum=3.0),
+        "brightness": _scale_from_neutral(0.008, 0.0, strength, minimum=-0.25, maximum=0.25),
+        "gamma": None,
+        "unsharp_amount": min(1.5, 0.52 * strength),
+        "unsharp_chroma_amount": min(0.75, 0.18 * strength),
+        "darken_alpha": 0.0,
+        "vignette_denominator": 7.0 / strength if strength > 0.0 else None,
+    }
 
 
 def baseline_filters(
@@ -1524,51 +1698,31 @@ def baseline_filters(
     intensity: float = 1.0,
 ) -> list[str]:
 
-    energy = normalize_energy(
-        energy
-    )
-    intensity = coerce_fx_intensity(
-        intensity
-    )
-
-    if energy == "LOW":
-        return [
-            _scaled_eq(1.08, 1.12, 0.004, intensity),
-            _scaled_unsharp(0.32, 0.12, intensity),
-        ]
-
-    if energy == "MAXIMUM":
-        filters = [
-            _scaled_eq(1.42, 1.62, 0.010, intensity, gamma=0.96),
-            _scaled_unsharp(0.86, 0.26, intensity),
-        ]
-
-        darken_alpha = min(
-            1.0,
-            max(
-                0.0,
-                0.035 * intensity,
-            ),
-        )
-        if darken_alpha > 0.0:
-            filters.append(
-                f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{darken_alpha:.4f}:t=fill"
-            )
-
-        vignette = _scaled_vignette(4.2, intensity)
-        if vignette:
-            filters.append(vignette)
-
-        return filters
-
+    values = baseline_filter_values(energy, intensity)
     filters = [
-        _scaled_eq(1.18, 1.28, 0.008, intensity),
-        _scaled_unsharp(0.52, 0.18, intensity),
+        _scaled_eq(
+            float(values["contrast"]),
+            float(values["saturation"]),
+            float(values["brightness"]),
+            1.0,
+            gamma=values["gamma"],
+        ),
+        _scaled_unsharp(
+            float(values["unsharp_amount"]),
+            float(values["unsharp_chroma_amount"]),
+            1.0,
+        ),
     ]
 
-    vignette = _scaled_vignette(7, intensity)
-    if vignette:
-        filters.append(vignette)
+    darken_alpha = float(values["darken_alpha"])
+    if darken_alpha > 0.0:
+        filters.append(
+            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{darken_alpha:.4f}:t=fill"
+        )
+
+    vignette_denominator = values["vignette_denominator"]
+    if vignette_denominator is not None:
+        filters.append(f"vignette=PI/{float(vignette_denominator):.4f}")
 
     return filters
 
@@ -1660,15 +1814,21 @@ def event_strength(
             0.68,
         )
     )
+    visual_fx_scale = coerce_float(
+        event.get(
+            "visual_fx_strength_scale",
+            1.0,
+        ),
+        1.0,
+    )
 
     return max(
         0.0,
         min(
-            1.35,
+            2.0,
             local
-            * coerce_fx_intensity(
-                global_intensity
-            ),
+            * fx_intensity_strength(global_intensity)
+            * visual_fx_scale,
         ),
     )
 
@@ -2033,6 +2193,7 @@ def write_plan(
     events: list[dict[str, Any]],
     moments: list[dict[str, Any]],
     intensity_curve: list[dict[str, Any]],
+    visual_fx_strength: int | None = None,
 ) -> None:
 
     recipes: dict[str, int] = {}
@@ -2052,6 +2213,11 @@ def write_plan(
         "version": 1,
         "edit_energy": normalize_energy(
             energy
+        ),
+        "visual_fx_strength": (
+            visual_fx_strength_from_energy(energy)
+            if visual_fx_strength is None
+            else coerce_visual_fx_strength(visual_fx_strength)
         ),
         "source_video": str(
             VIDEO_PATH
@@ -2218,6 +2384,12 @@ def main() -> int:
             1.0,
         )
     )
+    raw_visual_fx_strength = settings.get("visual_fx_strength")
+    visual_fx_strength = (
+        visual_fx_strength_from_energy(energy)
+        if raw_visual_fx_strength is None
+        else coerce_visual_fx_strength(raw_visual_fx_strength)
+    )
 
     transcript = load_json(
         TRANSCRIPT_PATH
@@ -2236,10 +2408,12 @@ def main() -> int:
     moments, intensity_curve = build_semantic_moments(
         words,
         energy,
+        visual_fx_strength,
     )
     events = expand_moments_to_events(
         moments,
         energy,
+        visual_fx_strength,
     )
 
     write_plan(
@@ -2247,6 +2421,7 @@ def main() -> int:
         events,
         moments,
         intensity_curve,
+        visual_fx_strength,
     )
 
     print(
@@ -2255,6 +2430,10 @@ def main() -> int:
     )
     print(
         f"FX intensity: {intensity:.2f}",
+        flush=True,
+    )
+    print(
+        f"Visual FX strength: {visual_fx_strength}",
         flush=True,
     )
     print(

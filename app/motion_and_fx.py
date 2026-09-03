@@ -72,9 +72,11 @@ try:
         build_semantic_filter_chain,
         build_semantic_moments,
         coerce_fx_intensity,
+        coerce_visual_fx_strength,
         expand_moments_to_events,
         merge_motion_events,
         motion_events_for_moments,
+        visual_fx_strength_from_energy,
         write_plan as write_fx_plan,
     )
 except ImportError:
@@ -82,9 +84,11 @@ except ImportError:
         build_semantic_filter_chain,
         build_semantic_moments,
         coerce_fx_intensity,
+        coerce_visual_fx_strength,
         expand_moments_to_events,
         merge_motion_events,
         motion_events_for_moments,
+        visual_fx_strength_from_energy,
         write_plan as write_fx_plan,
     )
 
@@ -133,6 +137,12 @@ def main() -> int:
             1.0,
         )
     )
+    raw_visual_fx_strength = settings.get("visual_fx_strength")
+    visual_fx_strength = (
+        visual_fx_strength_from_energy(edit_energy)
+        if raw_visual_fx_strength is None
+        else coerce_visual_fx_strength(raw_visual_fx_strength)
+    )
     filters_enabled = bool(
         settings.get(
             "filters_enabled",
@@ -149,6 +159,10 @@ def main() -> int:
     )
     print(
         f"FX intensity: {intensity:.2f}",
+        flush=True,
+    )
+    print(
+        f"Visual FX strength: {visual_fx_strength}",
         flush=True,
     )
     print(
@@ -177,10 +191,12 @@ def main() -> int:
     moments, intensity_curve = build_semantic_moments(
         words,
         edit_energy,
+        visual_fx_strength,
     )
     fx_events = expand_moments_to_events(
         moments,
         edit_energy,
+        visual_fx_strength,
     )
 
     write_fx_plan(
@@ -188,6 +204,7 @@ def main() -> int:
         fx_events,
         moments,
         intensity_curve,
+        visual_fx_strength,
     )
 
     print(

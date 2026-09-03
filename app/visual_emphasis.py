@@ -49,6 +49,12 @@ ENERGY_LEVELS = {
 
 DEFAULT_ENERGY = "PUNCHY"
 
+AUTO_CUT_AGGRESSION_BY_ENERGY = {
+    "LOW": 25,
+    "PUNCHY": 50,
+    "MAXIMUM": 75,
+}
+
 SFX_MODES = {
     "AUTO",
     "OFF",
@@ -370,6 +376,102 @@ def energy_profile(
             energy
         )
     ]
+
+
+def coerce_auto_cut_aggression(value: Any) -> int:
+    """Normalize the saved 0-100 AutoCut aggression setting."""
+
+    if isinstance(value, str):
+        legacy_energy = value.strip().upper()
+        if legacy_energy in AUTO_CUT_AGGRESSION_BY_ENERGY:
+            return AUTO_CUT_AGGRESSION_BY_ENERGY[legacy_energy]
+    try:
+        return min(100, max(0, int(round(float(value)))))
+    except (TypeError, ValueError, OverflowError):
+        return AUTO_CUT_AGGRESSION_BY_ENERGY[DEFAULT_ENERGY]
+
+
+def auto_cut_aggression_from_energy(energy: Any) -> int:
+    return AUTO_CUT_AGGRESSION_BY_ENERGY[normalize_energy(energy)]
+
+
+def auto_cut_energy_for_aggression(aggression: Any) -> str:
+    value = coerce_auto_cut_aggression(aggression)
+    if value <= 37:
+        return "LOW"
+    if value <= 62:
+        return "PUNCHY"
+    return "MAXIMUM"
+
+
+def _interpolate_auto_cut_setting(
+    aggression: int,
+    anchors: tuple[tuple[int, float], ...],
+) -> float:
+    for (left_aggression, left_value), (right_aggression, right_value) in zip(
+        anchors,
+        anchors[1:],
+    ):
+        if aggression <= right_aggression:
+            ratio = (aggression - left_aggression) / max(
+                1,
+                right_aggression - left_aggression,
+            )
+            return left_value + ((right_value - left_value) * ratio)
+    return anchors[-1][1]
+
+
+def auto_cut_aggression_settings(aggression: Any) -> dict[str, float | int]:
+    """Interpolate existing AutoCut settings, with bounded 100% headroom."""
+
+    value = coerce_auto_cut_aggression(aggression)
+    return {
+        "auto_cut_min_gap": _interpolate_auto_cut_setting(
+            value,
+            ((0, 1.35), (25, 1.35), (50, 1.15), (75, 0.90), (100, 0.65)),
+        ),
+        "auto_cut_keep_gap": _interpolate_auto_cut_setting(
+            value,
+            ((0, 0.55), (25, 0.55), (50, 0.42), (75, 0.30), (100, 0.18)),
+        ),
+        "auto_cut_min_spacing": _interpolate_auto_cut_setting(
+            value,
+            ((0, 2.00), (25, 2.00), (50, 1.50), (75, 0.90), (100, 0.65)),
+        ),
+        "auto_cut_max_removal_ratio": _interpolate_auto_cut_setting(
+            value,
+            ((0, 0.0), (25, 0.15), (50, 0.22), (75, 0.35), (100, 0.45)),
+        ),
+        "semantic_min_duration": _interpolate_auto_cut_setting(
+            value,
+            ((0, 0.60), (25, 0.60), (50, 0.45), (75, 0.30), (100, 0.20)),
+        ),
+        "semantic_min_words": int(
+            round(
+                _interpolate_auto_cut_setting(
+                    value,
+                    ((0, 2.0), (25, 2.0), (50, 2.0), (75, 1.0), (100, 1.0)),
+                )
+            )
+        ),
+        "semantic_min_confidence": _interpolate_auto_cut_setting(
+            value,
+            ((0, 0.93), (25, 0.93), (50, 0.88), (75, 0.84), (100, 0.78)),
+        ),
+        "semantic_verify_confidence": _interpolate_auto_cut_setting(
+            value,
+            ((0, 0.93), (25, 0.93), (50, 0.90), (75, 0.86), (100, 0.80)),
+        ),
+    }
+
+
+def auto_cut_profile(aggression: Any) -> dict[str, Any]:
+    """Return the existing cut profile adjusted only by AutoCut aggression."""
+
+    value = coerce_auto_cut_aggression(aggression)
+    profile = dict(energy_profile(auto_cut_energy_for_aggression(value)))
+    profile.update(auto_cut_aggression_settings(value))
+    return profile
 
 
 def read_json(

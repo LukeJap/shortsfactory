@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
     QDropEvent,
     QFont,
+    QImage,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -81,6 +82,8 @@ class AspectRatioContainer(QWidget):
 class ProgramMonitorComposition(QWidget):
     """One 9:16 preview composition with deterministic video/overlay layers."""
 
+    overlay_stack_invalidated = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("ProgramMonitorComposition")
@@ -92,6 +95,14 @@ class ProgramMonitorComposition(QWidget):
         blur.setBlurRadius(28)
         self.background_preview.setGraphicsEffect(blur)
         self._background_frame = QPixmap()
+        self._filter_preview_enabled = False
+        self._filter_preview_energy = "PUNCHY"
+        self._filter_preview_intensity = 1.0
+        self._filter_preview_color_adjustments = (1.0, 1.0, 0.0)
+        self._filter_refresh_timer = QTimer(self)
+        self._filter_refresh_timer.setSingleShot(True)
+        self._filter_refresh_timer.setInterval(30)
+        self._filter_refresh_timer.timeout.connect(self._refresh_filter_preview)
         self.active_picture_rect: dict[str, int] | None = None
         self.active_picture_source_size: tuple[int, int] | None = None
         self.foreground_video: QWidget | None = None
@@ -112,6 +123,7 @@ class ProgramMonitorComposition(QWidget):
         # video surface. Qt's Windows video widget otherwise paints an opaque
         # black matte over sibling background/overlay widgets at this size.
         self.foreground_preview.raise_()
+        self.overlay_stack_invalidated.emit()
 
     def set_active_picture_rect(
         self,
@@ -181,8 +193,100 @@ class ProgramMonitorComposition(QWidget):
             self._background_frame = QPixmap.fromImage(image)
         except Exception:
             return
-        self._update_background_pixmap()
-        self._update_foreground_pixmap()
+        active_picture = self._active_picture_pixmap()
+        self._update_background_pixmap(active_picture)
+        self._update_foreground_pixmap(active_picture)
+
+    def set_filter_preview(
+        self,
+        *,
+        enabled: bool,
+        energy: str,
+        intensity: float,
+    ):
+        """Apply the render's baseline grade to the decoded monitor frame."""
+
+        self._filter_preview_enabled = bool(enabled)
+        self._filter_preview_energy = str(energy or "PUNCHY")
+        try:
+            self._filter_preview_intensity = max(0.0, min(2.0, float(intensity)))
+        except (TypeError, ValueError):
+            self._filter_preview_intensity = 1.0
+        self._filter_preview_color_adjustments = self._filter_preview_values()
+        self._filter_refresh_timer.start()
+
+    def _filter_preview_values(self) -> tuple[float, float, float]:
+        if not self._filter_preview_enabled or self._filter_preview_intensity <= 0.0:
+            return (1.0, 1.0, 0.0)
+        try:
+            from visual_fx import baseline_filter_values
+
+            values = baseline_filter_values(
+                self._filter_preview_energy,
+                self._filter_preview_intensity,
+            )
+            return (
+                float(values["contrast"]),
+                float(values["saturation"]),
+                float(values["brightness"]),
+            )
+        except Exception:
+            return (1.0, 1.0, 0.0)
+
+    def _refresh_filter_preview(self):
+        """Coalesce slider changes into one monitor refresh."""
+
+        active_picture = self._active_picture_pixmap()
+        self._update_background_pixmap(active_picture)
+        self._update_foreground_pixmap(active_picture)
+
+    def _filtered_preview_pixmap(self, pixmap: QPixmap) -> QPixmap:
+        """Apply the inexpensive playback-safe portion of the shared grade."""
+
+        if (
+            pixmap.isNull()
+            or not self._filter_preview_enabled
+            or self._filter_preview_intensity <= 0.0
+        ):
+            return pixmap
+
+        try:
+            import numpy as np
+            image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+            width = image.width()
+            height = image.height()
+            if width < 1 or height < 1:
+                return pixmap
+
+            pixels = np.frombuffer(image.bits(), dtype=np.uint8).reshape(
+                height,
+                image.bytesPerLine(),
+            )[:, : width * 4].reshape(height, width, 4).copy()
+            rgb = pixels[:, :, :3].astype(np.float32) / 255.0
+
+            contrast, saturation, brightness = self._filter_preview_color_adjustments
+            rgb = ((rgb - 0.5) * contrast) + 0.5 + brightness
+            rgb = np.clip(rgb, 0.0, 1.0)
+
+            luma = (
+                (rgb[:, :, 0:1] * 0.2126)
+                + (rgb[:, :, 1:2] * 0.7152)
+                + (rgb[:, :, 2:3] * 0.0722)
+            )
+            rgb = luma + ((rgb - luma) * saturation)
+            pixels[:, :, :3] = np.round(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+            return QPixmap.fromImage(
+                QImage(
+                    pixels.data,
+                    width,
+                    height,
+                    pixels.strides[0],
+                    QImage.Format.Format_RGBA8888,
+                ).copy()
+            )
+        except Exception:
+            # Preview filtering is optional visual feedback; never block video.
+            return pixmap
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -203,13 +307,13 @@ class ProgramMonitorComposition(QWidget):
                 foreground_height,
             )
             self.foreground_preview.setGeometry(self.foreground_video.geometry())
-        self._update_background_pixmap()
-        self._update_foreground_pixmap()
+        self._refresh_filter_preview()
 
-    def _update_background_pixmap(self):
+    def _update_background_pixmap(self, active_picture: QPixmap | None = None):
         if self._background_frame.isNull() or self.width() < 1 or self.height() < 1:
             return
-        active_picture = self._active_picture_pixmap()
+        if active_picture is None:
+            active_picture = self._active_picture_pixmap()
         scaled = active_picture.scaled(
             self.size(),
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -221,18 +325,28 @@ class ProgramMonitorComposition(QWidget):
             scaled.copy(x, y, self.width(), self.height())
         )
 
-    def _update_foreground_pixmap(self):
-        active_picture = self._active_picture_pixmap()
+    def _update_foreground_pixmap(self, active_picture: QPixmap | None = None):
+        if active_picture is None:
+            active_picture = self._active_picture_pixmap()
         if active_picture.isNull() or self.foreground_preview.width() < 1:
             return
+        was_hidden = self.foreground_preview.isHidden()
         self.foreground_preview.setPixmap(
-            active_picture.scaled(
-                self.foreground_preview.size(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+            self._filtered_preview_pixmap(
+                active_picture.scaled(
+                    self.foreground_preview.size(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
             )
         )
         self.foreground_preview.show()
+        if was_hidden:
+            # Showing this decoded-frame layer can move it ahead of the
+            # persistent monitor overlays on Windows. Restore the existing
+            # title/caption/mock-UI order once, rather than doing layout work
+            # for every decoded frame.
+            self.overlay_stack_invalidated.emit()
 
 
 class YouTubeShortsMockOverlay(QWidget):

@@ -19,6 +19,10 @@ import requests
 try:
     from .ollama_config import OLLAMA_HOST, OLLAMA_MODEL
     from .visual_emphasis import (
+        auto_cut_aggression_from_energy,
+        auto_cut_energy_for_aggression,
+        auto_cut_profile,
+        coerce_auto_cut_aggression,
         energy_profile,
         load_render_settings,
         normalize_energy,
@@ -30,6 +34,10 @@ try:
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
     from visual_emphasis import (
+        auto_cut_aggression_from_energy,
+        auto_cut_energy_for_aggression,
+        auto_cut_profile,
+        coerce_auto_cut_aggression,
         energy_profile,
         load_render_settings,
         normalize_energy,
@@ -765,9 +773,14 @@ def main() -> int:
             "PUNCHY",
         )
     )
-    profile = energy_profile(
-        energy
+    raw_aggression = settings.get("auto_cut_aggression")
+    aggression = (
+        auto_cut_aggression_from_energy(energy)
+        if raw_aggression is None
+        else coerce_auto_cut_aggression(raw_aggression)
     )
+    auto_cut_energy = auto_cut_energy_for_aggression(aggression)
+    profile = auto_cut_profile(aggression)
     verification_threshold = float(
         profile.get(
             "semantic_verify_confidence",
@@ -782,6 +795,7 @@ def main() -> int:
     print(
         f"Edit style: {energy}"
     )
+    print(f"AutoCut aggression: {aggression}")
     print(
         "Semantic cut thresholds: "
         f">={float(profile.get('semantic_min_duration', 0.45)):.2f}s, "
@@ -789,6 +803,15 @@ def main() -> int:
         f"proposal confidence >= {float(profile.get('semantic_min_confidence', 0.88)):.2f}, "
         f"verification >= {verification_threshold:.2f}"
     )
+
+    if aggression <= 0:
+        write_plan(
+            summary="Semantic editing disabled by AutoCut aggression.",
+            proposed_cuts=[],
+            approved_cuts=[],
+            verification_results=[],
+        )
+        return 0
 
     print()
     print(
@@ -819,7 +842,7 @@ def main() -> int:
 
     prompt = build_prompt(
         words,
-        energy,
+        auto_cut_energy,
     )
 
     try:
@@ -880,7 +903,7 @@ def main() -> int:
             verification = verify_cut(
                 cut,
                 words,
-                energy,
+                auto_cut_energy,
             )
         except Exception as exc:
             verification = {

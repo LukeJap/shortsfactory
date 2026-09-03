@@ -387,6 +387,10 @@ class RecapMixin:
         if hasattr(self, "standard_short_button"):
             self.standard_short_button.setChecked(not recap_mode)
         self.recap_mode = "recap" if recap_mode else "standard"
+        if hasattr(self, "stop_standard_pitch_preview"):
+            self.stop_standard_pitch_preview()
+        if hasattr(self, "update_native_preview_audio_mute"):
+            self.update_native_preview_audio_mute()
         if recap_mode:
             self.refresh_recap_status()
 
