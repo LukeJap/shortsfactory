@@ -32,6 +32,7 @@ caveat from the other direction).
 
 from __future__ import annotations
 
+import json
 import math
 import subprocess
 from pathlib import Path
@@ -63,6 +64,57 @@ from music_overlay import music_volume_expression
 
 class RecapRenderError(Exception):
     """The recap render command could not be built or failed to run."""
+
+
+def validate_recap_media_file(path: Path) -> dict[str, Any]:
+    """Verify a completed Recap MP4 before it becomes Program Monitor media."""
+
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise RecapRenderError(f"Recap preview media is missing or empty: {path}")
+
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name,duration,size",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RecapRenderError(
+            f"Recap preview media failed ffprobe validation: {result.stderr.strip() or path}"
+        )
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RecapRenderError(f"Recap preview media returned invalid ffprobe data: {path}") from exc
+
+    streams = data.get("streams") if isinstance(data, dict) else []
+    format_data = data.get("format") if isinstance(data, dict) else {}
+    has_video = any(
+        isinstance(stream, dict) and stream.get("codec_type") == "video"
+        for stream in streams or []
+    )
+    has_audio = any(
+        isinstance(stream, dict) and stream.get("codec_type") == "audio"
+        for stream in streams or []
+    )
+    try:
+        duration = float((format_data or {}).get("duration", 0.0))
+    except (TypeError, ValueError):
+        duration = 0.0
+    if not has_video or not has_audio or duration <= 0.0:
+        raise RecapRenderError(f"Recap preview media is incomplete: {path}")
+    return data
 
 
 DEFAULT_RECAP_TIMELINE_FPS = 24000 / 1001
@@ -989,6 +1041,7 @@ def render_recap(
                 load_narration_captions(),
                 portrait_plan,
                 source_key=source_key,
+                playback_speed=speed,
             )
             recap_effects = load_recap_effects()
 

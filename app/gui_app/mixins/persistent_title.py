@@ -58,6 +58,8 @@ class PersistentTitleMixin:
             return
         set_persistent_title_on_plan(self.editor_asset_plan, value)
         self.save_editor_asset_plan_state()
+        if hasattr(self, "sync_persistent_title_to_active_recap_plan"):
+            self.sync_persistent_title_to_active_recap_plan()
         self.update_persistent_title_preview()
 
     def ensure_persistent_title_preview(self):

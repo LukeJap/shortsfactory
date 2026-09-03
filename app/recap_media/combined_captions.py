@@ -62,6 +62,8 @@ def build_combined_recap_caption_plan(
     sequence: dict[str, Any],
     narration_captions: dict[str, Any],
     voiceover_clips: list[dict[str, Any]],
+    *,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> dict[str, Any]:
     """Combine measured narration timing and cached source-dialogue words.
 
@@ -99,8 +101,8 @@ def build_combined_recap_caption_plan(
             if not isinstance(word, dict):
                 continue
             cue = _caption(
-                recap_base_to_final_time(offset + _number(word.get("start"))),
-                recap_base_to_final_time(offset + _number(word.get("end"))),
+                recap_base_to_final_time(offset + _number(word.get("start")), playback_speed),
+                recap_base_to_final_time(offset + _number(word.get("end")), playback_speed),
                 str(word.get("text", "")), block_id, "narration",
             )
             if cue:
@@ -121,8 +123,8 @@ def build_combined_recap_caption_plan(
                 if word_end <= source_start or word_start >= source_end:
                     continue
                 cue = _caption(
-                    recap_base_to_final_time(timeline_start + max(0.0, word_start - source_start)),
-                    recap_base_to_final_time(timeline_start + min(source_end - source_start, word_end - source_start)),
+                    recap_base_to_final_time(timeline_start + max(0.0, word_start - source_start), playback_speed),
+                    recap_base_to_final_time(timeline_start + min(source_end - source_start, word_end - source_start), playback_speed),
                     str(word.get("text") or word.get("word") or ""), block_id, "source_dialogue",
                 )
                 if cue:
@@ -131,7 +133,7 @@ def build_combined_recap_caption_plan(
     return {
         "schema_version": RECAP_CAPTION_PLAN_SCHEMA_VERSION,
         "time_basis": RECAP_CAPTION_TIME_BASIS,
-        "playback_speed": RECAP_PLAYBACK_SPEED,
+        "playback_speed": float(playback_speed),
         "cues": sorted(cues, key=lambda cue: (cue["start"], cue["end"], cue["id"])),
     }
 

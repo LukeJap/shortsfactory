@@ -1,6 +1,7 @@
 import pytest
 
 from recap_media.audio_mix import (
+    DEFAULT_NARRATION_GAIN_DB,
     NARRATION_FOREGROUND_TREATMENTS,
     SOURCE_RESTORED_TREATMENTS,
     build_duck_plan,
@@ -192,12 +193,12 @@ def test_source_audio_is_audible_only_inside_explicit_insert_window():
         [6.5, 0.0],
     ]
     assert plan["narration_keyframes"] == [
-        [0.0, 0.95],
-        [2.0, 0.95],
+        [0.0, 1.5849],
+        [2.0, 1.5849],
         [2.0, 0.0],
         [4.5, 0.0],
-        [4.5, 0.95],
-        [6.5, 0.95],
+        [4.5, 1.5849],
+        [6.5, 1.5849],
     ]
 
 
@@ -213,6 +214,14 @@ def test_reaction_beat_treated_like_narration_foreground():
     plan = build_duck_plan(sequence)
     assert plan["narration_keyframes"][0][1] == plan["settings"]["voiceover_gain"]
     assert plan["source_keyframes"][0][1] == plan["settings"]["source_ducked_gain"]
+
+
+def test_default_narration_gain_is_plus_four_db_and_keeps_the_limiter():
+    plan = build_duck_plan(_sequence_from_treatments([("narration_over_source", 2.0)]))
+
+    assert plan["settings"]["narration_gain_db"] == DEFAULT_NARRATION_GAIN_DB == 4.0
+    assert plan["settings"]["voiceover_gain"] == pytest.approx(1.5849)
+    assert "alimiter=limit=0.92" in build_duck_filter_complex(plan)
 
 
 def test_out_of_range_gains_are_clamped():

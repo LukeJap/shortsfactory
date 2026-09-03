@@ -85,8 +85,17 @@ def _convert_event_times(
     return item
 
 
-def _events_in_final_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_convert_event_times(event, recap_base_to_final_time) for event in events]
+def _events_in_final_timeline(
+    events: list[dict[str, Any]],
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
+) -> list[dict[str, Any]]:
+    return [
+        _convert_event_times(
+            event,
+            lambda value: recap_base_to_final_time(value, playback_speed),
+        )
+        for event in events
+    ]
 
 
 def _events_in_base_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -96,6 +105,8 @@ def _events_in_base_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any
 def recap_timeline_blocks(
     sequence: dict[str, Any],
     recap_script: dict[str, Any] | None = None,
+    *,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> list[dict[str, Any]]:
     """Authoritative final-output block windows with story provenance."""
 
@@ -123,8 +134,8 @@ def recap_timeline_blocks(
             {
                 "block_id": block_id,
                 "block_type": str(segment.get("block_type", source.get("block_type", "")) or ""),
-                "start": recap_base_to_final_time(start),
-                "end": recap_base_to_final_time(end),
+                "start": recap_base_to_final_time(start, playback_speed),
+                "end": recap_base_to_final_time(end, playback_speed),
                 "beat_ids": [str(beat_id) for beat_id in raw_beat_ids if str(beat_id)],
             }
         )
@@ -262,14 +273,16 @@ def recap_base_timeline_words(
 def recap_final_timeline_words(
     sequence: dict[str, Any],
     narration_captions: dict[str, Any],
+    *,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> list[dict[str, Any]]:
     """Caption words mapped onto the authoritative final Recap timeline."""
 
     return [
         {
             **word,
-            "start": recap_base_to_final_time(_as_float(word.get("start"))),
-            "end": recap_base_to_final_time(_as_float(word.get("end"))),
+            "start": recap_base_to_final_time(_as_float(word.get("start")), playback_speed),
+            "end": recap_base_to_final_time(_as_float(word.get("end")), playback_speed),
         }
         for word in recap_base_timeline_words(sequence, narration_captions)
     ]
@@ -291,11 +304,18 @@ def _base_source_audio_insert_windows(sequence: dict[str, Any]) -> list[tuple[fl
     return windows
 
 
-def source_audio_insert_windows(sequence: dict[str, Any]) -> list[tuple[float, float]]:
+def source_audio_insert_windows(
+    sequence: dict[str, Any],
+    *,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
+) -> list[tuple[float, float]]:
     """Final-output windows where automatic effects must stay silent."""
 
     return [
-        (recap_base_to_final_time(start), recap_base_to_final_time(end))
+        (
+            recap_base_to_final_time(start, playback_speed),
+            recap_base_to_final_time(end, playback_speed),
+        )
         for start, end in _base_source_audio_insert_windows(sequence)
     ]
 
@@ -377,6 +397,7 @@ def recap_emoji_events(
     *,
     energy: str = DEFAULT_ENERGY,
     target_count: int = RECAP_EMOJI_TARGET_COUNT,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> list[dict[str, Any]]:
     """Plan local, caption-safe Recap emoji reactions without changing FX.
 
@@ -389,7 +410,11 @@ def recap_emoji_events(
     # Preserve existing semantic selection exactly in assembly time, then
     # publish the selected entities in editor/output time.
     words = recap_base_timeline_words(sequence, narration_captions)
-    blocks = recap_timeline_blocks(sequence, recap_script)
+    blocks = recap_timeline_blocks(
+        sequence,
+        recap_script,
+        playback_speed=playback_speed,
+    )
     protected_windows = _base_source_audio_insert_windows(sequence)
     candidates = [
         candidate
@@ -406,7 +431,9 @@ def recap_emoji_events(
     events = [
         event for event in events if not _overlaps_protected_window(event, protected_windows)
     ]
-    return _annotate_recap_events(_events_in_final_timeline(events), blocks, "emoji")
+    return _annotate_recap_events(
+        _events_in_final_timeline(events, playback_speed), blocks, "emoji"
+    )
 
 
 def retune_recap_emoji_plan(
@@ -425,6 +452,7 @@ def retune_recap_emoji_plan(
 
     retuned = copy.deepcopy(effects_plan)
     energy = normalize_energy(retuned.get("edit_energy", DEFAULT_ENERGY))
+    playback_speed = _as_float(retuned.get("playback_speed"), RECAP_PLAYBACK_SPEED)
     emoji_events = recap_emoji_events(
         sequence,
         narration_captions,
@@ -432,6 +460,7 @@ def retune_recap_emoji_plan(
         recap_script,
         energy=energy,
         target_count=target_count,
+        playback_speed=playback_speed,
     )
     automatic = retuned.setdefault("automatic_editor_clips", {})
     automatic["EMOJI"] = _emoji_clips(emoji_events)
@@ -491,6 +520,7 @@ def build_recap_effects_plan(
     recap_script: dict[str, Any] | None = None,
     *,
     energy: str = DEFAULT_ENERGY,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
 ) -> dict[str, Any]:
     """Create automatic shared-effect proposals for a recap base timeline."""
 
@@ -499,7 +529,11 @@ def build_recap_effects_plan(
     # selections do not move when the authoritative entity domain changes.
     words = recap_base_timeline_words(sequence, narration_captions)
     duration = max(0.0, _as_float(sequence.get("total_duration_seconds")))
-    blocks = recap_timeline_blocks(sequence, recap_script)
+    blocks = recap_timeline_blocks(
+        sequence,
+        recap_script,
+        playback_speed=playback_speed,
+    )
     base_moments, base_intensity_curve = build_semantic_moments(words, energy)
     base_fx_events = expand_moments_to_events(base_moments, energy)
     base_protected_windows = _base_source_audio_insert_windows(sequence)
@@ -512,11 +546,15 @@ def build_recap_effects_plan(
         for event in base_motion_events
         if not _overlaps_protected_window(event, base_protected_windows)
     ]
-    moments = _annotate_recap_events(_events_in_final_timeline(base_moments), blocks, "moment")
-    intensity_curve = _events_in_final_timeline(base_intensity_curve)
-    fx_events = _annotate_recap_events(_events_in_final_timeline(base_fx_events), blocks, "fx")
+    moments = _annotate_recap_events(
+        _events_in_final_timeline(base_moments, playback_speed), blocks, "moment"
+    )
+    intensity_curve = _events_in_final_timeline(base_intensity_curve, playback_speed)
+    fx_events = _annotate_recap_events(
+        _events_in_final_timeline(base_fx_events, playback_speed), blocks, "fx"
+    )
     motion_events = _annotate_recap_events(
-        _events_in_final_timeline(base_motion_events), blocks, "motion"
+        _events_in_final_timeline(base_motion_events, playback_speed), blocks, "motion"
     )
     # Keep the established SFX selection input unchanged.  Emoji density is
     # Recap-only and must not cause the seven accepted SFX choices to move.
@@ -537,6 +575,7 @@ def build_recap_effects_plan(
         portrait_plan,
         recap_script,
         energy=energy,
+        playback_speed=playback_speed,
     )
 
     selected_sfx = select_events(
@@ -555,7 +594,9 @@ def build_recap_effects_plan(
         index_local_assets(),
         warnings,
     )
-    prepared_sfx = _annotate_recap_events(_events_in_final_timeline(prepared_sfx), blocks, "sfx")
+    prepared_sfx = _annotate_recap_events(
+        _events_in_final_timeline(prepared_sfx, playback_speed), blocks, "sfx"
+    )
     sfx_clips = []
     for event in prepared_sfx:
         clip = sfx_clip_from_event(event)
@@ -574,12 +615,16 @@ def build_recap_effects_plan(
         "time_basis": RECAP_TIME_BASIS,
         "render_enabled": False,
         "edit_energy": energy,
+        "playback_speed": float(playback_speed),
         "base_timeline_duration_seconds": round(duration, 3),
-        "final_timeline_duration_seconds": recap_final_duration_seconds(duration),
+        "final_timeline_duration_seconds": recap_final_duration_seconds(duration, playback_speed),
         "timeline_blocks": blocks,
         "source_audio_insert_windows": [
             {"start": round(start, 3), "end": round(end, 3)}
-            for start, end in source_audio_insert_windows(sequence)
+            for start, end in source_audio_insert_windows(
+                sequence,
+                playback_speed=playback_speed,
+            )
         ],
         "visual_fx": {
             "moments": moments,
@@ -776,6 +821,7 @@ def create_recap_effects_plan(
     recap_script: dict[str, Any] | None = None,
     *,
     energy: str = DEFAULT_ENERGY,
+    playback_speed: float = RECAP_PLAYBACK_SPEED,
     source_key: str = "recap",
     effects_path: Path = RECAP_EFFECTS_PLAN_PATH,
     editor_plan_path: Path = RECAP_EDITOR_ASSET_PLAN_PATH,
@@ -787,6 +833,7 @@ def create_recap_effects_plan(
             portrait_plan,
             recap_script,
             energy=energy,
+            playback_speed=playback_speed,
         ),
         source_key=source_key,
         effects_path=effects_path,

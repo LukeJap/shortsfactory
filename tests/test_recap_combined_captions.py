@@ -36,3 +36,20 @@ def test_combined_recap_captions_map_narration_and_source_dialogue_to_final_time
     assert [cue["text"] for cue in plan["cues"]] == ["Narrator", "Hello", "Gary"]
     assert [cue["speaker_domain"] for cue in plan["cues"]] == ["narration", "source_dialogue", "source_dialogue"]
     assert all(0 <= cue["start"] < 10 for cue in plan["cues"])
+
+
+def test_combined_captions_follow_the_selected_recap_speed():
+    sequence = {"segments": [{"segment_id": "N_001", "timeline_start_seconds": 3.0}]}
+    narration = {
+        "segments": [
+            {"segment_id": "N_001", "words": [{"text": "Narrator", "start": 0.0, "end": 0.6}]}
+        ]
+    }
+
+    normal = build_combined_recap_caption_plan(sequence, narration, [], playback_speed=1.0)
+    accelerated = build_combined_recap_caption_plan(sequence, narration, [], playback_speed=1.5)
+
+    assert normal["playback_speed"] == 1.0
+    assert accelerated["playback_speed"] == 1.5
+    assert normal["cues"][0]["start"] == 3.0
+    assert accelerated["cues"][0]["start"] == 2.0

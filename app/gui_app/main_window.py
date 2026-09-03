@@ -59,6 +59,7 @@ from .settings_keys import (
     FX_INTENSITY,
     MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
+    RECAP_NARRATION_GAIN_DB,
     RECAP_NARRATION_PITCH_SEMITONES,
     RECAP_SOURCE_PITCH_SEMITONES,
     RECAP_SCRIPT_SOURCE,
@@ -78,6 +79,7 @@ from .widgets import (
 )
 
 from recap_media.orpheus_provider import DEFAULT_VOICE as DEFAULT_ORPHEUS_VOICE
+from recap_media.audio_mix import DEFAULT_NARRATION_GAIN_DB
 from recap_media.render import (
     DEFAULT_NARRATION_PITCH_SEMITONES,
     DEFAULT_SOURCE_PITCH_SEMITONES,
@@ -405,6 +407,16 @@ class ShortsFactoryWindow(
             self.recap_speed = 1.5
         if self.recap_speed not in {1.25, 1.5, 1.75}:
             self.recap_speed = 1.5
+        try:
+            self.recap_narration_gain_db = float(
+                self.settings.value(
+                    RECAP_NARRATION_GAIN_DB,
+                    DEFAULT_NARRATION_GAIN_DB,
+                )
+                or DEFAULT_NARRATION_GAIN_DB
+            )
+        except (TypeError, ValueError):
+            self.recap_narration_gain_db = DEFAULT_NARRATION_GAIN_DB
         try:
             self.recap_narration_pitch_semitones = float(
                 self.settings.value(

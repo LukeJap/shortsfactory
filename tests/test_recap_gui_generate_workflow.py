@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from editor_asset_plan import save_editor_asset_plan
+import pytest
+
+from editor_asset_plan import load_editor_asset_plan, save_editor_asset_plan
 import gui_app.mixins.recap as recap_module
 from recap_media.artifacts import RecapArtifactContext
 from recap_media.loader import RecapInputs
@@ -139,6 +141,12 @@ def test_open_recap_in_editor_loads_the_recap_owned_shared_asset_plan(tmp_path):
                 "kind": "ai_recap_clean_editor_base",
                 "time_basis": "recap_final_timeline",
                 "editable_overlays_baked": False,
+                "recap_audio_settings": {
+                    "playback_speed": 1.5,
+                    "narration_pitch_semitones": 1.8,
+                    "source_pitch_semitones": 1.8,
+                    "narration_gain_db": 4.0,
+                },
             }
         ),
         encoding="utf-8",
@@ -241,6 +249,7 @@ def test_missing_editor_base_render_uses_persisted_assembled_inputs_without_capt
 
     monkeypatch.setattr(recap_module, "load_portrait_framing_plan", lambda _path: {"filter_chain": "portrait"})
     monkeypatch.setattr(recap_module, "load_duck_plan", lambda _path: {"narration_keyframes": []})
+    monkeypatch.setattr(recap_module, "validate_recap_media_file", lambda _path: {})
     monkeypatch.setattr(
         window,
         "_editor_base_voiceover_clips",
@@ -275,11 +284,12 @@ def test_missing_editor_base_render_uses_persisted_assembled_inputs_without_capt
         "N_002",
     ]
     assert captured["kwargs"] == {
-        "output_path": context.editor_base_recap_path,
+        "output_path": context.editor_base_recap_path.with_name("final_recap_editor_base.rendering.mp4"),
         "captions_ass_path": None,
         "allow_captionless": True,
         "recap_effects": recap_module._clean_recap_editor_effects(),
         "voiceover_dir": context.voiceover_dir,
+        "playback_speed": 1.5,
         "narration_pitch_semitones": 1.8,
         "source_pitch_semitones": 1.8,
     }
@@ -294,6 +304,7 @@ def test_empty_editor_base_is_rebuilt_instead_of_being_loaded(monkeypatch, tmp_p
 
     monkeypatch.setattr(recap_module, "load_portrait_framing_plan", lambda _path: {"filter_chain": "portrait"})
     monkeypatch.setattr(recap_module, "load_duck_plan", lambda _path: {"narration_keyframes": []})
+    monkeypatch.setattr(recap_module, "validate_recap_media_file", lambda _path: {})
     monkeypatch.setattr(window, "_editor_base_voiceover_clips", lambda *_args: [])
     monkeypatch.setattr(recap_module, "load_recap_effects", lambda **_kwargs: {})
     calls: list[Path] = []
@@ -311,7 +322,9 @@ def test_empty_editor_base_is_rebuilt_instead_of_being_loaded(monkeypatch, tmp_p
         context.effects_plan_path,
         context.editor_asset_plan_path,
     ) == context.editor_base_recap_path
-    assert calls == [context.editor_base_recap_path]
+    assert calls == [
+        context.editor_base_recap_path.with_name("final_recap_editor_base.rendering.mp4")
+    ]
 
 
 def test_editor_base_media_keeps_its_source_bound_recap_context(tmp_path):
@@ -325,6 +338,100 @@ def test_editor_base_media_keeps_its_source_bound_recap_context(tmp_path):
     assert window._active_recap_artifact_context() is context
 
 
+def test_recap_audio_controls_are_persisted_with_the_active_editor_plan(tmp_path):
+    window = _RecapWindow(_context(tmp_path), _inputs())
+    window.recap_speed = 1.25
+    window.recap_narration_pitch_semitones = 3.0
+    window.recap_source_pitch_semitones = 0.0
+    window.recap_narration_gain_db = 4.0
+
+    settings = window._persist_recap_audio_settings()
+
+    assert window.saved_plan is True
+    assert settings == window.editor_asset_plan["recap_audio_settings"]
+    assert settings == {
+        "playback_speed": 1.25,
+        "narration_pitch_semitones": 3.0,
+        "source_pitch_semitones": 0.0,
+        "narration_gain_db": 4.0,
+    }
+
+
+def test_recap_audio_updates_merge_and_round_trip_persistent_title_state(tmp_path):
+    context = _context(tmp_path)
+    window = _RecapWindow(context, _inputs())
+    window.editor_asset_plan["persistent_title"] = {
+        "text": "SPONGEBOB'S UNDERWEAR DISASTER",
+        "x": 0.42,
+        "y": 0.16,
+        "scale": 1.35,
+        "width": 0.72,
+        "active": True,
+    }
+    window.recap_speed = 1.5
+    window.recap_narration_pitch_semitones = 3.0
+    window.recap_source_pitch_semitones = 3.0
+    window.recap_narration_gain_db = 4.0
+
+    window._persist_recap_audio_settings()
+    persisted = load_editor_asset_plan(context.editor_asset_plan_path)
+
+    assert persisted["persistent_title"] == window.editor_asset_plan["persistent_title"]
+    assert persisted["recap_audio_settings"] == {
+        "playback_speed": 1.5,
+        "narration_pitch_semitones": 3.0,
+        "source_pitch_semitones": 3.0,
+        "narration_gain_db": 4.0,
+    }
+
+    window.recap_speed = 1.0
+    window.recap_narration_pitch_semitones = 0.0
+    window.recap_source_pitch_semitones = 0.0
+    window._persist_recap_audio_settings()
+
+    reloaded = load_editor_asset_plan(context.editor_asset_plan_path)
+    assert reloaded["persistent_title"] == persisted["persistent_title"]
+    assert reloaded["recap_audio_settings"]["playback_speed"] == 1.0
+
+
+def test_editor_base_keeps_canonical_preview_when_staged_media_validation_fails(
+    monkeypatch,
+    tmp_path,
+):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    context.editor_base_recap_path.write_bytes(b"old playable editor base")
+    window = _RecapWindow(context, _inputs())
+    sequence = {"segments": []}
+
+    monkeypatch.setattr(recap_module, "load_portrait_framing_plan", lambda _path: {})
+    monkeypatch.setattr(recap_module, "load_duck_plan", lambda _path: {"narration_keyframes": []})
+    monkeypatch.setattr(window, "_editor_base_voiceover_clips", lambda *_args: [])
+    monkeypatch.setattr(
+        recap_module,
+        "render_recap",
+        lambda *_args, **kwargs: kwargs["output_path"].write_bytes(b"partial render"),
+    )
+    monkeypatch.setattr(
+        recap_module,
+        "validate_recap_media_file",
+        lambda _path: (_ for _ in ()).throw(recap_module.RecapRenderError("invalid staged media")),
+    )
+
+    with pytest.raises(recap_module.RecapRenderError, match="invalid staged media"):
+        window._ensure_recap_editor_base(
+            context,
+            sequence,
+            context.effects_plan_path,
+            context.editor_asset_plan_path,
+        )
+
+    assert context.editor_base_recap_path.read_bytes() == b"old playable editor base"
+    assert context.editor_base_recap_path.with_name(
+        "final_recap_editor_base.rendering.mp4"
+    ).read_bytes() == b"partial render"
+
+
 def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, tmp_path):
     context = _context(tmp_path)
     inputs = _inputs()
@@ -336,6 +443,10 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
             {"segment_id": "N_002", "order": 3, "shots": []},
         ]
     }
+    window.recap_speed = 1.25
+    window.recap_narration_pitch_semitones = 3.0
+    window.recap_source_pitch_semitones = 0.0
+    window.recap_narration_gain_db = 4.0
     window.editor_asset_plan = {
         "version": 1,
         "clips": [
@@ -359,7 +470,7 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
     monkeypatch.setattr(recap_module, "write_narration_captions", lambda captions, path: captured.setdefault("captions_path", path))
     monkeypatch.setattr(recap_module, "write_combined_recap_caption_plan", lambda plan, path: captured.setdefault("combined_path", path))
     monkeypatch.setattr(recap_module, "write_combined_recap_caption_ass", lambda plan, path: captured.setdefault("ass_path", path))
-    monkeypatch.setattr(recap_module, "build_duck_plan", lambda sequence: {"narration_keyframes": []})
+    monkeypatch.setattr(recap_module, "build_duck_plan", lambda sequence, **_kwargs: {"narration_keyframes": []})
     monkeypatch.setattr(recap_module, "write_duck_plan", lambda plan, path: captured.setdefault("duck_path", path))
 
     def _render(identity, sequence, clips, portrait, duck, **kwargs):
@@ -388,8 +499,9 @@ def test_final_render_uses_the_active_root_and_only_narration_wavs(monkeypatch, 
             "time_basis": "recap_final_timeline",
         },
         "voiceover_dir": context.voiceover_dir,
-        "narration_pitch_semitones": 1.8,
-        "source_pitch_semitones": 1.8,
+        "playback_speed": 1.25,
+        "narration_pitch_semitones": 3.0,
+        "source_pitch_semitones": 0.0,
     }
     assert [segment["segment_id"] for segment in captured["render_sequence"]["segments"]] == [
         "N_001",
@@ -418,7 +530,7 @@ def test_final_render_failure_is_logged_without_touching_cached_voiceover(monkey
     monkeypatch.setattr(recap_module, "build_narration_captions", lambda *args, **kwargs: {"segments": []})
     monkeypatch.setattr(recap_module, "write_narration_captions", lambda *args: None)
     monkeypatch.setattr(recap_module, "write_narration_captions_ass_file", lambda *args: None)
-    monkeypatch.setattr(recap_module, "build_duck_plan", lambda sequence: {"narration_keyframes": []})
+    monkeypatch.setattr(recap_module, "build_duck_plan", lambda sequence, **_kwargs: {"narration_keyframes": []})
     monkeypatch.setattr(recap_module, "write_duck_plan", lambda *args: None)
     monkeypatch.setattr(
         recap_module,

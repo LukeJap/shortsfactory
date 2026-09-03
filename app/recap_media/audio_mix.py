@@ -32,12 +32,17 @@ from recap_media.loader import RecapInputError
 AUDIO_DUCK_PLAN_SCHEMA_VERSION = 1
 
 # Tunable ranges from SHORTSFACTORY_AI_RECAP_TRACK_B_MEDIA_EDITOR.md's B5.
+# Legacy callers can still specify a linear voiceover gain in this range.
+# The Recap render path now uses a dB-normalized narration gain instead so
+# the final limiter, rather than a <= 1.0 planning clamp, protects the mix.
 VOICEOVER_GAIN_RANGE = (0.85, 1.00)
+NARRATION_GAIN_DB_RANGE = (-12.0, 12.0)
 SOURCE_DUCKED_GAIN_RANGE = (0.0, 0.30)
 DUCK_ATTACK_SECONDS_RANGE = (0.10, 0.20)
 DUCK_RELEASE_SECONDS_RANGE = (0.10, 0.25)
 
 DEFAULT_VOICEOVER_GAIN = 0.95
+DEFAULT_NARRATION_GAIN_DB = 4.0
 DEFAULT_SOURCE_DUCKED_GAIN = 0.0
 DEFAULT_SOURCE_RESTORED_GAIN = 1.0
 DEFAULT_DUCK_ATTACK_SECONDS = 0.15
@@ -59,6 +64,16 @@ SOURCE_RESTORED_TREATMENTS = {"original_dialogue", "visual_only"}
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def narration_gain_from_db(gain_db: float) -> float:
+    """Return a limiter-safe linear narration gain for a user-facing dB value."""
+
+    try:
+        normalized_db = _clamp(float(gain_db), *NARRATION_GAIN_DB_RANGE)
+    except (TypeError, ValueError):
+        normalized_db = DEFAULT_NARRATION_GAIN_DB
+    return 10 ** (normalized_db / 20.0)
 
 
 def shot_output_windows(sequence: dict[str, Any]) -> list[tuple[float, float, str]]:
@@ -138,7 +153,8 @@ def build_gain_keyframes(
 
 def build_duck_plan(
     sequence: dict[str, Any],
-    voiceover_gain: float = DEFAULT_VOICEOVER_GAIN,
+    voiceover_gain: float | None = None,
+    narration_gain_db: float = DEFAULT_NARRATION_GAIN_DB,
     source_ducked_gain: float = DEFAULT_SOURCE_DUCKED_GAIN,
     source_restored_gain: float = DEFAULT_SOURCE_RESTORED_GAIN,
     attack_seconds: float = DEFAULT_DUCK_ATTACK_SECONDS,
@@ -151,7 +167,18 @@ def build_duck_plan(
     a re-render can reproduce the exact same envelope).
     """
 
-    voiceover_gain = _clamp(voiceover_gain, 0.0, 1.0)
+    # Explicit linear gain is retained for legacy integrations/tests. New
+    # Recap renders use a +4 dB default that is protected by the final mix
+    # limiter below, so narration can be meaningfully louder than unity.
+    try:
+        narration_gain_db = _clamp(float(narration_gain_db), *NARRATION_GAIN_DB_RANGE)
+    except (TypeError, ValueError):
+        narration_gain_db = DEFAULT_NARRATION_GAIN_DB
+    if voiceover_gain is None:
+        voiceover_gain = narration_gain_from_db(narration_gain_db)
+    else:
+        voiceover_gain = _clamp(float(voiceover_gain), 0.0, 1.0)
+    voiceover_gain = round(voiceover_gain, 4)
     source_ducked_gain = _clamp(source_ducked_gain, 0.0, 1.0)
     source_restored_gain = _clamp(source_restored_gain, 0.0, 1.0)
     attack_seconds = max(0.0, attack_seconds)
@@ -188,6 +215,7 @@ def build_duck_plan(
         "total_duration_seconds": round(total_duration, 3),
         "settings": {
             "voiceover_gain": voiceover_gain,
+            "narration_gain_db": narration_gain_db,
             "source_ducked_gain": source_ducked_gain,
             "source_restored_gain": source_restored_gain,
             "attack_seconds": attack_seconds,

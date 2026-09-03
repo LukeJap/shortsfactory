@@ -30,6 +30,7 @@ from recap_media.render import (
     narration_pitch_ratio,
     recap_timeline_fps,
     source_pitch_ratio,
+    validate_recap_media_file,
     render_recap,
     resolve_recap_source_video,
 )
@@ -380,6 +381,33 @@ def test_filter_complex_applies_each_pitch_control_to_its_own_audio_branch_befor
     assert source_only_filter.count("atempo=1.500") == 1
 
 
+def test_filter_complex_uses_requested_speed_and_duration_preserving_pitch_values():
+    common = (
+        _sequence(),
+        [_voiceover_clip("VO_001", start=0.0)],
+        {"VO_001": 1},
+        _portrait_plan(),
+        _duck_plan(),
+    )
+    normal, _, _ = build_recap_filter_complex(
+        *common,
+        playback_speed=1.0,
+        narration_pitch_semitones=0.0,
+        source_pitch_semitones=0.0,
+    )
+    accelerated, _, _ = build_recap_filter_complex(
+        *common,
+        playback_speed=1.5,
+        narration_pitch_semitones=3.0,
+        source_pitch_semitones=3.0,
+    )
+
+    assert "setpts=PTS/1.000" in normal and "atempo=1.000" in normal
+    assert "rubberband=" not in normal
+    assert "setpts=PTS/1.500" in accelerated and "atempo=1.500" in accelerated
+    assert accelerated.count("rubberband=pitch=1.189207:tempo=1.000") == 2
+
+
 def test_filter_complex_applies_a_detected_active_picture_crop_to_all_recap_blocks():
     portrait = {
         **_portrait_plan(),
@@ -679,6 +707,34 @@ def test_recap_timeline_fps_uses_source_rate_and_falls_back(monkeypatch, tmp_pat
 
     monkeypatch.setattr("recap_media.render.subprocess.run", unavailable)
     assert recap_timeline_fps(tmp_path / "source.mp4") == DEFAULT_RECAP_TIMELINE_FPS
+
+
+def test_preview_media_validation_requires_complete_audio_video_media(monkeypatch, tmp_path):
+    preview = tmp_path / "editor_base.mp4"
+    preview.write_bytes(b"completed media")
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = (
+            '{"streams":[{"codec_type":"video","codec_name":"h264"},'
+            '{"codec_type":"audio","codec_name":"aac"}],'
+            '"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"12.5"}}'
+        )
+
+    monkeypatch.setattr("recap_media.render.subprocess.run", lambda *args, **kwargs: Result())
+
+    metadata = validate_recap_media_file(preview)
+
+    assert metadata["format"]["duration"] == "12.5"
+
+
+def test_preview_media_validation_rejects_empty_or_incomplete_media(tmp_path):
+    preview = tmp_path / "editor_base.mp4"
+    preview.write_bytes(b"")
+
+    with pytest.raises(RecapRenderError, match="missing or empty"):
+        validate_recap_media_file(preview)
 
 
 def test_filter_complex_escapes_windows_ass_drive_path_for_subtitles():
