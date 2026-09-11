@@ -65,7 +65,15 @@ def test_auto_cut_applies_same_pacing_guard_as_apply_smart_edit(tmp_path, monkey
     monkeypatch.setattr(auto_cut, "OUTPUT_VIDEO", output_video)
     monkeypatch.setattr(auto_cut, "EDIT_PLAN_PATH", edit_plan_path)
     monkeypatch.setattr(auto_cut, "SUBTITLES_PATH", subtitles_path)
-    monkeypatch.setattr(auto_cut, "load_render_settings", lambda: {"edit_energy": "MAXIMUM"})
+    # auto_cut_aggression=75 is the direct successor to the old MAXIMUM
+    # energy preset (see visual_emphasis.AUTO_CUT_AGGRESSION_BY_ENERGY) --
+    # supplied explicitly here since this monkeypatch bypasses the real
+    # load_render_settings()'s legacy edit_energy->aggression migration.
+    monkeypatch.setattr(
+        auto_cut,
+        "load_render_settings",
+        lambda: {"edit_energy": "MAXIMUM", "auto_cut_aggression": 75},
+    )
 
     exit_code = auto_cut.main()
     assert exit_code == 0
@@ -78,12 +86,16 @@ def test_auto_cut_applies_same_pacing_guard_as_apply_smart_edit(tmp_path, monkey
 
     # Independently recompute what the pacing guard should have produced,
     # using the exact same functions apply_smart_edit.py (STEP 5) itself
-    # calls -- this is the actual convergence this fix guarantees.
+    # calls -- this is the actual convergence this fix guarantees. Use the
+    # real aggression-interpolated profile (not the bare energy_profile()
+    # base table) so this matches what both auto_cut.main() and STEP 5's
+    # own load_and_merge_cuts() actually compute now.
     duration = auto_cut.get_video_duration(input_video)
+    profile = apply_smart_edit.auto_cut_profile(75)
     raw_cuts = auto_cut.detect_pause_cuts(
         _words_with_frequent_gaps(),
-        min_gap_to_edit=0.9,
-        keep_gap_seconds=0.3,
+        min_gap_to_edit=profile["auto_cut_min_gap"],
+        keep_gap_seconds=profile["auto_cut_keep_gap"],
     )
     assert len(raw_cuts) >= 5, "test fixture should produce several raw pause cuts"
 
@@ -91,6 +103,7 @@ def test_auto_cut_applies_same_pacing_guard_as_apply_smart_edit(tmp_path, monkey
         apply_smart_edit.extract_pause_cuts({"cuts": raw_cuts}),
         [],
         duration,
+        profile=profile,
         energy="MAXIMUM",
     )
     assert warning is not None, "test fixture should actually trigger the pacing guard"
@@ -141,21 +154,34 @@ def test_apply_smart_edit_reuse_check_now_matches_the_common_case(tmp_path, monk
     monkeypatch.setattr(auto_cut, "OUTPUT_VIDEO", output_video)
     monkeypatch.setattr(auto_cut, "EDIT_PLAN_PATH", edit_plan_path)
     monkeypatch.setattr(auto_cut, "SUBTITLES_PATH", subtitles_path)
-    monkeypatch.setattr(auto_cut, "load_render_settings", lambda: {"edit_energy": "MAXIMUM"})
+    # auto_cut_aggression=75 is the direct successor to the old MAXIMUM
+    # energy preset (see visual_emphasis.AUTO_CUT_AGGRESSION_BY_ENERGY) --
+    # supplied explicitly here since this monkeypatch bypasses the real
+    # load_render_settings()'s legacy edit_energy->aggression migration.
+    monkeypatch.setattr(
+        auto_cut,
+        "load_render_settings",
+        lambda: {"edit_energy": "MAXIMUM", "auto_cut_aggression": 75},
+    )
 
     assert auto_cut.main() == 0
     pause_plan = json.loads(edit_plan_path.read_text(encoding="utf-8"))
 
     # STEP 5's own independent recomputation, with zero semantic/manual
-    # cuts (the common case this fix targets).
+    # cuts (the common case this fix targets). Same aggression-interpolated
+    # profile both real call sites use now (see the other test above).
     duration = auto_cut.get_video_duration(input_video)
+    profile = apply_smart_edit.auto_cut_profile(75)
     raw_cuts = auto_cut.detect_pause_cuts(
-        _words_with_frequent_gaps(), min_gap_to_edit=0.9, keep_gap_seconds=0.3
+        _words_with_frequent_gaps(),
+        min_gap_to_edit=profile["auto_cut_min_gap"],
+        keep_gap_seconds=profile["auto_cut_keep_gap"],
     )
     guarded_pause_cuts, _, _ = apply_smart_edit.apply_automatic_cut_safety(
         apply_smart_edit.extract_pause_cuts({"cuts": raw_cuts}),
         [],
         duration,
+        profile=profile,
         energy="MAXIMUM",
     )
     keep_segments = auto_cut.cuts_to_keep_ranges(
