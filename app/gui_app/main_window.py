@@ -1157,9 +1157,17 @@ class ShortsFactoryWindow(
             "Refresh the voice list from Orpheus-FastAPI."
         )
         self.recap_refresh_voices_button.clicked.connect(self.refresh_recap_voices)
+        self.recap_voice_preview_button = QPushButton("▶ Preview")
+        self.recap_voice_preview_button.setObjectName("TinyButton")
+        self.recap_voice_preview_button.setToolTip(
+            "Hear the selected voice speak a short sample line -- does not "
+            "generate or change any recap narration."
+        )
+        self.recap_voice_preview_button.clicked.connect(self.preview_recap_voice)
         recap_voice_row.addWidget(recap_voice_label)
         recap_voice_row.addWidget(self.recap_voice_combo, 1)
         recap_voice_row.addWidget(self.recap_refresh_voices_button)
+        recap_voice_row.addWidget(self.recap_voice_preview_button)
         recap_layout.addLayout(recap_voice_row)
 
         recap_speed_row = QHBoxLayout()

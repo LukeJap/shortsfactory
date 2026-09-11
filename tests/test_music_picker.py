@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from gui_app.mixins import music
 from music_overlay import (
     music_gain_at_time,
@@ -60,7 +62,7 @@ def test_preview_and_render_share_the_same_linear_music_gain():
 def test_live_music_uses_the_render_ducking_factor_during_sfx():
     events = [{"start": 1.0, "end": 1.3}]
     assert music_gain_at_time(0.2, events, 0.5) == 0.2
-    assert music_gain_at_time(0.2, events, 1.1) == 0.116
+    assert music_gain_at_time(0.2, events, 1.1) == pytest.approx(0.116)
 
     window = music.MusicMixin()
     window.music_volume = 20
@@ -68,7 +70,7 @@ def test_live_music_uses_the_render_ducking_factor_during_sfx():
     window.visible_editor_asset_clips = lambda: [
         {"kind": "SFX", "start": 1.0, "end": 1.3, "active": True}
     ]
-    assert window.current_music_preview_gain(1_100) == 0.116
+    assert window.current_music_preview_gain(1_100) == pytest.approx(0.116)
 
 
 def test_music_volume_change_updates_live_audio_output_immediately():

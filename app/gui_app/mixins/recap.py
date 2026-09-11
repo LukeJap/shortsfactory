@@ -55,6 +55,7 @@ from editor_asset_plan import (
     save_editor_asset_plan,
     upsert_clip,
 )
+from pipeline_paths import RECAP_DIR
 from recap_media.artifacts import (
     RecapArtifactContext,
     resolve_recap_artifact_context,
@@ -95,7 +96,12 @@ from recap_media.loader import (
     load_recap_inputs,
     load_verified_story_map,
 )
-from recap_media.orpheus_provider import DEFAULT_VOICE, KNOWN_VOICES, OrpheusProvider
+from recap_media.orpheus_provider import (
+    DEFAULT_VOICE,
+    KNOWN_VOICES,
+    OrpheusError,
+    OrpheusProvider,
+)
 from recap_media.portrait_framing import (
     build_portrait_framing_plan_for_video,
     load_portrait_framing_plan,
@@ -976,6 +982,56 @@ class RecapMixin:
 
         self.recap_voice = str(value or DEFAULT_VOICE)
         self.settings.setValue(RECAP_VOICE, self.recap_voice)
+
+    def preview_recap_voice(self):
+        """Audition the selected voice without generating or touching any
+        real recap narration -- a lightweight, one-off Orpheus call, not
+        the segment-synthesis path generate_recap_voiceover() uses."""
+
+        voice = str(self.recap_voice_combo.currentText() or self.recap_voice or DEFAULT_VOICE)
+
+        self.append_recap_log(f"Checking Orpheus for a {voice!r} voice preview...")
+        provider = OrpheusProvider()
+        readiness = provider.readiness()
+        if readiness.get("state") != "online":
+            message = (
+                "Orpheus-FastAPI isn't reachable "
+                f"({readiness.get('message', 'unknown error')}). "
+                "Start the local Orpheus server and try again."
+            )
+            self.append_recap_log(f"ERROR: {message}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Preview Voice", message)
+            return
+
+        self.recap_voice_preview_button.setEnabled(False)
+        self.recap_voice_preview_button.setText("Generating...")
+        QCoreApplication.processEvents()
+
+        try:
+            audio_bytes = provider.synthesize_speech(
+                "This is a preview of the narrator voice.",
+                voice=voice,
+            )
+            preview_path = RECAP_DIR / "voice_preview.wav"
+            preview_path.parent.mkdir(parents=True, exist_ok=True)
+            preview_path.write_bytes(audio_bytes)
+        except OrpheusError as exc:
+            self.append_recap_log(f"ERROR: Voice preview failed: {exc}")
+            if isinstance(self, QWidget):
+                QMessageBox.warning(self, "Preview Voice", str(exc))
+            return
+        finally:
+            self.recap_voice_preview_button.setEnabled(True)
+            self.recap_voice_preview_button.setText("▶ Preview")
+
+        self.append_recap_log(f"Playing {voice!r} voice preview.")
+        self.sfx_preview_audio.setVolume(
+            max(0.0, min(1.0, getattr(self, "preview_volume", 100) / 100))
+        )
+        self.sfx_preview_player.stop()
+        self.sfx_preview_player.setSource(QUrl.fromLocalFile(str(preview_path)))
+        self.sfx_preview_player.play()
 
     def recap_target_duration_changed(self, value: int):
 
