@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QMouseEvent, QPixmap
-from PySide6.QtWidgets import QApplication, QSplitter
+from PySide6.QtWidgets import QApplication, QPushButton, QSplitter
 
 from gui_app.main_window import ShortsFactoryWindow
 
@@ -154,6 +154,25 @@ def test_program_monitor_filter_preview_uses_shared_grade_values():
         _close(app, window)
 
 
+def test_program_monitor_skips_duplicate_preview_grade_for_prepolished_recap_media():
+    app, window = _window()
+    try:
+        composition = window.program_monitor_composition
+        source = QPixmap(48, 48)
+        source.fill(QColor(70, 155, 220))
+        composition.set_filter_preview(enabled=True, energy="PUNCHY", intensity=1.0)
+
+        composition.set_source_base_polish_baked(True)
+        result = composition._filtered_preview_pixmap(source)
+
+        assert result.toImage().pixelColor(24, 24) == source.toImage().pixelColor(24, 24)
+
+        composition.set_source_base_polish_baked(False)
+        assert composition._filtered_preview_pixmap(source).toImage().pixelColor(24, 24) != source.toImage().pixelColor(24, 24)
+    finally:
+        _close(app, window)
+
+
 def test_program_monitor_filter_preview_never_processes_the_blurred_background():
     app, window = _window()
     try:
@@ -186,9 +205,24 @@ def test_filter_controls_refresh_the_program_monitor_preview_immediately():
             "intensity": 1.5,
         }
 
-        window.filters_toggled(False)
+        window.fx_intensity_changed(0)
         assert calls[-1]["enabled"] is False
-        assert calls[-1]["intensity"] == 1.5
+        assert calls[-1]["intensity"] == 0.0
+    finally:
+        _close(app, window)
+
+
+def test_autocuts_and_filters_use_zero_valued_sliders_as_the_only_off_state():
+    app, window = _window()
+    try:
+        assert not hasattr(window, "auto_cuts_button")
+        assert not hasattr(window, "filters_button")
+
+        window.auto_cut_aggression_changed(0)
+        window.fx_intensity_changed(0)
+
+        assert window.current_auto_cuts_enabled() is False
+        assert window.current_filters_enabled() is False
     finally:
         _close(app, window)
 
@@ -272,6 +306,67 @@ def test_standard_audio_pitch_slider_persists_without_changing_edit_style():
         assert window.standard_audio_pitch_label.text() == "+1.8 st"
         assert settings.values["render/standard_audio_pitch_semitones"] == 1.8
         assert window.current_edit_energy() == original_energy
+    finally:
+        _close(app, window)
+
+
+def test_standard_video_speed_updates_live_preview_without_resetting_pitch():
+    app, window = _window()
+    try:
+        class SettingsStub:
+            def __init__(self):
+                self.values = {}
+
+            def setValue(self, key, value):
+                self.values[key] = value
+
+        settings = SettingsStub()
+        window.settings = settings
+        window.save_render_settings = lambda: None
+        applied_speeds = []
+        window.apply_standard_video_speed_preview = lambda: applied_speeds.append(
+            window.current_standard_video_speed()
+        )
+        original_pitch = window.current_standard_audio_pitch_semitones()
+
+        assert window.standard_video_speed_slider.minimum() == 50
+        assert window.standard_video_speed_slider.maximum() == 200
+        window.standard_video_speed_slider.setValue(150)
+
+        assert window.current_standard_video_speed() == 1.5
+        assert window.standard_video_speed_label.text() == "1.50x"
+        assert settings.values["render/standard_video_speed"] == 1.5
+        assert applied_speeds == [1.5]
+        assert window.current_standard_audio_pitch_semitones() == original_pitch
+    finally:
+        _close(app, window)
+
+
+def test_legacy_edit_preset_buttons_are_not_constructed():
+    app, window = _window()
+    try:
+        assert not hasattr(window, "edit_style_buttons")
+        assert not hasattr(window, "edit_style_group")
+        assert not window.findChildren(QPushButton, "EditStyleButton")
+        assert window.auto_cut_aggression_slider.minimum() == 0
+        assert window.visual_fx_strength_slider.maximum() == 100
+    finally:
+        _close(app, window)
+
+
+def test_source_drop_zone_is_compact_in_standard_and_recap_modes():
+    app, window = _window()
+    try:
+        assert window.drop_zone.minimumHeight() == 220
+        assert window.drop_zone.maximumHeight() == 240
+
+        window.set_recap_mode("recap")
+        assert window.drop_zone.minimumHeight() == 220
+        assert window.drop_zone.maximumHeight() == 240
+
+        window.set_standard_short_mode()
+        assert window.drop_zone.minimumHeight() == 220
+        assert window.drop_zone.maximumHeight() == 240
     finally:
         _close(app, window)
 

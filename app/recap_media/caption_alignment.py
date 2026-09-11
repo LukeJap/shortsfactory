@@ -62,6 +62,49 @@ def tokenize_narration_text(text: str) -> list[str]:
     return text.split()
 
 
+def probable_dropped_words(segment_captions: dict[str, Any]) -> list[str]:
+    """Return conservative, locally-evidenced TTS word omissions.
+
+    Whisper mismatches alone are not enough to reject a take: names,
+    contractions, and hyphenated words are routinely transcribed in another
+    valid form.  A retry is warranted only for a plain lowercase word that is
+    missing between two recognized neighbors and whose entire audio window is
+    implausibly short for that word.  This catches an internal word swallowed
+    by TTS without turning ordinary recognition variance into a retry loop.
+    """
+
+    words = segment_captions.get("words", [])
+    if not isinstance(words, list) or len(words) < 3:
+        return []
+
+    dropped: list[str] = []
+    for index in range(1, len(words) - 1):
+        current = words[index]
+        previous = words[index - 1]
+        following = words[index + 1]
+        if not all(isinstance(item, dict) for item in (previous, current, following)):
+            continue
+        if current.get("matched", True):
+            continue
+        if not previous.get("matched") or not following.get("matched"):
+            continue
+
+        displayed = str(current.get("text", ""))
+        token = displayed.strip(".,!?;:\"()[]{}")
+        if len(token) < 4 or not token.isascii() or not token.isalpha() or token != token.lower():
+            continue
+
+        try:
+            available_seconds = float(following["start"]) - float(previous["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        expected_floor = max(0.18, min(0.42, len(token) * 0.035))
+        if 0.0 <= available_seconds < expected_floor:
+            dropped.append(token)
+
+    return dropped
+
+
 def align_words_to_timing(
     authoritative_words: list[str],
     recognized_words: list[dict[str, Any]],

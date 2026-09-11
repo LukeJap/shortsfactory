@@ -7,6 +7,7 @@ from recap_media.caption_alignment import (
     build_narration_captions_ass_content,
     build_segment_narration_captions,
     load_narration_captions,
+    probable_dropped_words,
     tokenize_narration_text,
     write_narration_captions,
     write_narration_captions_ass_file,
@@ -96,6 +97,47 @@ def test_dropped_word_is_interpolated_between_neighbors():
     assert 0.3 <= result[1]["start"] <= 0.9
     assert 0.3 <= result[1]["end"] <= 0.9
     assert result[0]["matched"] and result[2]["matched"] and result[3]["matched"]
+
+
+def test_probable_dropped_word_detects_exact_recap_failure():
+    captions = build_segment_narration_captions(
+        "N_002",
+        "Krabs still refuses to pay repairmen.",
+        recognized_words=[
+            _recognized("Krabs", 0.0, 0.28),
+            _recognized("still", 0.28, 0.50),
+            _recognized("to", 0.64, 0.72),
+            _recognized("pay", 0.72, 0.90),
+            _recognized("repairmen", 0.90, 1.35),
+        ],
+    )
+
+    assert probable_dropped_words(captions) == ["refuses"]
+
+
+def test_probable_dropped_word_ignores_recognition_variance_and_real_speech_windows():
+    recognition_variance = build_segment_narration_captions(
+        "N_001",
+        "The Krusty load-bearing wall holds.",
+        recognized_words=[
+            _recognized("The", 0.0, 0.15),
+            _recognized("crusty", 0.15, 0.45),
+            _recognized("load", 0.45, 0.70),
+            _recognized("bearing", 0.70, 0.95),
+            _recognized("wall", 0.95, 1.15),
+            _recognized("holds", 1.15, 1.50),
+        ],
+    )
+    spoken_but_misheard = {
+        "words": [
+            {"text": "they", "start": 0.0, "end": 0.2, "matched": True},
+            {"text": "repair", "start": 0.2, "end": 0.55, "matched": False},
+            {"text": "everything", "start": 0.8, "end": 1.3, "matched": True},
+        ]
+    }
+
+    assert probable_dropped_words(recognition_variance) == []
+    assert probable_dropped_words(spoken_but_misheard) == []
 
 
 def test_extra_hallucinated_word_does_not_disrupt_surrounding_matches():

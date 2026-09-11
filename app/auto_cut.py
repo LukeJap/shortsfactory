@@ -27,7 +27,6 @@ from pathlib import Path
 
 try:
     from .visual_emphasis import (
-        auto_cut_aggression_from_energy,
         auto_cut_profile,
         coerce_auto_cut_aggression,
         load_render_settings,
@@ -35,7 +34,6 @@ try:
     )
 except ImportError:
     from visual_emphasis import (
-        auto_cut_aggression_from_energy,
         auto_cut_profile,
         coerce_auto_cut_aggression,
         load_render_settings,
@@ -365,12 +363,7 @@ def main() -> int:
             "PUNCHY",
         )
     )
-    raw_aggression = settings.get("auto_cut_aggression")
-    aggression = (
-        auto_cut_aggression_from_energy(energy)
-        if raw_aggression is None
-        else coerce_auto_cut_aggression(raw_aggression)
-    )
+    aggression = coerce_auto_cut_aggression(settings.get("auto_cut_aggression"))
     profile = auto_cut_profile(aggression)
 
     min_gap_to_edit = float(

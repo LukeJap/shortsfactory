@@ -60,6 +60,11 @@ def main():
         host,
         model,
         prompt,
+        window_ids=[
+            f"W{index:03d}"
+            for index in range(1, len(valid_windows) + 1)
+        ],
+        selection_count=min(3, len(valid_windows)),
     )
 
     print("OLLAMA RESULT:")

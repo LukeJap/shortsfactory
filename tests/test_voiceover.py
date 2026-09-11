@@ -113,6 +113,26 @@ def test_voice_change_invalidates_cache(tmp_path):
     assert len(provider.calls) == 2
 
 
+def test_narration_speed_change_invalidates_cache_and_reaches_provider(tmp_path):
+    provider = FakeProvider()
+    manifest_path = tmp_path / "manifest.json"
+
+    synthesize_segment(
+        provider, "VO_001", "Hello there.", voice="tara", speed=1.0,
+        output_dir=tmp_path, manifest_path=manifest_path,
+    )
+    result = synthesize_segment(
+        provider, "VO_001", "Hello there.", voice="tara", speed=0.9,
+        output_dir=tmp_path, manifest_path=manifest_path,
+    )
+
+    assert result.cache_hit is False
+    assert provider.calls == [
+        ("Hello there.", "tara", 1.0),
+        ("Hello there.", "tara", 0.9),
+    ]
+
+
 def test_force_bypasses_cache(tmp_path):
     provider = FakeProvider()
     manifest_path = tmp_path / "manifest.json"

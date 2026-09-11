@@ -236,3 +236,39 @@ def resolve_recap_artifact_context(
             f"same verified evidence completeness: {names}."
         )
     return best_contexts[0]
+
+
+def resolve_recap_artifact_context_for_script(
+    source_video: Path | None,
+    script_path: Path,
+    *,
+    output_dir: Path = OUTPUT_DIR,
+) -> RecapArtifactContext:
+    """Resolve companions beside an explicitly selected Recap script first.
+
+    A complete script-owned artifact folder is authoritative: it must validate
+    and match the loaded source. Global discovery is used only when that folder
+    does not contain both required Track A companion artifacts.
+    """
+
+    if source_video is None:
+        raise RecapInputError("Load a source video to begin AI Recap.")
+
+    source = Path(source_video).expanduser().resolve(strict=False)
+    selected_script = Path(script_path).expanduser().resolve(strict=False)
+    context = _context_for_root(selected_script.parent, source)
+    companion_paths = (
+        context.episode_identity_path,
+        context.verified_story_map_path,
+    )
+    if not all(path.exists() for path in companion_paths):
+        return resolve_recap_artifact_context(source, output_dir=output_dir)
+
+    identity = load_episode_identity(context.episode_identity_path)
+    if not _identity_matches_source(identity, source):
+        raise RecapInputError(
+            "The selected recap script's artifact folder does not match the "
+            f"loaded source {source.name!r}."
+        )
+    load_verified_story_map(context.verified_story_map_path)
+    return context

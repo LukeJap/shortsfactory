@@ -22,7 +22,6 @@ from typing import Any
 
 try:
     from .visual_emphasis import (
-        auto_cut_aggression_from_energy,
         coerce_auto_cut_aggression,
         DEFAULT_ENERGY,
         load_render_settings,
@@ -32,7 +31,6 @@ try:
     )
 except ImportError:
     from visual_emphasis import (
-        auto_cut_aggression_from_energy,
         coerce_auto_cut_aggression,
         DEFAULT_ENERGY,
         load_render_settings,
@@ -43,8 +41,16 @@ except ImportError:
 
 try:
     from .standard_audio_pitch import build_standard_audio_pitch_filter
+    from .standard_video_speed import (
+        build_standard_audio_tempo_filter,
+        coerce_standard_video_speed,
+    )
 except ImportError:
     from standard_audio_pitch import build_standard_audio_pitch_filter
+    from standard_video_speed import (
+        build_standard_audio_tempo_filter,
+        coerce_standard_video_speed,
+    )
 
 try:
     from .canvas_config import (
@@ -122,11 +128,11 @@ DEFAULT_SOURCE_VIDEO = (
     ROOT / "input" / "short1.mp4"
 )
 
-# Keep captions around the lower-center of the Shorts canvas rather
-# than near the bottom UI controls.
+# Place default captions at the top of the bottom blurred source fill. Manual
+# caption placement still uses the separate drag bounds below.
 CAPTION_SAFE_MARGIN_LEFT = 110
 CAPTION_SAFE_MARGIN_RIGHT = 180
-CAPTION_SAFE_MARGIN_BOTTOM = 980
+CAPTION_SAFE_MARGIN_BOTTOM = 600
 
 # Hard floor/ceiling for a *manually dragged* caption position (both the
 # placement-editor preview and the real \pos() override in
@@ -1296,6 +1302,7 @@ def add_sound_effects() -> None:
             f"WARNING: SFX engine script not found: {SFX_SCRIPT}"
         )
 
+
         return
 
     result = subprocess.run(
@@ -1314,6 +1321,36 @@ def add_sound_effects() -> None:
                 f"{result.returncode}; continuing without blocking render."
             )
         )
+
+
+def apply_standard_video_speed(playback_speed: object) -> None:
+    """Apply Standard's final playback-rate transform after timed overlays."""
+
+    speed = coerce_standard_video_speed(playback_speed)
+    if abs(speed - 1.0) < 1e-9:
+        return
+    if not CAPTION_OUTPUT_PATH.exists():
+        raise FileNotFoundError(f"Final Short not found: {CAPTION_OUTPUT_PATH}")
+
+    transformed_path = CAPTION_OUTPUT_PATH.with_name(
+        f"{CAPTION_OUTPUT_PATH.stem}_speed{CAPTION_OUTPUT_PATH.suffix}"
+    )
+    if transformed_path.exists():
+        transformed_path.unlink()
+
+    command = [
+        "ffmpeg", "-y", "-i", str(CAPTION_OUTPUT_PATH),
+        "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+        "-vf", f"setpts=PTS/{speed:.6f}",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+    ]
+    tempo_filter = build_standard_audio_tempo_filter(speed)
+    if tempo_filter:
+        command.extend(["-af", tempo_filter])
+    command.append(str(transformed_path))
+    run_command(command)
+    transformed_path.replace(CAPTION_OUTPUT_PATH)
 
 
 def sanitize_final_output() -> None:
@@ -1662,24 +1699,19 @@ def main() -> int:
         args
     )
 
-    raw_auto_cut_aggression = render_settings.get("auto_cut_aggression")
-    auto_cut_aggression = (
-        auto_cut_aggression_from_energy(edit_energy)
-        if raw_auto_cut_aggression is None
-        else coerce_auto_cut_aggression(raw_auto_cut_aggression)
+    auto_cut_aggression = coerce_auto_cut_aggression(
+        render_settings.get("auto_cut_aggression")
     )
-    auto_cuts_enabled = bool(
-        render_settings.get(
-            "auto_cuts_enabled",
-            True,
-        )
-    ) and auto_cut_aggression > 0
+    auto_cuts_enabled = auto_cut_aggression > 0
     print(
         f"Auto Cuts: {'ON' if auto_cuts_enabled else 'OFF'}"
     )
     print(f"AutoCut aggression: {auto_cut_aggression}")
     standard_audio_pitch_semitones = render_settings.get(
         "standard_audio_pitch_semitones", 0.0
+    )
+    standard_video_speed = coerce_standard_video_speed(
+        render_settings.get("standard_video_speed", 1.0)
     )
 
     OUTPUT_DIR.mkdir(
@@ -1818,6 +1850,10 @@ def main() -> int:
     # --------------------------------------------------------
 
     add_sound_effects()
+
+    # Apply the user-selected Standard speed only after all Standard layers
+    # have been timed and baked, keeping captions, emoji, and SFX aligned.
+    apply_standard_video_speed(standard_video_speed)
 
     # --------------------------------------------------------
     # STEP 10.5

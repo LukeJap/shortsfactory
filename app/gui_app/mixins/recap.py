@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -57,6 +58,7 @@ from editor_asset_plan import (
 from recap_media.artifacts import (
     RecapArtifactContext,
     resolve_recap_artifact_context,
+    resolve_recap_artifact_context_for_script,
     resolve_recap_editor_plan_paths,
 )
 from recap_media.audio_mix import (
@@ -67,6 +69,8 @@ from recap_media.audio_mix import (
 )
 from recap_media.caption_alignment import (
     build_narration_captions,
+    build_segment_narration_captions,
+    probable_dropped_words,
     write_narration_captions,
     write_narration_captions_ass_file,
 )
@@ -136,6 +140,7 @@ def _clean_recap_editor_effects() -> dict:
 
 from ..settings_keys import (
     RECAP_NARRATION_GAIN_DB,
+    RECAP_NARRATION_SPEED,
     RECAP_NARRATION_PITCH_SEMITONES,
     RECAP_SOURCE_PITCH_SEMITONES,
     RECAP_SCRIPT_SOURCE,
@@ -172,6 +177,12 @@ class RecapMixin:
         if not 0.5 <= playback_speed <= 2.0:
             playback_speed = RECAP_PLAYBACK_SPEED
 
+        try:
+            narration_speed = float(getattr(self, "recap_narration_speed", 1.0))
+        except (TypeError, ValueError):
+            narration_speed = 1.0
+        narration_speed = max(0.8, min(1.2, narration_speed))
+
         low, high = NARRATION_PITCH_SEMITONES_RANGE
 
         def pitch(attribute: str, default: float) -> float:
@@ -190,6 +201,7 @@ class RecapMixin:
 
         return {
             "playback_speed": playback_speed,
+            "narration_speed": narration_speed,
             "narration_pitch_semitones": pitch(
                 "recap_narration_pitch_semitones", DEFAULT_NARRATION_PITCH_SEMITONES
             ),
@@ -205,6 +217,7 @@ class RecapMixin:
         settings = self._recap_audio_settings()
         if hasattr(self, "settings"):
             self.settings.setValue(RECAP_NARRATION_GAIN_DB, settings["narration_gain_db"])
+            self.settings.setValue(RECAP_NARRATION_SPEED, settings["narration_speed"])
         plan = getattr(self, "editor_asset_plan", None)
         if isinstance(plan, dict):
             plan["recap_audio_settings"] = dict(settings)
@@ -255,6 +268,7 @@ class RecapMixin:
 
         for attribute, key, default in (
             ("recap_speed", "playback_speed", RECAP_PLAYBACK_SPEED),
+            ("recap_narration_speed", "narration_speed", 1.0),
             (
                 "recap_narration_pitch_semitones",
                 "narration_pitch_semitones",
@@ -272,10 +286,18 @@ class RecapMixin:
             except (TypeError, ValueError):
                 value = default
             setattr(self, attribute, value)
+        self.recap_narration_speed = max(
+            0.8,
+            min(1.2, self.recap_narration_speed),
+        )
         if hasattr(self, "recap_speed_combo"):
             self.recap_speed_combo.blockSignals(True)
             self.recap_speed_combo.setCurrentText(f"{self.recap_speed:.2f}x")
             self.recap_speed_combo.blockSignals(False)
+        if hasattr(self, "recap_narration_speed_spinbox"):
+            self.recap_narration_speed_spinbox.blockSignals(True)
+            self.recap_narration_speed_spinbox.setValue(self.recap_narration_speed)
+            self.recap_narration_speed_spinbox.blockSignals(False)
         for widget_name, value in (
             ("recap_narration_pitch_spinbox", self.recap_narration_pitch_semitones),
             ("recap_source_pitch_spinbox", self.recap_source_pitch_semitones),
@@ -306,14 +328,10 @@ class RecapMixin:
 
         if not hasattr(self, "drop_zone"):
             return
-        if recap_mode:
-            self.drop_zone.setMinimumHeight(220)
-            self.drop_zone.setMaximumHeight(240)
-        else:
-            self.drop_zone.setMinimumHeight(360)
-            self.drop_zone.setMaximumHeight(16_777_215)
+        self.drop_zone.setMinimumHeight(220)
+        self.drop_zone.setMaximumHeight(240)
         if hasattr(self, "source_layout"):
-            self.source_layout.setStretchFactor(self.drop_zone, 0 if recap_mode else 1)
+            self.source_layout.setStretchFactor(self.drop_zone, 0)
 
     def clear_recap_artifact_context(self):
         """Drop recap state when the editor source changes."""
@@ -387,6 +405,8 @@ class RecapMixin:
         if hasattr(self, "standard_short_button"):
             self.standard_short_button.setChecked(not recap_mode)
         self.recap_mode = "recap" if recap_mode else "standard"
+        if hasattr(self, "apply_standard_video_speed_preview"):
+            self.apply_standard_video_speed_preview()
         if hasattr(self, "stop_standard_pitch_preview"):
             self.stop_standard_pitch_preview()
         if hasattr(self, "update_native_preview_audio_mute"):
@@ -597,10 +617,16 @@ class RecapMixin:
 
     def import_external_recap_script(self, path: Path) -> bool:
         try:
-            context = self._active_recap_artifact_context()
-            identity, story_map = self._accepted_recap_context()
+            selected_path = Path(path).expanduser().resolve(strict=False)
+            source = getattr(self, "video_path", None)
+            context = resolve_recap_artifact_context_for_script(
+                source,
+                selected_path,
+            )
+            identity = load_episode_identity(context.episode_identity_path)
+            story_map = load_verified_story_map(context.verified_story_map_path)
             script = load_external_recap_script(
-                Path(path),
+                selected_path,
                 episode_identity=identity,
                 verified_story_map=story_map,
             )
@@ -608,7 +634,7 @@ class RecapMixin:
             self._show_recap_import_error(str(exc))
             self._sync_recap_script_source_combo()
             return False
-        self.recap_external_script_path = Path(path)
+        self.recap_external_script_path = selected_path
         self._activate_valid_external_script(script, identity, story_map, context)
         return True
 
@@ -980,6 +1006,15 @@ class RecapMixin:
         )
         self._persist_recap_audio_settings()
 
+    def recap_narration_speed_changed(self, value: float):
+        try:
+            speed = float(value)
+        except (TypeError, ValueError):
+            speed = 1.0
+        self.recap_narration_speed = max(0.8, min(1.2, speed))
+        self.settings.setValue(RECAP_NARRATION_SPEED, self.recap_narration_speed)
+        self._persist_recap_audio_settings()
+
     def recap_source_pitch_changed(self, value: float):
         low, high = NARRATION_PITCH_SEMITONES_RANGE
         try:
@@ -1065,6 +1100,108 @@ class RecapMixin:
                 inputs.recap_script["segments"],
                 wav_paths_by_segment=narration_wavs,
             )
+
+            # A generated take can occasionally swallow one internal word
+            # while still returning a perfectly valid, full-length WAV.  The
+            # existing Whisper alignment is the only stage that can identify
+            # that failure reliably. Retry at most one affected block, once,
+            # with its exact authoritative text.
+            suspect = next(
+                (
+                    segment_captions
+                    for segment_captions in captions.get("segments", [])
+                    if probable_dropped_words(segment_captions)
+                ),
+                None,
+            )
+            if suspect is not None:
+                segment_id = str(suspect["segment_id"])
+                segment = next(
+                    item
+                    for item in inputs.recap_script["segments"]
+                    if item["segment_id"] == segment_id
+                )
+                wav_path = narration_wavs[segment_id]
+                diagnostic_path = wav_path.with_name(f"{wav_path.stem}.incomplete.wav")
+                shutil.copy2(wav_path, diagnostic_path)
+                missing = ", ".join(probable_dropped_words(suspect))
+                self.append_recap_log(
+                    f"Narration {segment_id} appears to omit {missing!r}; retrying once. "
+                    f"Original preserved at {diagnostic_path.name}."
+                )
+                self.append_recap_log(f"Narration {segment_id} retry text: {segment['text']}")
+                retry = synthesize_segment(
+                    OrpheusProvider(),
+                    segment_id,
+                    segment["text"],
+                    voice=self.recap_voice,
+                    speed=audio_settings["narration_speed"],
+                    output_dir=context.voiceover_dir,
+                    manifest_path=context.voiceover_manifest_path,
+                    force=True,
+                )
+                if retry.error or retry.wav_path is None:
+                    raise RecapRenderError(
+                        f"Narration {segment_id} completeness retry failed: {retry.error}"
+                    )
+
+                retry_captions = build_segment_narration_captions(
+                    segment_id,
+                    segment["text"],
+                    wav_path=retry.wav_path,
+                )
+                still_missing = probable_dropped_words(retry_captions)
+                if still_missing:
+                    raise RecapRenderError(
+                        f"Narration {segment_id} still appears incomplete after one retry "
+                        f"({', '.join(still_missing)}). Use the per-block Regenerate control."
+                    )
+
+                captions["segments"] = [
+                    retry_captions if item.get("segment_id") == segment_id else item
+                    for item in captions.get("segments", [])
+                ]
+                durations = load_voiceover_durations(context.voiceover_manifest_path)
+                self.recap_sequence = assemble_sequence(
+                    inputs.recap_script,
+                    durations,
+                    verified_story_map=inputs.verified_story_map,
+                    source_video=_recap_source_filename(inputs.episode_identity),
+                )
+                self.recap_sequence = interweave_original_dialogue(
+                    self.recap_sequence,
+                    inputs.recap_script,
+                    verified_story_map=inputs.verified_story_map,
+                    source_video=_recap_source_filename(inputs.episode_identity),
+                )
+                write_recap_sequence(self.recap_sequence, context.recap_sequence_path)
+                new_clips = self._rebuild_voiceover_clips(inputs, durations, self.recap_sequence)
+                self.editor_asset_plan = replace_kind_clips(
+                    self.editor_asset_plan, "VOICEOVER", new_clips
+                )
+                self.save_editor_asset_plan_state()
+                voiceover_clips = clips_of_kind(self.editor_asset_plan, "VOICEOVER")
+                active_voiceover_clips = [
+                    clip
+                    for clip in voiceover_clips
+                    if clip.get("active", True) and not clip.get("deleted")
+                ]
+                if hasattr(self, "write_persistent_title_for_export"):
+                    title_ass_path = self.write_persistent_title_for_export(
+                        context.persistent_title_ass_path,
+                        recap_final_duration_seconds(
+                            float(
+                                self.recap_sequence.get("total_duration_seconds", 0.0)
+                                or 0.0
+                            ),
+                            audio_settings["playback_speed"],
+                        ),
+                    )
+                self.append_recap_log(
+                    f"Narration {segment_id} retry passed; sequence timing updated from "
+                    f"the {retry.duration_seconds:.2f}s WAV."
+                )
+
             write_narration_captions(captions, context.narration_captions_path)
             combined_captions = build_combined_recap_caption_plan(
                 self.recap_sequence,
@@ -1594,7 +1731,7 @@ class RecapMixin:
                 provider,
                 inputs.recap_script["segments"],
                 voice=self.recap_voice,
-                speed=getattr(self, "recap_speed", 1.5),
+                speed=self._recap_audio_settings()["narration_speed"],
                 output_dir=context.voiceover_dir,
                 manifest_path=context.voiceover_manifest_path,
                 on_segment_start=report_segment_start,
@@ -1804,7 +1941,7 @@ class RecapMixin:
             clip["id"],
             segment["text"],
             voice=self.recap_voice,
-            speed=getattr(self, "recap_speed", 1.5),
+            speed=self._recap_audio_settings()["narration_speed"],
             output_dir=context.voiceover_dir,
             manifest_path=context.voiceover_manifest_path,
             force=True,

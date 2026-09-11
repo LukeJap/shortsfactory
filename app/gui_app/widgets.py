@@ -99,6 +99,10 @@ class ProgramMonitorComposition(QWidget):
         self._filter_preview_energy = "PUNCHY"
         self._filter_preview_intensity = 1.0
         self._filter_preview_color_adjustments = (1.0, 1.0, 0.0)
+        # The caption-free Recap editor base is rendered with the production
+        # base grade already applied. Re-applying the interactive grade to
+        # every decoded frame is both inaccurate and needlessly expensive.
+        self._source_base_polish_baked = False
         self._filter_refresh_timer = QTimer(self)
         self._filter_refresh_timer.setSingleShot(True)
         self._filter_refresh_timer.setInterval(30)
@@ -215,6 +219,16 @@ class ProgramMonitorComposition(QWidget):
         self._filter_preview_color_adjustments = self._filter_preview_values()
         self._filter_refresh_timer.start()
 
+    def set_source_base_polish_baked(self, baked: bool):
+        """Mark media whose production base grade is already present."""
+
+        baked = bool(baked)
+        if self._source_base_polish_baked == baked:
+            return
+        self._source_base_polish_baked = baked
+        self._filter_refresh_timer.stop()
+        self._refresh_filter_preview()
+
     def _filter_preview_values(self) -> tuple[float, float, float]:
         if not self._filter_preview_enabled or self._filter_preview_intensity <= 0.0:
             return (1.0, 1.0, 0.0)
@@ -245,6 +259,7 @@ class ProgramMonitorComposition(QWidget):
 
         if (
             pixmap.isNull()
+            or self._source_base_polish_baked
             or not self._filter_preview_enabled
             or self._filter_preview_intensity <= 0.0
         ):

@@ -33,6 +33,11 @@ def test_default_caption_position_is_within_the_canvas():
     assert 0.0 <= DEFAULT_CAPTION_POSITION_Y <= 1.0
 
 
+def test_default_caption_position_is_in_the_lower_blurred_source_band():
+    assert CAPTION_SAFE_MARGIN_BOTTOM == 600
+    assert DEFAULT_CAPTION_POSITION_Y > 0.65
+
+
 def test_default_caption_position_is_already_within_the_safe_drag_zone():
     # The default shouldn't need clamping -- if it did, the "default" and
     # "floor/ceiling" values would be fighting each other.

@@ -76,7 +76,6 @@ try:
         expand_moments_to_events,
         merge_motion_events,
         motion_events_for_moments,
-        visual_fx_strength_from_energy,
         write_plan as write_fx_plan,
     )
 except ImportError:
@@ -88,7 +87,6 @@ except ImportError:
         expand_moments_to_events,
         merge_motion_events,
         motion_events_for_moments,
-        visual_fx_strength_from_energy,
         write_plan as write_fx_plan,
     )
 
@@ -137,18 +135,10 @@ def main() -> int:
             1.0,
         )
     )
-    raw_visual_fx_strength = settings.get("visual_fx_strength")
-    visual_fx_strength = (
-        visual_fx_strength_from_energy(edit_energy)
-        if raw_visual_fx_strength is None
-        else coerce_visual_fx_strength(raw_visual_fx_strength)
+    visual_fx_strength = coerce_visual_fx_strength(
+        settings.get("visual_fx_strength")
     )
-    filters_enabled = bool(
-        settings.get(
-            "filters_enabled",
-            True,
-        )
-    )
+    filters_enabled = intensity > 0.0
     content_rect = content_rect_from_settings(
         settings
     )

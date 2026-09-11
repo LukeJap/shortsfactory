@@ -58,6 +58,48 @@ def _caption(start: float, end: float, text: str, block_id: str, domain: str) ->
     }
 
 
+def _source_word_interval_on_base_timeline(
+    shot: dict[str, Any],
+    word_start: float,
+    word_end: float,
+) -> tuple[float, float] | None:
+    """Map one absolute source word into its shot's assembly timeline."""
+
+    source_start = _number(shot.get("resolved_start", shot.get("start")))
+    source_end = _number(shot.get("resolved_end", shot.get("end")))
+    if source_end <= source_start or word_end <= source_start or word_start >= source_end:
+        return None
+
+    source_speed = _number(shot.get("source_playback_speed"), 1.0)
+    if source_speed <= 0:
+        source_speed = 1.0
+
+    timeline_start = _number(shot.get("timeline_start_seconds"))
+    timeline_duration = _number(
+        shot.get("timeline_duration_seconds"),
+        (source_end - source_start) / source_speed,
+    )
+    timeline_end = _number(
+        shot.get("timeline_end_seconds"),
+        timeline_start + timeline_duration,
+    )
+    if timeline_end <= timeline_start:
+        return None
+
+    clipped_source_start = max(source_start, word_start)
+    clipped_source_end = min(source_end, word_end)
+    mapped_start = timeline_start + (clipped_source_start - source_start) / source_speed
+    mapped_end = timeline_start + (clipped_source_end - source_start) / source_speed
+
+    # The sequence is authoritative. Rounding or imperfect transcript edges
+    # must never let source dialogue continue into the next Recap block.
+    mapped_start = max(timeline_start, min(timeline_end, mapped_start))
+    mapped_end = max(timeline_start, min(timeline_end, mapped_end))
+    if mapped_end <= mapped_start:
+        return None
+    return mapped_start, mapped_end
+
+
 def build_combined_recap_caption_plan(
     sequence: dict[str, Any],
     narration_captions: dict[str, Any],
@@ -109,22 +151,25 @@ def build_combined_recap_caption_plan(
                 cues.append(cue)
 
     for segment in sequence.get("segments", []):
-        if not isinstance(segment, dict) or str(segment.get("block_type", "")) != "source_moment":
+        if not isinstance(segment, dict):
             continue
         block_id = str(segment.get("segment_id", ""))
         for shot in segment.get("shots", []):
             if not isinstance(shot, dict) or not shot.get("source_audio_insert"):
                 continue
-            source_start = _number(shot.get("resolved_start", shot.get("start")))
-            source_end = _number(shot.get("resolved_end", shot.get("end")))
-            timeline_start = _number(shot.get("timeline_start_seconds"))
             for word in _source_words(shot.get("transcript_cache_path")):
                 word_start, word_end = _number(word.get("start")), _number(word.get("end"))
-                if word_end <= source_start or word_start >= source_end:
+                mapped = _source_word_interval_on_base_timeline(
+                    shot,
+                    word_start,
+                    word_end,
+                )
+                if mapped is None:
                     continue
+                mapped_start, mapped_end = mapped
                 cue = _caption(
-                    recap_base_to_final_time(timeline_start + max(0.0, word_start - source_start), playback_speed),
-                    recap_base_to_final_time(timeline_start + min(source_end - source_start, word_end - source_start), playback_speed),
+                    recap_base_to_final_time(mapped_start, playback_speed),
+                    recap_base_to_final_time(mapped_end, playback_speed),
                     str(word.get("text") or word.get("word") or ""), block_id, "source_dialogue",
                 )
                 if cue:

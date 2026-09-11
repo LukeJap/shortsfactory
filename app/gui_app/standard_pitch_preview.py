@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink
 
-from standard_audio_pitch import build_standard_audio_pitch_filter
+from standard_audio_pitch import build_standard_audio_preview_filter
 
 
 class StandardPitchPreview:
@@ -28,9 +28,16 @@ class StandardPitchPreview:
         self._timer.setInterval(10)
         self._timer.timeout.connect(self._pump_audio)
 
-    def start(self, source_path: Path, position_ms: int, semitones: float, volume: float) -> bool:
-        pitch_filter = build_standard_audio_pitch_filter(semitones)
-        if not pitch_filter or not source_path.is_file():
+    def start(
+        self,
+        source_path: Path,
+        position_ms: int,
+        semitones: float,
+        playback_speed: float,
+        volume: float,
+    ) -> bool:
+        audio_filter = build_standard_audio_preview_filter(semitones, playback_speed)
+        if not audio_filter or not source_path.is_file():
             return False
         self.stop()
         audio_format = QAudioFormat()
@@ -45,7 +52,7 @@ class StandardPitchPreview:
             "-nostdin", "-hide_banner", "-loglevel", "error",
             "-ss", f"{max(0.0, int(position_ms) / 1000.0):.3f}",
             "-i", str(source_path), "-map", "0:a:0?", "-vn",
-            "-af", pitch_filter, "-ac", str(self.CHANNELS),
+            "-af", audio_filter, "-ac", str(self.CHANNELS),
             "-ar", str(self.SAMPLE_RATE), "-f", "s16le", "pipe:1",
         ])
         self._process.start()

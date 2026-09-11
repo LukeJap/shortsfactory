@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+from standard_video_speed import build_standard_audio_tempo_filter
+
 
 DEFAULT_STANDARD_AUDIO_PITCH_SEMITONES = 0.0
 STANDARD_AUDIO_PITCH_SEMITONES_RANGE = (-4.0, 4.0)
@@ -36,6 +38,23 @@ def build_standard_audio_pitch_filter(semitones: object) -> str:
         f"rubberband=pitch={standard_audio_pitch_ratio(value):.6f}:tempo=1.000:"
         "formant=preserved:pitchq=quality"
     )
+
+
+def build_standard_audio_preview_filter(
+    semitones: object,
+    playback_speed: object,
+) -> str:
+    """Combine independent pitch and tempo transforms for Standard playback."""
+
+    filters = [
+        value
+        for value in (
+            build_standard_audio_pitch_filter(semitones),
+            build_standard_audio_tempo_filter(playback_speed),
+        )
+        if value
+    ]
+    return ",".join(filters)
 
 
 def format_standard_audio_pitch(semitones: object) -> str:

@@ -7,6 +7,7 @@ from visual_emphasis import (
     auto_cut_profile,
     coerce_auto_cut_aggression,
     energy_profile,
+    migrate_legacy_edit_preset_settings,
 )
 
 
@@ -84,3 +85,27 @@ def test_auto_cut_aggression_coerces_legacy_and_invalid_saved_values():
     assert coerce_auto_cut_aggression(-1) == 0
     assert coerce_auto_cut_aggression(101) == 100
     assert coerce_auto_cut_aggression("invalid") == 50
+
+
+def test_legacy_edit_preset_migrates_to_slider_values_and_is_removed():
+    migrated = migrate_legacy_edit_preset_settings({"edit_energy": "MAXIMUM"})
+
+    assert migrated == {"auto_cut_aggression": 75, "visual_fx_strength": 75}
+    assert migrate_legacy_edit_preset_settings(
+        {"edit_energy": "LOW", "auto_cut_aggression": 65}
+    ) == {"auto_cut_aggression": 65, "visual_fx_strength": 25}
+
+
+def test_legacy_disabled_toggles_migrate_to_zero_valued_sliders():
+    assert migrate_legacy_edit_preset_settings(
+        {"auto_cuts_enabled": False, "filters_enabled": "0"}
+    ) == {"auto_cut_aggression": 0, "fx_intensity": 0.0}
+
+    assert migrate_legacy_edit_preset_settings(
+        {
+            "auto_cuts_enabled": False,
+            "auto_cut_aggression": 60,
+            "filters_enabled": False,
+            "fx_intensity": 1.25,
+        }
+    ) == {"auto_cut_aggression": 60, "fx_intensity": 1.25}

@@ -7,14 +7,9 @@ from the GUI thread), and provides the double-click picker (a grid of
 local reaction assets plus a custom-emoji text field) for changing which
 reaction is shown at a given moment.
 
-Once a "Generate Emoji" plan exists (output/editor_asset_plan.json's
-EMOJI clips, see gui_app/mixins/editor_assets.py) and still matches the
-current source video/selection, that plan becomes the live source of
-truth here too -- both for what the overlay renders and for where a drag/
-swap made *on the video preview* gets saved -- so it stays in sync with
-the editor timeline's EMOJI lane in both directions. Falls back to the
-legacy output/emoji_events.json flow when no such plan exists yet (i.e.
-before "Generate Emoji" has ever been run for this selection).
+Only active EMOJI clips in output/editor_asset_plan.json are rendered in the
+editor. That makes the monitor and timeline share one source of truth: a new
+clip has no draggable reactions until Generate Emoji creates real entities.
 """
 
 from __future__ import annotations
@@ -205,24 +200,22 @@ class EmojiPreviewMixin:
                 )
 
 
-    def emoji_editor_plan_clips_for_preview(self) -> list[dict] | None:
+    def emoji_editor_plan_clips_for_preview(self) -> list[dict]:
         """
-        The current selection's active EMOJI editor-plan clips (absolute
-        source-video time, same convention as emoji_events.json's own
-        "absolute" time_base) if a "Generate Emoji" plan exists and its
-        stored context still matches the current selection, else None so
-        the caller falls back to the legacy emoji_events.json preview.
+        The current selection's active EMOJI editor-plan clips in absolute
+        source-video time. An unmatched plan belongs to another selection and
+        must not become a draggable monitor-only reaction.
         """
 
         if not self.editor_asset_context_matches_current_selection():
-            return None
+            return []
 
         clips = clips_of_kind(
             self.editor_asset_plan,
             "EMOJI",
             active_only=True,
         )
-        return clips or None
+        return clips
 
 
     def active_emoji_preview_events(
@@ -230,55 +223,23 @@ class EmojiPreviewMixin:
         position_ms: int,
     ) -> list[tuple[str, str | int, dict]]:
         """
-        Returns (source, key, event) tuples for whichever emoji reactions
-        are active at position_ms -- source is "editor_plan" (key is the
-        clip id in output/editor_asset_plan.json) or "legacy" (key is the
-        event's index in output/emoji_events.json), so callers that save a
-        drag/swap know which store to write back into.
+        Returns (source, key, event) tuples for generated editor-plan emoji
+        clips that are active at position_ms.
         """
 
         editor_clips = self.emoji_editor_plan_clips_for_preview()
-        if editor_clips is not None:
-
-            reference_ms = int(position_ms)
-
-            active = []
-            for clip in editor_clips:
-                try:
-                    start_ms = int(round(float(clip.get("start", 0.0)) * 1000))
-                    end_ms = int(round(float(clip.get("end", 0.0)) * 1000))
-                except (TypeError, ValueError):
-                    continue
-                if start_ms <= reference_ms <= max(start_ms, end_ms):
-                    clip_id = str(clip.get("id", "") or "")
-                    if clip_id:
-                        active.append(("editor_plan", clip_id, clip))
-
-            return active
-
-        data = self.load_emoji_events_file()
-        events = data.get("events", [])
-        if not isinstance(events, list):
-            return []
-
-        if data.get("time_base") == "absolute":
-            reference_ms = int(position_ms)
-        else:
-            reference_ms = int(position_ms) - int(
-                getattr(self, "start_ms", 0)
-            )
-
+        reference_ms = int(position_ms)
         active = []
-        for index, event in enumerate(events):
-            if not isinstance(event, dict):
-                continue
+        for clip in editor_clips:
             try:
-                start_ms = int(round(float(event.get("start", 0.0)) * 1000))
-                end_ms = int(round(float(event.get("end", 0.0)) * 1000))
+                start_ms = int(round(float(clip.get("start", 0.0)) * 1000))
+                end_ms = int(round(float(clip.get("end", 0.0)) * 1000))
             except (TypeError, ValueError):
                 continue
             if start_ms <= reference_ms <= max(start_ms, end_ms):
-                active.append(("legacy", index, event))
+                clip_id = str(clip.get("id", "") or "")
+                if clip_id:
+                    active.append(("editor_plan", clip_id, clip))
 
         return active
 

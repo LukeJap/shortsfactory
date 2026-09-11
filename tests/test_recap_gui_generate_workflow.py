@@ -31,6 +31,7 @@ class _RecapWindow(recap_module.RecapMixin):
         self.recap_script_valid = True
         self.recap_voice = "tara"
         self.recap_speed = 1.5
+        self.recap_narration_speed = 1.0
         self.generate_recap_sequence_button = _Button()
         self.generate_recap_voiceover_button = _Button()
         self.editor_asset_plan = {"version": 1, "clips": []}
@@ -143,6 +144,7 @@ def test_open_recap_in_editor_loads_the_recap_owned_shared_asset_plan(tmp_path):
                 "editable_overlays_baked": False,
                 "recap_audio_settings": {
                     "playback_speed": 1.5,
+                    "narration_speed": 1.0,
                     "narration_pitch_semitones": 1.8,
                     "source_pitch_semitones": 1.8,
                     "narration_gain_db": 4.0,
@@ -341,6 +343,7 @@ def test_editor_base_media_keeps_its_source_bound_recap_context(tmp_path):
 def test_recap_audio_controls_are_persisted_with_the_active_editor_plan(tmp_path):
     window = _RecapWindow(_context(tmp_path), _inputs())
     window.recap_speed = 1.25
+    window.recap_narration_speed = 0.9
     window.recap_narration_pitch_semitones = 3.0
     window.recap_source_pitch_semitones = 0.0
     window.recap_narration_gain_db = 4.0
@@ -351,6 +354,7 @@ def test_recap_audio_controls_are_persisted_with_the_active_editor_plan(tmp_path
     assert settings == window.editor_asset_plan["recap_audio_settings"]
     assert settings == {
         "playback_speed": 1.25,
+        "narration_speed": 0.9,
         "narration_pitch_semitones": 3.0,
         "source_pitch_semitones": 0.0,
         "narration_gain_db": 4.0,
@@ -369,6 +373,7 @@ def test_recap_audio_updates_merge_and_round_trip_persistent_title_state(tmp_pat
         "active": True,
     }
     window.recap_speed = 1.5
+    window.recap_narration_speed = 0.9
     window.recap_narration_pitch_semitones = 3.0
     window.recap_source_pitch_semitones = 3.0
     window.recap_narration_gain_db = 4.0
@@ -379,6 +384,7 @@ def test_recap_audio_updates_merge_and_round_trip_persistent_title_state(tmp_pat
     assert persisted["persistent_title"] == window.editor_asset_plan["persistent_title"]
     assert persisted["recap_audio_settings"] == {
         "playback_speed": 1.5,
+        "narration_speed": 0.9,
         "narration_pitch_semitones": 3.0,
         "source_pitch_semitones": 3.0,
         "narration_gain_db": 4.0,
@@ -392,6 +398,17 @@ def test_recap_audio_updates_merge_and_round_trip_persistent_title_state(tmp_pat
     reloaded = load_editor_asset_plan(context.editor_asset_plan_path)
     assert reloaded["persistent_title"] == persisted["persistent_title"]
     assert reloaded["recap_audio_settings"]["playback_speed"] == 1.0
+
+
+def test_recap_narration_speed_restores_from_the_active_editor_plan(tmp_path):
+    window = _RecapWindow(_context(tmp_path), _inputs())
+
+    settings = window._restore_recap_audio_settings(
+        {"recap_audio_settings": {"narration_speed": 0.9}}
+    )
+
+    assert window.recap_narration_speed == 0.9
+    assert settings["narration_speed"] == 0.9
 
 
 def test_editor_base_keeps_canonical_preview_when_staged_media_validation_fails(
@@ -547,6 +564,7 @@ def test_v2_generate_voiceover_uses_active_root_and_only_narration(monkeypatch, 
     context = _context(tmp_path)
     inputs = _inputs()
     window = _RecapWindow(context, inputs)
+    window.recap_narration_speed = 0.9
     captured: dict[str, object] = {}
 
     class _Provider:
@@ -557,6 +575,7 @@ def test_v2_generate_voiceover_uses_active_root_and_only_narration(monkeypatch, 
         assert isinstance(provider, _Provider)
         captured["output_dir"] = kwargs["output_dir"]
         captured["manifest_path"] = kwargs["manifest_path"]
+        captured["speed"] = kwargs["speed"]
         callback = kwargs["on_segment_start"]
         narration = [
             segment
@@ -599,6 +618,7 @@ def test_v2_generate_voiceover_uses_active_root_and_only_narration(monkeypatch, 
     assert captured["narration_ids"] == ["N_001", "N_002"]
     assert captured["output_dir"] == context.voiceover_dir
     assert captured["manifest_path"] == context.voiceover_manifest_path
+    assert captured["speed"] == 0.9
     assert sequence_paths == [context.recap_sequence_path]
     assert any("Narration 1/2: N_001 processing" in line for line in window.log_lines)
     assert any("Narration 2/2: N_002 processing" in line for line in window.log_lines)

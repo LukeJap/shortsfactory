@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from recap_media.artifacts import resolve_recap_artifact_context
+from recap_media.artifacts import (
+    resolve_recap_artifact_context,
+    resolve_recap_artifact_context_for_script,
+)
 from recap_media.loader import RecapInputError, load_episode_identity, load_external_recap_script, load_verified_story_map
 
 
@@ -120,3 +123,64 @@ def test_equally_complete_matching_artifacts_fail_instead_of_guessing(tmp_path):
 
     with pytest.raises(RecapInputError, match="Multiple AI Recap artifact sets"):
         resolve_recap_artifact_context(source, output_dir=output_dir)
+
+
+def test_explicit_script_anchors_to_its_matching_artifact_folder(tmp_path):
+    output_dir = tmp_path / "output"
+    source = tmp_path / "input" / "episode.mkv"
+    source.parent.mkdir()
+    source.touch()
+    old_root = output_dir / "recap_episode"
+    new_root = output_dir / "recap_episode_v2"
+    _write_artifacts(old_root, source.name, 3)
+    _write_artifacts(new_root, source.name, 3)
+    old_script = old_root / "recap_script.json"
+    new_script = new_root / "recap_script.json"
+    old_script.write_text(json.dumps(_external_b003_script()), encoding="utf-8")
+    new_script.write_text(json.dumps(_external_b003_script()), encoding="utf-8")
+
+    new_context = resolve_recap_artifact_context_for_script(
+        source, new_script, output_dir=output_dir
+    )
+    old_context = resolve_recap_artifact_context_for_script(
+        source, old_script, output_dir=output_dir
+    )
+
+    assert new_context.root == new_root.resolve()
+    assert old_context.root == old_root.resolve()
+
+
+def test_explicit_script_with_incomplete_parent_falls_back_to_discovery(tmp_path):
+    output_dir = tmp_path / "output"
+    source = tmp_path / "input" / "episode.mkv"
+    source.parent.mkdir()
+    source.touch()
+    matching_root = output_dir / "recap_episode"
+    _write_artifacts(matching_root, source.name, 3)
+    selected_script = tmp_path / "imports" / "recap_script.json"
+    selected_script.parent.mkdir()
+    selected_script.write_text(json.dumps(_external_b003_script()), encoding="utf-8")
+
+    context = resolve_recap_artifact_context_for_script(
+        source, selected_script, output_dir=output_dir
+    )
+
+    assert context.root == matching_root.resolve()
+
+
+def test_complete_script_parent_for_another_source_fails_without_fallback(tmp_path):
+    output_dir = tmp_path / "output"
+    source = tmp_path / "input" / "episode.mkv"
+    source.parent.mkdir()
+    source.touch()
+    matching_root = output_dir / "recap_matching"
+    selected_root = output_dir / "recap_other"
+    _write_artifacts(matching_root, source.name, 3)
+    _write_artifacts(selected_root, "other_episode.mkv", 3)
+    selected_script = selected_root / "recap_script.json"
+    selected_script.write_text(json.dumps(_external_b003_script()), encoding="utf-8")
+
+    with pytest.raises(RecapInputError, match="does not match the loaded source"):
+        resolve_recap_artifact_context_for_script(
+            source, selected_script, output_dir=output_dir
+        )

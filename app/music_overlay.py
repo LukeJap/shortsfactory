@@ -184,8 +184,9 @@ def music_volume_expression(
     event's window can be active at a given timestamp.
     """
 
+    volume = normalized_music_gain(volume)
     base = f"{volume:.4f}"
-    ducked = f"{max(0.0, volume * 0.58):.4f}"
+    ducked = f"{volume * 0.58:.4f}"
     expression = base
 
     for event in reversed(
@@ -207,6 +208,35 @@ def music_volume_expression(
         )
 
     return expression
+
+
+def normalized_music_gain(volume: float) -> float:
+    """Shared linear music gain used by preview and final rendering."""
+
+    try:
+        value = float(volume)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, value))
+
+
+def music_gain_at_time(volume: float, events: list[dict], time_seconds: float) -> float:
+    """Evaluate the same SFX ducking policy used by the FFmpeg expression."""
+
+    gain = normalized_music_gain(volume)
+    try:
+        current_time = float(time_seconds)
+    except (TypeError, ValueError):
+        return gain
+    for event in events:
+        try:
+            start = max(0.0, float(event["start"]) - 0.06)
+            end = float(event["end"]) + 0.18
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start <= current_time <= end:
+            return gain * 0.58
+    return gain
 
 
 def main() -> int:

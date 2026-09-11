@@ -18,7 +18,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 
 from ..helpers import format_precise_time, format_time
 from ..settings_keys import PREVIEW_VOLUME
-from standard_audio_pitch import build_standard_audio_pitch_filter
+from standard_audio_pitch import build_standard_audio_preview_filter
 
 
 class PlaybackMixin:
@@ -26,10 +26,23 @@ class PlaybackMixin:
     def standard_pitch_preview_enabled(self) -> bool:
         return bool(
             getattr(self, "recap_mode", "standard") == "standard"
-            and build_standard_audio_pitch_filter(
-                self.current_standard_audio_pitch_semitones()
+            and build_standard_audio_preview_filter(
+                self.current_standard_audio_pitch_semitones(),
+                self.current_standard_video_speed(),
             )
         )
+
+    def apply_standard_video_speed_preview(self):
+        if not hasattr(self, "player"):
+            return
+        speed = (
+            self.current_standard_video_speed()
+            if getattr(self, "recap_mode", "standard") == "standard"
+            else 1.0
+        )
+        self.player.setPlaybackRate(speed)
+        if hasattr(self, "sync_music_preview"):
+            self.sync_music_preview(force=True)
 
     def update_native_preview_audio_mute(self):
         self.audio_output.setMuted(self.standard_pitch_preview_enabled())
@@ -59,6 +72,7 @@ class PlaybackMixin:
             self.video_path,
             self.player.position(),
             self.current_standard_audio_pitch_semitones(),
+            self.current_standard_video_speed(),
             self.preview_volume / 100,
         )
         if started:
@@ -140,6 +154,16 @@ class PlaybackMixin:
         self.video_path = path
         if hasattr(self, "_set_recap_episode_context"):
             self._set_recap_episode_context()
+        composition = getattr(self, "program_monitor_composition", None)
+        if composition is not None:
+            # Recap Open in Editor plays the cached caption-free render, not
+            # the raw episode. Its production base polish is already baked
+            # into that media, so bypass the per-frame interactive preview
+            # grade while preserving it for Standard source playback.
+            composition.set_source_base_polish_baked(
+                getattr(self, "recap_mode", "standard") == "recap"
+                and bool(getattr(self, "recap_editor_mode", False))
+            )
         self.configure_program_monitor_framing(path)
 
         # Word-wrap alone doesn't help a long underscore-separated filename
@@ -169,6 +193,7 @@ class PlaybackMixin:
                 str(path)
             )
         )
+        self.apply_standard_video_speed_preview()
         self.player.setPosition(
             0
         )
@@ -469,6 +494,8 @@ class PlaybackMixin:
             self.player.setPosition(
                 self.start_ms
             )
+            if hasattr(self, "sync_music_preview"):
+                self.sync_music_preview(self.start_ms, force=True)
             self.schedule_standard_pitch_preview_restart()
             self.timeline.setValue(
                 self.start_ms
@@ -517,6 +544,8 @@ class PlaybackMixin:
         self.trigger_sfx_previews(
             position
         )
+        if hasattr(self, "sync_music_preview"):
+            self.sync_music_preview(position)
         self.update_emoji_preview_overlay(
             position
         )
@@ -637,6 +666,8 @@ class PlaybackMixin:
         self.player.setPosition(
             position
         )
+        if hasattr(self, "sync_music_preview"):
+            self.sync_music_preview(position, force=True)
         if was_playing:
             self.stop_standard_pitch_preview()
             self.schedule_standard_pitch_preview_restart()
@@ -1235,6 +1266,8 @@ class PlaybackMixin:
                 self.preview_volume
                 / 100
             )
+        if hasattr(self, "update_music_preview_volume"):
+            self.update_music_preview_volume()
 
         self.preview_volume_label.setText(
             f"{self.preview_volume}%"

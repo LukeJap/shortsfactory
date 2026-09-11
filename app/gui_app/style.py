@@ -292,18 +292,90 @@ STYLESHEET =            """
                 padding: 8px;
             }
 
+            QDialog,
+            QMessageBox,
+            QInputDialog {
+                color: #F2ECE4;
+                background-color: #121216;
+                border: 1px solid #40333A;
+            }
+
+            QMessageBox QLabel,
+            QInputDialog QLabel,
+            QDialog QLabel {
+                color: #F2ECE4;
+                background: transparent;
+            }
+
+            QMessageBox QLabel#qt_msgbox_label,
+            QMessageBox QLabel#qt_msgbox_informativelabel {
+                min-width: 300px;
+                padding: 8px 10px;
+                color: #F2ECE4;
+                font-size: 13px;
+            }
+
+            QMessageBox QPushButton,
+            QDialogButtonBox QPushButton,
+            QInputDialog QPushButton {
+                min-width: 82px;
+                min-height: 30px;
+                padding: 5px 14px;
+                color: #F4EFE6;
+                background: #1A1A1F;
+                border: 1px solid #4B3038;
+                border-radius: 4px;
+                font-weight: 700;
+            }
+
+            QMessageBox QPushButton:hover,
+            QDialogButtonBox QPushButton:hover,
+            QInputDialog QPushButton:hover {
+                color: #FFFFFF;
+                background: #28151B;
+                border: 1px solid #C9384F;
+            }
+
+            QMessageBox QPushButton:pressed,
+            QDialogButtonBox QPushButton:pressed,
+            QInputDialog QPushButton:pressed {
+                background: #10090C;
+                border: 1px solid #8D3445;
+            }
+
+            QMessageBox QPushButton:default,
+            QDialogButtonBox QPushButton:default,
+            QInputDialog QPushButton:default {
+                color: #FFF3E3;
+                background: #4E1520;
+                border: 1px solid #E05C6F;
+            }
+
             QInputDialog QTextEdit,
             QInputDialog QPlainTextEdit,
-            QInputDialog QLineEdit {
-                color: #000000;
-                background: #FFFFFF;
-                selection-color: #000000;
-                selection-background-color: #B8D7FF;
+            QInputDialog QLineEdit,
+            QInputDialog QSpinBox,
+            QInputDialog QDoubleSpinBox,
+            QDialog QTextEdit,
+            QDialog QPlainTextEdit,
+            QDialog QLineEdit,
+            QDialog QSpinBox,
+            QDialog QDoubleSpinBox {
+                color: #F2ECE4;
+                background: #09090A;
+                border: 1px solid #4B3038;
+                border-radius: 3px;
+                padding: 7px 9px;
+                selection-color: #FFFFFF;
+                selection-background-color: #741C28;
             }
 
             QInputDialog QComboBox,
             QInputDialog QListView,
-            QInputDialog QAbstractItemView {
+            QInputDialog QAbstractItemView,
+            QDialog QComboBox,
+            QDialog QListView,
+            QDialog QAbstractItemView {
                 color: #F2ECE4;
                 background: #09090A;
                 border: 1px solid #5D252E;
@@ -504,32 +576,6 @@ STYLESHEET =            """
                 border: 1px solid #C9384F;
             }
 
-            QPushButton#EditStyleButton {
-                color: #968B86;
-                background: #101012;
-                border: 1px solid #30292D;
-                border-radius: 4px;
-                padding: 7px 3px;
-                min-height: 38px;
-                font-size: 9px;
-                font-weight: 900;
-                letter-spacing: 1px;
-            }
-
-            QPushButton#EditStyleButton:hover {
-                color: #F2E6D4;
-                background: #1A1115;
-                border: 1px solid #8D3445;
-            }
-
-            QPushButton#EditStyleButton:checked {
-                color: #FFF3E3;
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);
-                border: 1px solid #E05C6F;
-            }
-
-            QPushButton#AutoCutsToggle,
-            QPushButton#FiltersToggle,
             QPushButton#EmojiToggle {
                 color: #968B86;
                 background: #101012;
@@ -543,16 +589,12 @@ STYLESHEET =            """
                 text-align: left;
             }
 
-            QPushButton#AutoCutsToggle:hover,
-            QPushButton#FiltersToggle:hover,
             QPushButton#EmojiToggle:hover {
                 color: #F2E6D4;
                 background: #1A1115;
                 border: 1px solid #8D3445;
             }
 
-            QPushButton#AutoCutsToggle:checked,
-            QPushButton#FiltersToggle:checked,
             QPushButton#EmojiToggle:checked {
                 color: #FFF3E3;
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4E1520, stop:1 #741C28);

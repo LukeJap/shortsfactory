@@ -21,7 +21,6 @@ from typing import Any
 
 try:
     from .visual_emphasis import (
-        auto_cut_aggression_from_energy,
         auto_cut_profile,
         coerce_auto_cut_aggression,
         energy_profile,
@@ -30,7 +29,6 @@ try:
     )
 except ImportError:
     from visual_emphasis import (
-        auto_cut_aggression_from_energy,
         auto_cut_profile,
         coerce_auto_cut_aggression,
         energy_profile,
@@ -1467,12 +1465,7 @@ def load_and_merge_cuts(
             "PUNCHY",
         )
     )
-    raw_aggression = settings.get("auto_cut_aggression")
-    aggression = (
-        auto_cut_aggression_from_energy(energy)
-        if raw_aggression is None
-        else coerce_auto_cut_aggression(raw_aggression)
-    )
+    aggression = coerce_auto_cut_aggression(settings.get("auto_cut_aggression"))
     profile = auto_cut_profile(aggression)
 
     if aggression <= 0:

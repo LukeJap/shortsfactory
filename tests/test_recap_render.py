@@ -107,6 +107,9 @@ def test_recap_title_filter_is_composited_before_narration_captions(tmp_path):
     assert filter_complex.index("[recap_titled]") < filter_complex.index(
         "[recap_captioned]"
     )
+    assert filter_complex.index("setpts=PTS/1.500") < filter_complex.index(
+        "[recap_playback_video]subtitles="
+    )
     assert "YouTubeShortsMockOverlay" not in filter_complex
 
 
@@ -461,8 +464,9 @@ def test_filter_complex_includes_captions_when_path_given(tmp_path):
     )
 
     assert f"subtitles=filename={escape_ffmpeg_filter_path(ass_path)}" in filter_complex
-    assert "[recap_captioned]setpts=PTS/1.500" in filter_complex
-    assert video_label == "recap_playback_video"
+    assert "[recap_playback_video]subtitles=" in filter_complex
+    assert filter_complex.index("setpts=PTS/1.500") < filter_complex.index("subtitles=")
+    assert video_label == "recap_captioned"
 
 
 def test_filter_complex_uses_shared_fx_sfx_and_emoji_before_the_single_speed_pass(tmp_path):
@@ -507,8 +511,11 @@ def test_filter_complex_uses_shared_fx_sfx_and_emoji_before_the_single_speed_pas
     assert "[3:v]format=rgba" in filter_complex
     assert "[ov0]subtitles=" in filter_complex
     assert filter_complex.index("[ov0]subtitles=") < filter_complex.index("setpts=PTS/1.500")
+    assert filter_complex.index("setpts=PTS/1.500") < filter_complex.index(
+        "[recap_playback_video]subtitles="
+    )
     assert filter_complex.count("atempo=1.500") == 1
-    assert video_label == "recap_playback_video"
+    assert video_label == "recap_captioned"
     assert audio_label == "recap_playback_audio"
 
 
@@ -750,7 +757,7 @@ def test_filter_complex_escapes_windows_ass_drive_path_for_subtitles():
     assert escape_ffmpeg_filter_path(ass_path) == expected_path
     assert f"subtitles=filename={expected_path}" in filter_complex
     assert "original_size=/Users" not in filter_complex
-    assert "[recap_captioned]setpts=PTS/1.500" in filter_complex
+    assert "[recap_playback_video]subtitles=" in filter_complex
 
 
 def test_filter_path_escaping_leaves_posix_paths_valid():

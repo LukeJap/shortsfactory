@@ -1,7 +1,13 @@
 from emoji_overlay import (
+    CANVAS_HEIGHT,
+    CANVAS_WIDTH,
+    CAPTION_TEXT_HEIGHT_ESTIMATE_PX,
+    EMOJI_CAPTION_GAP_PX,
+    EMOJI_SIZE,
     build_emoji_filter_complex,
     console_safe_text,
     coerce_emoji_fraction,
+    default_position_slots,
     emoji_fraction_to_pixel,
     emoji_pixel_to_fraction,
     event_default_position_px,
@@ -29,20 +35,26 @@ def test_coerce_emoji_fraction_clamps():
     assert coerce_emoji_fraction(0.4) == 0.4
 
 
-def test_pixel_fraction_round_trip_matches_legacy_positions():
-    # The default round-robin table must still land on the exact same
-    # pixel positions after being stored/retrieved as a fraction.
-    for x, y in [(760, 1300), (170, 1340), (750, 1430), (190, 1460)]:
-        fx, fy = emoji_pixel_to_fraction(x, y)
-        px, py = emoji_fraction_to_pixel(fx, fy)
-        assert round(px) == x
-        assert round(py) == y
+def test_pixel_fraction_round_trip_matches_centered_default_position():
+    x, y = event_default_position_px(0)
+    fx, fy = emoji_pixel_to_fraction(x, y)
+    px, py = emoji_fraction_to_pixel(fx, fy)
+    assert round(px) == x
+    assert round(py) == y
 
 
-def test_event_default_position_cycles_through_table():
-    assert event_default_position_px(0) == (760, 1300)
-    assert event_default_position_px(4) == (760, 1300)
-    assert event_default_position_px(1) == (170, 1340)
+def test_event_default_position_stays_centered_above_captions():
+    caption_anchor_y = 1320
+    slots = default_position_slots(caption_anchor_y)
+    assert slots == [slots[0]] * 4
+    emoji_x, emoji_y = slots[0]
+    assert emoji_x == (CANVAS_WIDTH - EMOJI_SIZE) // 2
+    assert emoji_y + EMOJI_SIZE + EMOJI_CAPTION_GAP_PX == (
+        caption_anchor_y - CAPTION_TEXT_HEIGHT_ESTIMATE_PX
+    )
+    assert 0 <= emoji_y <= CANVAS_HEIGHT - EMOJI_SIZE
+    assert event_default_position_px(0, caption_anchor_y) == slots[0]
+    assert event_default_position_px(4, caption_anchor_y) == slots[0]
 
 
 def test_emoji_filter_can_chain_after_caption_video_label():

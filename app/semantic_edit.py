@@ -19,7 +19,6 @@ import requests
 try:
     from .ollama_config import OLLAMA_HOST, OLLAMA_MODEL
     from .visual_emphasis import (
-        auto_cut_aggression_from_energy,
         auto_cut_energy_for_aggression,
         auto_cut_profile,
         coerce_auto_cut_aggression,
@@ -34,7 +33,6 @@ try:
 except ImportError:
     from ollama_config import OLLAMA_HOST, OLLAMA_MODEL
     from visual_emphasis import (
-        auto_cut_aggression_from_energy,
         auto_cut_energy_for_aggression,
         auto_cut_profile,
         coerce_auto_cut_aggression,
@@ -773,12 +771,7 @@ def main() -> int:
             "PUNCHY",
         )
     )
-    raw_aggression = settings.get("auto_cut_aggression")
-    aggression = (
-        auto_cut_aggression_from_energy(energy)
-        if raw_aggression is None
-        else coerce_auto_cut_aggression(raw_aggression)
-    )
+    aggression = coerce_auto_cut_aggression(settings.get("auto_cut_aggression"))
     auto_cut_energy = auto_cut_energy_for_aggression(aggression)
     profile = auto_cut_profile(aggression)
     verification_threshold = float(

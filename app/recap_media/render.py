@@ -613,24 +613,6 @@ def build_recap_filter_complex(
         # builder carries labels without brackets between stages.
         final_video_label = final_video_label.strip("[]")
 
-    if title_ass_path is not None:
-        title_filter = (
-            f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(title_ass_path)}"
-            "[recap_titled]"
-        )
-        final_video_label = "recap_titled"
-    else:
-        title_filter = None
-
-    if captions_ass_path is not None:
-        caption_filter = (
-            f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
-            "[recap_captioned]"
-        )
-        final_video_label = "recap_captioned"
-    else:
-        caption_filter = None
-
     duck_filter = build_duck_filter_complex(
         duck_plan,
         narration_label=f"[{narration_label}]",
@@ -657,6 +639,27 @@ def build_recap_filter_complex(
     final_video_label = speed_video_label
     final_audio_label = speed_audio_label
 
+    # Combined captions and the persistent title are authored in the final
+    # Recap timeline. Burn them after the one shared playback transform so
+    # their timestamps are not accelerated a second time.
+    if title_ass_path is not None:
+        title_filter = (
+            f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(title_ass_path)}"
+            "[recap_titled]"
+        )
+        final_video_label = "recap_titled"
+    else:
+        title_filter = None
+
+    if captions_ass_path is not None:
+        caption_filter = (
+            f"[{final_video_label}]subtitles=filename={escape_ffmpeg_filter_path(captions_ass_path)}"
+            "[recap_captioned]"
+        )
+        final_video_label = "recap_captioned"
+    else:
+        caption_filter = None
+
     fragments = [video_filter, source_audio_filter, narration_filter, portrait_filter]
     if motion_filter is not None:
         fragments.append(motion_filter)
@@ -664,14 +667,14 @@ def build_recap_filter_complex(
         fragments.append(fx_filter)
     if emoji_filter is not None:
         fragments.append(emoji_filter)
-    if title_filter is not None:
-        fragments.append(title_filter)
-    if caption_filter is not None:
-        fragments.append(caption_filter)
     fragments.append(duck_filter)
     if sfx_filter is not None:
         fragments.append(sfx_filter)
     fragments.append(playback_filter)
+    if title_filter is not None:
+        fragments.append(title_filter)
+    if caption_filter is not None:
+        fragments.append(caption_filter)
 
     return ";".join(fragments), final_video_label, final_audio_label
 

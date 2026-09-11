@@ -11,7 +11,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QUrl
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QFileDialog
+
+from music_overlay import music_gain_at_time, normalized_music_gain
 
 from ..constants import ROOT
 
@@ -23,7 +27,115 @@ def music_picker_start_directory() -> Path:
     return music_directory if music_directory.is_dir() else ROOT
 
 
+def editor_position_to_music_position(
+    position_ms: int,
+    timeline_start_ms: int = 0,
+    playback_speed: float = 1.0,
+) -> int:
+    """Map source/editor transport time onto the final-output music clock."""
+
+    try:
+        speed = float(playback_speed)
+    except (TypeError, ValueError):
+        speed = 1.0
+    if speed <= 0:
+        speed = 1.0
+    return max(0, round((int(position_ms) - int(timeline_start_ms)) / speed))
+
+
 class MusicMixin:
+
+    def music_preview_duck_events(self) -> list[dict]:
+        visible_clips = getattr(self, "visible_editor_asset_clips", lambda: [])()
+        events = []
+        for clip in visible_clips:
+            if str(clip.get("kind", "")).upper() != "SFX" or not clip.get("active", True):
+                continue
+            try:
+                start = float(clip["start"])
+                end = float(clip["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end > start:
+                events.append({"start": start, "end": end})
+        return events
+
+    def current_music_preview_gain(self, position_ms: int | None = None) -> float:
+        music_gain = normalized_music_gain(
+            float(getattr(self, "music_volume", 0)) / 100.0
+        )
+        master_gain = normalized_music_gain(
+            float(getattr(self, "preview_volume", 100)) / 100.0
+        )
+        if position_ms is None:
+            player = getattr(self, "player", None)
+            position_ms = player.position() if player is not None else 0
+        ducked_gain = music_gain_at_time(
+            music_gain,
+            self.music_preview_duck_events(),
+            max(0, int(position_ms)) / 1000.0,
+        )
+        return ducked_gain * master_gain
+
+    def update_music_preview_volume(self, position_ms: int | None = None):
+        output = getattr(self, "music_preview_audio", None)
+        if output is not None:
+            output.setVolume(self.current_music_preview_gain(position_ms))
+
+    def music_preview_timeline_position(self, position_ms: int | None = None) -> int:
+        player = getattr(self, "player", None)
+        if position_ms is None:
+            position_ms = player.position() if player is not None else 0
+        speed = player.playbackRate() if player is not None else 1.0
+        start_ms = int(getattr(self, "start_ms", 0) or 0)
+        return editor_position_to_music_position(position_ms, start_ms, speed)
+
+    def sync_music_preview(self, position_ms: int | None = None, force: bool = False):
+        preview = getattr(self, "music_preview_player", None)
+        music_path = getattr(self, "music_path", None)
+        if preview is None or music_path is None:
+            return
+
+        expected = self.music_preview_timeline_position(position_ms)
+        duration = int(preview.duration() or 0)
+        if duration > 0:
+            expected %= duration
+        if force or abs(int(preview.position()) - expected) > 180:
+            preview.setPosition(expected)
+        self.update_music_preview_volume(position_ms)
+
+    def update_music_preview_playback_state(self, state):
+        preview = getattr(self, "music_preview_player", None)
+        if preview is None or getattr(self, "music_path", None) is None:
+            return
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.sync_music_preview(force=True)
+            preview.play()
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            preview.pause()
+        else:
+            preview.stop()
+            self.sync_music_preview(force=True)
+
+    def configure_music_preview(self):
+        preview = getattr(self, "music_preview_player", None)
+        music_path = getattr(self, "music_path", None)
+        if preview is None:
+            return
+        preview.stop()
+        preview.setSource(
+            QUrl.fromLocalFile(str(music_path)) if music_path is not None else QUrl()
+        )
+        self.update_music_preview_volume()
+        if music_path is None:
+            return
+        self.sync_music_preview(force=True)
+        player = getattr(self, "player", None)
+        if (
+            player is not None
+            and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        ):
+            preview.play()
 
     def choose_music(self):
 
@@ -56,6 +168,8 @@ class MusicMixin:
             "♫ Change Music"
         )
 
+        self.configure_music_preview()
+
 
     def clear_music(self):
 
@@ -73,6 +187,8 @@ class MusicMixin:
             "♫ Add Music"
         )
 
+        self.configure_music_preview()
+
 
     def music_volume_changed(
         self,
@@ -84,6 +200,8 @@ class MusicMixin:
         self.music_volume_label.setText(
             f"{value}%"
         )
+
+        self.update_music_preview_volume()
 
 
     def append_music_log(

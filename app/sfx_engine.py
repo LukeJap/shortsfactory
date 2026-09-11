@@ -30,6 +30,7 @@ try:
         clips_of_kind,
         editor_plan_context_matches,
         load_editor_asset_plan,
+        replace_kind_clips,
         save_editor_asset_plan,
         set_editor_plan_context,
     )
@@ -49,6 +50,7 @@ except ImportError:
         clips_of_kind,
         editor_plan_context_matches,
         load_editor_asset_plan,
+        replace_kind_clips,
         save_editor_asset_plan,
         set_editor_plan_context,
     )
@@ -3590,6 +3592,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
     )
+    parser.add_argument(
+        "--editor-plan-path",
+        type=Path,
+        default=EDITOR_ASSET_PLAN_PATH,
+    )
+    parser.add_argument("--source-video", default=None)
+    parser.add_argument("--time-basis", default="source")
+    parser.add_argument("--transcript", type=Path, default=SUBTITLES_PATH)
     return parser.parse_args()
 
 
@@ -3682,14 +3692,15 @@ def transcript_category_and_score(
 def transcript_editor_candidates(
     selection_start: float,
     selection_end: float,
+    transcript_path: Path = SUBTITLES_PATH,
 ) -> list[dict[str, Any]]:
 
     transcript = read_json(
-        SUBTITLES_PATH
+        transcript_path
     )
     raw_segments = transcript.get(
         "segments",
-        [],
+        transcript.get("cues", []),
     )
     if not isinstance(
         raw_segments,
@@ -3922,6 +3933,9 @@ def editor_candidates(
     selection_start: float,
     selection_end: float,
     energy: str,
+    *,
+    transcript_path: Path = SUBTITLES_PATH,
+    include_visual_plans: bool = True,
 ) -> list[dict[str, Any]]:
 
     duration = max(
@@ -3929,19 +3943,20 @@ def editor_candidates(
         selection_end
         - selection_start,
     )
-    visual_plan = read_json(
-        VISUAL_EDIT_PLAN_PATH
-    )
-    temporal_plan = read_json(
-        TEMPORAL_EDIT_PLAN_PATH
-    )
-
-    candidates = collapse_stacks(
-        candidates_from_plan(
-            visual_plan,
-            temporal_plan,
+    candidates = []
+    if include_visual_plans:
+        visual_plan = read_json(
+            VISUAL_EDIT_PLAN_PATH
         )
-    )
+        temporal_plan = read_json(
+            TEMPORAL_EDIT_PLAN_PATH
+        )
+        candidates = collapse_stacks(
+            candidates_from_plan(
+                visual_plan,
+                temporal_plan,
+            )
+        )
 
     source_candidates: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -3980,6 +3995,7 @@ def editor_candidates(
     transcript_candidates = transcript_editor_candidates(
         selection_start,
         selection_end,
+        transcript_path,
     )
 
     # Visual/temporal events are often sparse and can cluster in the first few
@@ -4002,6 +4018,11 @@ def write_editor_sfx_plan(
     selection_end: float,
     energy: str,
     mode: str,
+    *,
+    editor_plan_path: Path = EDITOR_ASSET_PLAN_PATH,
+    source_video: str | None = None,
+    time_basis: str = "source",
+    transcript_path: Path = SUBTITLES_PATH,
 ) -> dict[str, Any]:
 
     plan = base_plan(
@@ -4022,6 +4043,8 @@ def write_editor_sfx_plan(
             selection_start,
             selection_end,
             energy,
+            transcript_path=transcript_path,
+            include_visual_plans=time_basis == "source",
         ),
         energy,
         selection_start=selection_start,
@@ -4042,7 +4065,7 @@ def write_editor_sfx_plan(
         sfx_clip_from_event(
             {
                 **event,
-                "time_basis": "source",
+                "time_basis": time_basis,
                 "origin": "automatic",
                 "manual_override": False,
             }
@@ -4051,13 +4074,13 @@ def write_editor_sfx_plan(
     ]
     settings = load_render_settings()
     source_video = str(
-        settings.get(
-            "source_video",
-            "",
-        )
+        source_video
+        if source_video is not None
+        else settings.get("source_video", "")
         or ""
     )
-    editor_plan = load_editor_asset_plan()
+    editor_plan_path = Path(editor_plan_path).expanduser().resolve(strict=False)
+    editor_plan = load_editor_asset_plan(editor_plan_path)
     context_matches = editor_plan_context_matches(
         editor_plan,
         source_video,
@@ -4072,27 +4095,15 @@ def write_editor_sfx_plan(
         clear_clips_on_change=not context_matches,
     )
 
-    retained = [
-        clip
-        for clip in editor_plan.get(
-            "clips",
-            [],
-        )
-        if isinstance(clip, dict)
-        and str(
-            clip.get(
-                "kind",
-                "",
-            )
-            or ""
-        ).upper() != "SFX"
-    ]
-    retained.extend(
-        editor_clips
+    editor_plan = replace_kind_clips(
+        editor_plan,
+        "SFX",
+        editor_clips,
+        preserve_manual=True,
     )
-    editor_plan["clips"] = retained
     save_editor_asset_plan(
-        editor_plan
+        editor_plan,
+        editor_plan_path,
     )
 
     plan.update(
@@ -4130,7 +4141,7 @@ def write_editor_sfx_plan(
             ],
             "skipped": skipped,
             "editor_asset_plan": str(
-                EDITOR_ASSET_PLAN_PATH
+                editor_plan_path
             ),
             "mix": {
                 "applied": False,
@@ -4205,6 +4216,10 @@ def main() -> int:
             ),
             energy,
             mode,
+            editor_plan_path=args.editor_plan_path,
+            source_video=args.source_video,
+            time_basis=args.time_basis,
+            transcript_path=args.transcript,
         )
         print(
             f"Editor SFX clips: {editor_plan.get('event_count', 0)}"

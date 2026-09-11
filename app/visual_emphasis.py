@@ -395,6 +395,33 @@ def auto_cut_aggression_from_energy(energy: Any) -> int:
     return AUTO_CUT_AGGRESSION_BY_ENERGY[normalize_energy(energy)]
 
 
+def migrate_legacy_edit_preset_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Replace retired preset/toggle controls with their slider equivalents."""
+
+    payload = dict(settings)
+    legacy = str(payload.pop("edit_energy", "") or "").strip().upper()
+    if legacy in AUTO_CUT_AGGRESSION_BY_ENERGY:
+        migrated_value = AUTO_CUT_AGGRESSION_BY_ENERGY[legacy]
+        payload.setdefault("auto_cut_aggression", migrated_value)
+        payload.setdefault("visual_fx_strength", migrated_value)
+
+    legacy_auto_cuts = payload.pop("auto_cuts_enabled", None)
+    if (
+        legacy_auto_cuts is not None
+        and str(legacy_auto_cuts).strip().lower() in {"false", "0", ""}
+    ):
+        payload.setdefault("auto_cut_aggression", 0)
+
+    legacy_filters = payload.pop("filters_enabled", None)
+    if (
+        legacy_filters is not None
+        and str(legacy_filters).strip().lower() in {"false", "0", ""}
+    ):
+        payload.setdefault("fx_intensity", 0.0)
+
+    return payload
+
+
 def auto_cut_energy_for_aggression(aggression: Any) -> str:
     value = coerce_auto_cut_aggression(aggression)
     if value <= 37:
@@ -502,16 +529,7 @@ def read_json(
 
 def load_render_settings() -> dict[str, Any]:
 
-    settings = read_json(
-        RENDER_SETTINGS_PATH
-    )
-
-    settings["edit_energy"] = normalize_energy(
-        settings.get(
-            "edit_energy",
-            DEFAULT_ENERGY,
-        )
-    )
+    settings = migrate_legacy_edit_preset_settings(read_json(RENDER_SETTINGS_PATH))
 
     settings["sfx_mode"] = normalize_sfx_mode(
         settings.get(
@@ -527,16 +545,7 @@ def write_render_settings(
     settings: dict[str, Any],
 ) -> None:
 
-    payload = dict(
-        settings
-    )
-
-    payload["edit_energy"] = normalize_energy(
-        payload.get(
-            "edit_energy",
-            DEFAULT_ENERGY,
-        )
-    )
+    payload = migrate_legacy_edit_preset_settings(settings)
 
     payload["sfx_mode"] = normalize_sfx_mode(
         payload.get(

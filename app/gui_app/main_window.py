@@ -49,17 +49,20 @@ from PySide6.QtWidgets import (
 
 from editor_asset_plan import load_editor_asset_plan
 from visual_emphasis import (
-    DEFAULT_ENERGY,
     auto_cut_aggression_from_energy,
     coerce_auto_cut_aggression,
-    normalize_energy,
     normalize_sfx_mode,
 )
-from visual_fx import coerce_visual_fx_strength, visual_fx_strength_from_energy
+from visual_fx import coerce_visual_fx_strength
 from standard_audio_pitch import (
     DEFAULT_STANDARD_AUDIO_PITCH_SEMITONES,
     coerce_standard_audio_pitch,
     format_standard_audio_pitch,
+)
+from standard_video_speed import (
+    DEFAULT_STANDARD_VIDEO_SPEED,
+    coerce_standard_video_speed,
+    format_standard_video_speed,
 )
 
 from .constants import ROOT
@@ -73,6 +76,7 @@ from .settings_keys import (
     MIN_EMOJI_EVENTS,
     PREVIEW_VOLUME,
     RECAP_NARRATION_GAIN_DB,
+    RECAP_NARRATION_SPEED,
     RECAP_NARRATION_PITCH_SEMITONES,
     RECAP_SOURCE_PITCH_SEMITONES,
     RECAP_SCRIPT_SOURCE,
@@ -81,6 +85,7 @@ from .settings_keys import (
     RECAP_VOICE,
     SFX_MODE,
     STANDARD_AUDIO_PITCH_SEMITONES,
+    STANDARD_VIDEO_SPEED,
     TRANSCRIPTION_QUALITY,
     VISUAL_FX_STRENGTH,
 )
@@ -361,42 +366,59 @@ class ShortsFactoryWindow(
         }:
             self.transcription_quality = "AUTO"
 
-        self.edit_energy = normalize_energy(
-            self.settings.value(
-                EDIT_ENERGY,
-                DEFAULT_ENERGY,
-            )
-            or DEFAULT_ENERGY
+        legacy_edit_energy = self.settings.value(EDIT_ENERGY, None)
+        legacy_slider_value = (
+            auto_cut_aggression_from_energy(legacy_edit_energy)
+            if legacy_edit_energy is not None
+            else None
         )
+        if legacy_edit_energy is not None:
+            self.settings.remove(EDIT_ENERGY)
 
-        # QSettings can hand back a string ("true"/"false") instead of a
-        # real bool depending on platform backend -- coerce defensively
-        # rather than trusting the stored type.
-        self.auto_cuts_enabled = str(
-            self.settings.value(
-                AUTO_CUTS_ENABLED,
-                True,
-            )
-        ).strip().lower() not in ("false", "0", "")
-        stored_auto_cut_aggression = self.settings.value(AUTO_CUT_AGGRESSION, None)
-        self.auto_cut_aggression = (
-            auto_cut_aggression_from_energy(self.edit_energy)
-            if stored_auto_cut_aggression is None
-            else coerce_auto_cut_aggression(stored_auto_cut_aggression)
+        # The former on/off controls are now represented by their sliders:
+        # zero means disabled. Migrate old stored booleans once, while an
+        # explicit slider value remains authoritative.
+        legacy_auto_cuts_value = self.settings.value(AUTO_CUTS_ENABLED, None)
+        legacy_auto_cuts_disabled = (
+            legacy_auto_cuts_value is not None
+            and str(legacy_auto_cuts_value).strip().lower() in ("false", "0", "")
         )
+        if legacy_auto_cuts_value is not None:
+            self.settings.remove(AUTO_CUTS_ENABLED)
+        stored_auto_cut_aggression = self.settings.value(AUTO_CUT_AGGRESSION, None)
+        if stored_auto_cut_aggression is None:
+            self.auto_cut_aggression = (
+                0 if legacy_auto_cuts_disabled else legacy_slider_value or 50
+            )
+            if legacy_slider_value is not None or legacy_auto_cuts_disabled:
+                self.settings.setValue(
+                    AUTO_CUT_AGGRESSION,
+                    self.auto_cut_aggression,
+                )
+        else:
+            self.auto_cut_aggression = coerce_auto_cut_aggression(
+                stored_auto_cut_aggression
+            )
         self.standard_audio_pitch_semitones = coerce_standard_audio_pitch(
             self.settings.value(
                 STANDARD_AUDIO_PITCH_SEMITONES,
                 DEFAULT_STANDARD_AUDIO_PITCH_SEMITONES,
             )
         )
-
-        self.filters_enabled = str(
+        self.standard_video_speed = coerce_standard_video_speed(
             self.settings.value(
-                FILTERS_ENABLED,
-                True,
+                STANDARD_VIDEO_SPEED,
+                DEFAULT_STANDARD_VIDEO_SPEED,
             )
-        ).strip().lower() not in ("false", "0", "")
+        )
+
+        legacy_filters_value = self.settings.value(FILTERS_ENABLED, None)
+        legacy_filters_disabled = (
+            legacy_filters_value is not None
+            and str(legacy_filters_value).strip().lower() in ("false", "0", "")
+        )
+        if legacy_filters_value is not None:
+            self.settings.remove(FILTERS_ENABLED)
 
         self.emoji_enabled = str(
             self.settings.value(
@@ -436,6 +458,13 @@ class ShortsFactoryWindow(
         if self.recap_speed not in {1.25, 1.5, 1.75}:
             self.recap_speed = 1.5
         try:
+            self.recap_narration_speed = float(
+                self.settings.value(RECAP_NARRATION_SPEED, 1.0) or 1.0
+            )
+        except (TypeError, ValueError):
+            self.recap_narration_speed = 1.0
+        self.recap_narration_speed = max(0.8, min(1.2, self.recap_narration_speed))
+        try:
             self.recap_narration_gain_db = float(
                 self.settings.value(
                     RECAP_NARRATION_GAIN_DB,
@@ -461,11 +490,17 @@ class ShortsFactoryWindow(
             min(pitch_high, self.recap_narration_pitch_semitones),
         )
         stored_visual_fx_strength = self.settings.value(VISUAL_FX_STRENGTH, None)
-        self.visual_fx_strength = (
-            visual_fx_strength_from_energy(self.edit_energy)
-            if stored_visual_fx_strength is None
-            else coerce_visual_fx_strength(stored_visual_fx_strength)
-        )
+        if stored_visual_fx_strength is None:
+            self.visual_fx_strength = legacy_slider_value or 50
+            if legacy_slider_value is not None:
+                self.settings.setValue(
+                    VISUAL_FX_STRENGTH,
+                    self.visual_fx_strength,
+                )
+        else:
+            self.visual_fx_strength = coerce_visual_fx_strength(
+                stored_visual_fx_strength
+            )
         try:
             self.recap_source_pitch_semitones = float(
                 self.settings.value(
@@ -502,22 +537,25 @@ class ShortsFactoryWindow(
             )
         except (TypeError, ValueError):
             self.min_emoji_events = 0
+        stored_fx_intensity = self.settings.value(FX_INTENSITY, None)
         try:
             self.fx_intensity = min(
                 2.0,
                 max(
                     0.0,
                     float(
-                        self.settings.value(
-                            FX_INTENSITY,
-                            1.0,
-                        )
-                        or 1.0
+                        0.0
+                        if stored_fx_intensity is None and legacy_filters_disabled
+                        else stored_fx_intensity
+                        if stored_fx_intensity is not None
+                        else 1.0
                     ),
                 ),
             )
         except (TypeError, ValueError):
             self.fx_intensity = 1.0
+        if stored_fx_intensity is None and legacy_filters_disabled:
+            self.settings.setValue(FX_INTENSITY, self.fx_intensity)
 
         self.sfx_mode = normalize_sfx_mode(
             self.settings.value(
@@ -677,6 +715,18 @@ class ShortsFactoryWindow(
             self.sfx_preview_audio
         )
 
+        self.music_preview_audio = QAudioOutput()
+        self.music_preview_player = QMediaPlayer()
+        self.music_preview_player.setAudioOutput(
+            self.music_preview_audio
+        )
+        self.music_preview_player.setLoops(
+            QMediaPlayer.Loops.Infinite
+        )
+        self.player.playbackStateChanged.connect(
+            self.update_music_preview_playback_state
+        )
+
         self.build_ui()
         self.apply_style()
         app = QApplication.instance()
@@ -770,8 +820,12 @@ class ShortsFactoryWindow(
         left_title.setObjectName("SectionTitle")
 
         self.drop_zone = DropZone(self.load_video)
-        self.drop_zone.setMinimumHeight(360)
-        self.drop_zone.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.drop_zone.setMinimumHeight(220)
+        self.drop_zone.setMaximumHeight(240)
+        self.drop_zone.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
 
         self.file_label = QLabel("No video loaded")
         self.file_label.setObjectName("FileLabel")
@@ -823,31 +877,9 @@ class ShortsFactoryWindow(
         edit_style_layout.setContentsMargins(10, 9, 10, 10)
         edit_style_layout.setSpacing(7)
 
-        edit_style_label = QLabel("EDIT STYLE")
+        edit_style_label = QLabel("EDIT CONTROLS")
         edit_style_label.setObjectName("TinyLabel")
         edit_style_layout.addWidget(edit_style_label)
-
-        self.auto_cuts_button = QPushButton(
-            "AUTO CUTS: ON" if self.auto_cuts_enabled else "AUTO CUTS: OFF"
-        )
-        self.auto_cuts_button.setObjectName("AutoCutsToggle")
-        self.auto_cuts_button.setCheckable(True)
-        self.auto_cuts_button.setChecked(self.auto_cuts_enabled)
-        self.auto_cuts_button.setToolTip(
-            "Removes dead air, silence, and redundant speech at render "
-            "time. Turn off to render the clip exactly as trimmed, full "
-            "length -- only your own manual cuts still apply."
-        )
-        self.auto_cuts_button.clicked.connect(self.auto_cuts_toggled)
-        edit_style_layout.addWidget(self.auto_cuts_button)
-
-        auto_cuts_subtext = QLabel(
-            "Removes dead air, silence, and redundant speech. Turn off "
-            "to keep the clip exactly as trimmed."
-        )
-        auto_cuts_subtext.setObjectName("HintLabel")
-        auto_cuts_subtext.setWordWrap(True)
-        edit_style_layout.addWidget(auto_cuts_subtext)
 
         auto_cut_aggression_row = QVBoxLayout()
         auto_cut_aggression_row.setSpacing(8)
@@ -862,8 +894,7 @@ class ShortsFactoryWindow(
         self.auto_cut_aggression_slider.setRange(0, 100)
         self.auto_cut_aggression_slider.setValue(self.auto_cut_aggression)
         self.auto_cut_aggression_slider.setToolTip(
-            "Controls only automatic pause and redundancy cuts. "
-            "25 matches Low, 50 matches Punchy, 75 matches Maximum."
+            "Controls automatic pause and redundancy cuts. Set to 0 to disable AutoCuts; higher values make tighter cuts."
         )
         self.auto_cut_aggression_slider.valueChanged.connect(
             self.auto_cut_aggression_changed
@@ -874,6 +905,35 @@ class ShortsFactoryWindow(
         auto_cut_aggression_row.addLayout(auto_cut_aggression_header)
         auto_cut_aggression_row.addWidget(self.auto_cut_aggression_slider)
         edit_style_layout.addLayout(auto_cut_aggression_row)
+
+        video_speed_row = QVBoxLayout()
+        video_speed_row.setSpacing(8)
+        video_speed_header = QHBoxLayout()
+        video_speed_header.setSpacing(8)
+        self.standard_video_speed_title = QLabel("VIDEO SPEED")
+        self.standard_video_speed_title.setObjectName("TinyLabel")
+        self.standard_video_speed_label = QLabel(
+            format_standard_video_speed(self.standard_video_speed)
+        )
+        self.standard_video_speed_label.setObjectName("MusicVolumeLabel")
+        self.standard_video_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.standard_video_speed_slider.setObjectName("StandardVideoSpeedSlider")
+        self.standard_video_speed_slider.setRange(50, 200)
+        self.standard_video_speed_slider.setSingleStep(25)
+        self.standard_video_speed_slider.setPageStep(25)
+        self.standard_video_speed_slider.setValue(round(self.standard_video_speed * 100))
+        self.standard_video_speed_slider.setToolTip(
+            "Standard Mode playback speed. Video and source audio stay synchronized; audio pitch remains a separate control."
+        )
+        self.standard_video_speed_slider.valueChanged.connect(
+            self.standard_video_speed_changed
+        )
+        video_speed_header.addWidget(self.standard_video_speed_title)
+        video_speed_header.addStretch()
+        video_speed_header.addWidget(self.standard_video_speed_label)
+        video_speed_row.addLayout(video_speed_header)
+        video_speed_row.addWidget(self.standard_video_speed_slider)
+        edit_style_layout.addLayout(video_speed_row)
 
         audio_pitch_row = QVBoxLayout()
         audio_pitch_row.setSpacing(8)
@@ -905,46 +965,6 @@ class ShortsFactoryWindow(
         audio_pitch_row.addWidget(self.standard_audio_pitch_slider)
         edit_style_layout.addLayout(audio_pitch_row)
 
-        edit_style_buttons = QVBoxLayout()
-        edit_style_buttons.setSpacing(6)
-
-        self.edit_style_group = QButtonGroup(self)
-        self.edit_style_group.setExclusive(True)
-        self.edit_style_buttons: dict[str, QPushButton] = {}
-
-        style_options = (
-            (
-                "LOW",
-                "LOW\nCLEAN",
-                "Cleaner, restrained editing with lighter motion, captions, FX, and SFX.",
-            ),
-            (
-                "PUNCHY",
-                "PUNCHY\nVIRAL",
-                "Fast viral Shorts pacing with balanced motion, captions, FX, and SFX.",
-            ),
-            (
-                "MAXIMUM",
-                "MAXIMUM\nHEAVY",
-                "Aggressive editing with the strongest motion, captions, FX, and SFX density.",
-            ),
-        )
-
-        for energy, button_text, tooltip in style_options:
-            button = QPushButton(button_text)
-            button.setObjectName("EditStyleButton")
-            button.setCheckable(True)
-            button.setChecked(energy == self.edit_energy)
-            button.setToolTip(tooltip)
-            button.clicked.connect(
-                lambda checked=False, value=energy: self.edit_energy_changed(value)
-            )
-            self.edit_style_group.addButton(button)
-            self.edit_style_buttons[energy] = button
-            edit_style_buttons.addWidget(button)
-
-        edit_style_layout.addLayout(edit_style_buttons)
-
         visual_fx_strength_row = QVBoxLayout()
         visual_fx_strength_row.setSpacing(8)
         visual_fx_strength_header = QHBoxLayout()
@@ -959,8 +979,7 @@ class ShortsFactoryWindow(
         self.visual_fx_strength_slider.setRange(0, 100)
         self.visual_fx_strength_slider.setValue(self.visual_fx_strength)
         self.visual_fx_strength_slider.setToolTip(
-            "Controls only automatic semantic visual effects. "
-            "25 matches Low, 50 matches Punchy, 75 matches Maximum."
+            "Controls automatic semantic visual effects. Higher values increase their density and strength."
         )
         self.visual_fx_strength_slider.valueChanged.connect(
             self.visual_fx_strength_changed
@@ -973,28 +992,6 @@ class ShortsFactoryWindow(
         visual_fx_strength_row.addWidget(self.visual_fx_strength_slider)
         edit_style_layout.addLayout(visual_fx_strength_row)
 
-        self.filters_button = QPushButton(
-            "FILTERS: ON" if self.filters_enabled else "FILTERS: OFF"
-        )
-        self.filters_button.setObjectName("FiltersToggle")
-        self.filters_button.setCheckable(True)
-        self.filters_button.setChecked(self.filters_enabled)
-        self.filters_button.setToolTip(
-            "Turns off color grading, vignette, and filter/graphic accents "
-            "for this render. Turn off for an unfiltered, natural-looking "
-            "export."
-        )
-        self.filters_button.clicked.connect(self.filters_toggled)
-        edit_style_layout.addWidget(self.filters_button)
-
-        filters_subtext = QLabel(
-            "Turns off color grading, vignette, and filter/graphic accents. "
-            "Smart motion (camera punch-ins) is unaffected."
-        )
-        filters_subtext.setObjectName("HintLabel")
-        filters_subtext.setWordWrap(True)
-        edit_style_layout.addWidget(filters_subtext)
-
         fx_intensity_row = QVBoxLayout()
         fx_intensity_row.setSpacing(8)
 
@@ -1003,24 +1000,20 @@ class ShortsFactoryWindow(
 
         self.fx_intensity_title = QLabel("FILTER INTENSITY")
         self.fx_intensity_title.setObjectName("TinyLabel")
-        self.fx_intensity_title.setEnabled(self.filters_enabled)
 
         self.fx_intensity_label = QLabel(
             f"{round(self.fx_intensity * 100)}%"
         )
         self.fx_intensity_label.setObjectName("MusicVolumeLabel")
-        self.fx_intensity_label.setEnabled(self.filters_enabled)
 
         self.fx_intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.fx_intensity_slider.setObjectName("MusicVolumeSlider")
         self.fx_intensity_slider.setRange(0, 200)
         self.fx_intensity_slider.setValue(round(self.fx_intensity * 100))
         self.fx_intensity_slider.setToolTip(
-            "Scales the color grade/vignette strength for the selected edit "
-            "style. 100% is the style's normal look; 0% disables it."
+            "Scales color grading, vignette, and filter accents. 100% is the normal look; set to 0% to disable filters."
         )
         self.fx_intensity_slider.valueChanged.connect(self.fx_intensity_changed)
-        self.fx_intensity_slider.setEnabled(self.filters_enabled)
 
         fx_intensity_header.addWidget(self.fx_intensity_title)
         fx_intensity_header.addStretch()
@@ -1182,6 +1175,27 @@ class ShortsFactoryWindow(
         recap_speed_row.addWidget(self.recap_speed_combo, 1)
         recap_layout.addLayout(recap_speed_row)
 
+        recap_narration_speed_row = QHBoxLayout()
+        recap_narration_speed_row.setSpacing(8)
+        recap_narration_speed_label = QLabel("NARRATION SPEED")
+        recap_narration_speed_label.setObjectName("TinyLabel")
+        self.recap_narration_speed_spinbox = QDoubleSpinBox()
+        self.recap_narration_speed_spinbox.setObjectName("CompactSpinBox")
+        self.recap_narration_speed_spinbox.setRange(0.8, 1.2)
+        self.recap_narration_speed_spinbox.setSingleStep(0.05)
+        self.recap_narration_speed_spinbox.setDecimals(2)
+        self.recap_narration_speed_spinbox.setSuffix("x")
+        self.recap_narration_speed_spinbox.setValue(self.recap_narration_speed)
+        self.recap_narration_speed_spinbox.setToolTip(
+            "Changes only the narrator's speaking rate. Source video and source audio are unchanged."
+        )
+        self.recap_narration_speed_spinbox.valueChanged.connect(
+            self.recap_narration_speed_changed
+        )
+        recap_narration_speed_row.addWidget(recap_narration_speed_label)
+        recap_narration_speed_row.addWidget(self.recap_narration_speed_spinbox, 1)
+        recap_layout.addLayout(recap_narration_speed_row)
+
         recap_pitch_row = QHBoxLayout()
         recap_pitch_row.setSpacing(8)
         recap_pitch_label = QLabel("NARRATION PITCH")
@@ -1342,6 +1356,7 @@ class ShortsFactoryWindow(
             self.recap_duration_spinbox,
             self.recap_voice_combo,
             self.recap_speed_combo,
+            self.recap_narration_speed_spinbox,
             self.recap_narration_pitch_spinbox,
             self.recap_source_pitch_spinbox,
             self.validate_recap_script_button,
@@ -1384,11 +1399,9 @@ class ShortsFactoryWindow(
         )
         for control in (
             self.find_clips_button,
-            self.auto_cuts_button,
             self.auto_cut_aggression_slider,
+            self.standard_video_speed_slider,
             self.standard_audio_pitch_slider,
-            *self.edit_style_buttons.values(),
-            self.filters_button,
             self.fx_intensity_slider,
         ):
             control.setMinimumWidth(0)

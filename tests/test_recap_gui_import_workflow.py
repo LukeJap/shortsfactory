@@ -119,6 +119,7 @@ class _RecapWindow(recap_module.RecapMixin):
         self.recap_script_valid = False
         self.recap_sequence = None
         self.recap_speed = 1.5
+        self.recap_narration_speed = 1.0
         self.recap_voice = DEFAULT_VOICE
         self.log_lines = []
         self.editor_refreshes = 0
@@ -227,6 +228,11 @@ def _patch_external_context(monkeypatch, tmp_path, script=None):
         recap_module,
         "resolve_recap_artifact_context",
         lambda _source: context,
+    )
+    monkeypatch.setattr(
+        recap_module,
+        "resolve_recap_artifact_context_for_script",
+        lambda _source, _script_path: context,
     )
     monkeypatch.setattr(recap_module, "load_episode_identity", lambda _path: _identity())
     monkeypatch.setattr(recap_module, "load_verified_story_map", lambda _path: _story_map())
@@ -442,6 +448,18 @@ def test_recap_pitch_settings_are_persisted_separately_from_overall_speed():
     assert window.settings.values[recap_module.RECAP_NARRATION_PITCH_SEMITONES] == 2.0
     assert window.recap_source_pitch_semitones == 1.8
     assert window.settings.values[recap_module.RECAP_SOURCE_PITCH_SEMITONES] == 1.8
+
+
+def test_recap_narration_speed_is_persisted_separately_from_overall_speed():
+    window = _RecapWindow()
+
+    window.recap_speed_changed("1.50x")
+    window.recap_narration_speed_changed(0.9)
+
+    assert window.recap_speed == 1.5
+    assert window.settings.values[recap_module.RECAP_SPEED] == 1.5
+    assert window.recap_narration_speed == 0.9
+    assert window.settings.values[recap_module.RECAP_NARRATION_SPEED] == 0.9
 
 
 def test_empty_session_does_not_claim_stale_recap_identity():

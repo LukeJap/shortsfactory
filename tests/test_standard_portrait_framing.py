@@ -85,3 +85,23 @@ def test_standard_render_base_video_applies_duration_preserving_pitch(monkeypatc
     assert command[command.index("-af") + 1] == (
         "rubberband=pitch=1.109569:tempo=1.000:formant=preserved:pitchq=quality"
     )
+
+
+def test_standard_final_speed_applies_matching_video_and_audio_tempo(monkeypatch, tmp_path):
+    commands = []
+    final_path = tmp_path / "short.mp4"
+    final_path.write_bytes(b"input")
+    monkeypatch.setattr(render, "CAPTION_OUTPUT_PATH", final_path)
+
+    def run_command(command):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"transformed")
+
+    monkeypatch.setattr(render, "run_command", run_command)
+
+    render.apply_standard_video_speed(1.5)
+
+    command = commands[0]
+    assert command[command.index("-vf") + 1] == "setpts=PTS/1.500000"
+    assert command[command.index("-af") + 1] == "atempo=1.500000"
+    assert final_path.read_bytes() == b"transformed"

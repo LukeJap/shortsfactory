@@ -45,6 +45,7 @@ from recap_media.effects import (
 )
 from emoji_overlay import normalize_emoji
 from make_captions import load_local_reaction_assets
+from pipeline_paths import EDITOR_ASSET_PLAN_PATH
 from sfx_engine import (
     asset_metadata_for_path,
     clamp_sfx_gain_db,
@@ -100,11 +101,12 @@ class EditorAssetsMixin:
         if not self.video_path or self.end_ms <= self.start_ms:
             return
 
+        source_video, selection_start, selection_end = self.current_editor_asset_context()
         self.editor_asset_plan = set_editor_plan_context(
             self.editor_asset_plan,
-            self.video_path,
-            self.start_ms / 1000,
-            self.end_ms / 1000,
+            source_video,
+            selection_start,
+            selection_end,
             clear_clips_on_change=clear_on_change,
         )
         self.selected_sfx_clip_id = None
@@ -145,6 +147,33 @@ class EditorAssetsMixin:
         if hasattr(self, "load_persistent_title_state"):
             self.load_persistent_title_state()
         self.refresh_editor_asset_timeline()
+
+
+    def editor_asset_generation_context(self) -> tuple[Path, str, float, float, str]:
+        """Return the active plan and timeline domain used by asset planners."""
+
+        source_video, selection_start, selection_end = self.current_editor_asset_context()
+        plan_path = getattr(self, "recap_editor_asset_plan_path", None)
+        time_basis = RECAP_TIME_BASIS if plan_path else "source"
+        return (
+            Path(plan_path) if plan_path else EDITOR_ASSET_PLAN_PATH,
+            source_video,
+            selection_start,
+            selection_end,
+            time_basis,
+        )
+
+
+    def editor_asset_generation_transcript_path(self) -> Path:
+        """Use final-timeline Recap captions when editing an assembled Recap."""
+
+        context = getattr(self, "recap_artifact_context", None)
+        recap_path = getattr(context, "recap_caption_plan_path", None)
+        if getattr(self, "recap_editor_asset_plan_path", None) and recap_path:
+            path = Path(recap_path)
+            if path.exists():
+                return path
+        return ROOT / "output" / "subtitles.json"
 
 
     def save_editor_asset_plan_state(self):
@@ -1599,6 +1628,10 @@ class EditorAssetsMixin:
         self.ensure_current_editor_asset_context(
             clear_on_change=True
         )
+        plan_path, source_video, selection_start, selection_end, time_basis = (
+            self.editor_asset_generation_context()
+        )
+        transcript_path = self.editor_asset_generation_transcript_path()
         self.save_render_settings()
         self.generate_sfx_button.setEnabled(False)
         self.generate_sfx_button.setText("Generating...")
@@ -1610,8 +1643,8 @@ class EditorAssetsMixin:
         )
         self.render_log.append(
             "Selection: "
-            f"{self.start_ms / 1000:.3f}s -> "
-            f"{self.end_ms / 1000:.3f}s"
+            f"{selection_start:.3f}s -> "
+            f"{selection_end:.3f}s"
         )
 
         self.sfx_process.start(
@@ -1620,9 +1653,17 @@ class EditorAssetsMixin:
                 str(sfx_script),
                 "--editor-plan",
                 "--selection-start",
-                f"{self.start_ms / 1000:.3f}",
+                f"{selection_start:.3f}",
                 "--selection-end",
-                f"{self.end_ms / 1000:.3f}",
+                f"{selection_end:.3f}",
+                "--editor-plan-path",
+                str(plan_path),
+                "--source-video",
+                source_video,
+                "--time-basis",
+                time_basis,
+                "--transcript",
+                str(transcript_path),
             ],
         )
 
@@ -1794,7 +1835,7 @@ class EditorAssetsMixin:
             )
             return
 
-        transcript_path = ROOT / "output" / "subtitles.json"
+        transcript_path = self.editor_asset_generation_transcript_path()
         if not transcript_path.exists():
             self.render_log.append(
                 "No transcript loaded yet -- run Find Best Clips first."
@@ -1804,6 +1845,9 @@ class EditorAssetsMixin:
         self.ensure_current_editor_asset_context(
             clear_on_change=True
         )
+        plan_path, source_video, selection_start, selection_end, time_basis = (
+            self.editor_asset_generation_context()
+        )
         self.save_render_settings()
         self.generate_emoji_button.setEnabled(False)
         self.generate_emoji_button.setText("Generating...")
@@ -1812,8 +1856,8 @@ class EditorAssetsMixin:
         self.render_log.append("=== EDITOR EMOJI GENERATION ===")
         self.render_log.append(
             "Selection: "
-            f"{self.start_ms / 1000:.3f}s -> "
-            f"{self.end_ms / 1000:.3f}s"
+            f"{selection_start:.3f}s -> "
+            f"{selection_end:.3f}s"
         )
 
         self.emoji_generate_process.start(
@@ -1823,14 +1867,20 @@ class EditorAssetsMixin:
                 "--transcript",
                 str(transcript_path),
                 "--start",
-                f"{self.start_ms / 1000:.3f}",
+                f"{selection_start:.3f}",
                 "--end",
-                f"{self.end_ms / 1000:.3f}",
+                f"{selection_end:.3f}",
                 "--energy",
                 self.current_edit_energy(),
                 "--min-events",
                 str(self.current_min_emoji_events()),
                 "--editor-plan",
+                "--editor-plan-path",
+                str(plan_path),
+                "--source-video",
+                source_video,
+                "--time-basis",
+                time_basis,
             ],
         )
 

@@ -46,12 +46,14 @@ except ImportError:
 try:
     from .editor_asset_plan import (
         load_editor_asset_plan,
+        replace_kind_clips,
         save_editor_asset_plan,
         set_editor_plan_context,
     )
 except ImportError:
     from editor_asset_plan import (
         load_editor_asset_plan,
+        replace_kind_clips,
         save_editor_asset_plan,
         set_editor_plan_context,
     )
@@ -112,6 +114,9 @@ def parse_args() -> argparse.Namespace:
             "instead of recomputing one from scratch."
         ),
     )
+    parser.add_argument("--editor-plan-path", type=Path, default=None)
+    parser.add_argument("--source-video", default=None)
+    parser.add_argument("--time-basis", default="source")
 
     return parser.parse_args()
 
@@ -126,7 +131,17 @@ def words_in_selection(
         transcript_path.read_text(encoding="utf-8")
     )
 
-    raw_words = transcript.get("words", [])
+    raw_words = transcript.get("words")
+    if not isinstance(raw_words, list):
+        cues = transcript.get("cues", [])
+        raw_words = [
+            {
+                **cue,
+                "word": cue.get("word", cue.get("text", "")),
+            }
+            for cue in cues
+            if isinstance(cue, dict)
+        ] if isinstance(cues, list) else []
     if not isinstance(raw_words, list):
         return []
 
@@ -214,6 +229,10 @@ def write_editor_emoji_plan(
     events: list[dict],
     selection_start: float,
     selection_end: float,
+    *,
+    editor_plan_path: Path | None = None,
+    source_video: str | None = None,
+    time_basis: str = "source",
 ) -> dict:
     """
     Resolve each event's real asset file (download/cache it now rather
@@ -261,7 +280,7 @@ def write_editor_emoji_plan(
                         event.get("start", 0.0),
                     )
                 ),
-                "time_basis": "source",
+                "time_basis": time_basis,
                 "emoji": str(
                     event.get("emoji", "")
                 ),
@@ -278,14 +297,18 @@ def write_editor_emoji_plan(
 
     settings = load_render_settings()
     source_video = str(
-        settings.get(
-            "source_video",
-            "",
-        )
+        source_video
+        if source_video is not None
+        else settings.get("source_video", "")
         or ""
     )
 
-    plan = load_editor_asset_plan()
+    plan_path = (
+        Path(editor_plan_path).expanduser().resolve(strict=False)
+        if editor_plan_path
+        else None
+    )
+    plan = load_editor_asset_plan(plan_path) if plan_path else load_editor_asset_plan()
     plan = set_editor_plan_context(
         plan,
         source_video,
@@ -293,28 +316,16 @@ def write_editor_emoji_plan(
         selection_end,
     )
 
-    retained = [
-        clip
-        for clip in plan.get(
-            "clips",
-            [],
-        )
-        if isinstance(clip, dict)
-        and str(
-            clip.get(
-                "kind",
-                "",
-            )
-            or ""
-        ).upper() != "EMOJI"
-    ]
-    retained.extend(
-        resolved_clips
+    plan = replace_kind_clips(
+        plan,
+        "EMOJI",
+        resolved_clips,
+        preserve_manual=True,
     )
-    plan["clips"] = retained
-    save_editor_asset_plan(
-        plan
-    )
+    if plan_path:
+        save_editor_asset_plan(plan, plan_path)
+    else:
+        save_editor_asset_plan(plan)
 
     return {
         "event_count": len(
@@ -389,6 +400,9 @@ def main() -> int:
             events,
             start,
             end,
+            editor_plan_path=args.editor_plan_path,
+            source_video=args.source_video,
+            time_basis=args.time_basis,
         )
         print(
             f"Editor emoji clips: {result['event_count']}",

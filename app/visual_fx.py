@@ -2384,11 +2384,8 @@ def main() -> int:
             1.0,
         )
     )
-    raw_visual_fx_strength = settings.get("visual_fx_strength")
-    visual_fx_strength = (
-        visual_fx_strength_from_energy(energy)
-        if raw_visual_fx_strength is None
-        else coerce_visual_fx_strength(raw_visual_fx_strength)
+    visual_fx_strength = coerce_visual_fx_strength(
+        settings.get("visual_fx_strength")
     )
 
     transcript = load_json(
