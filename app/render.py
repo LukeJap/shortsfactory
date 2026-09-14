@@ -744,7 +744,7 @@ def content_rect_for_source(
 # STEP 1
 # ============================================================
 
-def base_video_filter_chain() -> str:
+def base_video_filter_chain(intensity: float = 1.0) -> str:
     """Return Standard's production-polish filter tail.
 
     The shared portrait path applies the color/sharpening filters before its
@@ -753,7 +753,9 @@ def base_video_filter_chain() -> str:
     contract used by existing callers/tests.
     """
 
-    return ",".join([*polish_filters(PRODUCTION_POLISH_PRESET), "setsar=1", "format=yuv420p"])
+    return ",".join(
+        [*polish_filters(PRODUCTION_POLISH_PRESET, intensity), "setsar=1", "format=yuv420p"]
+    )
 
 
 def standard_portrait_framing_plan_for_video(source_video: Path) -> dict[str, Any]:
@@ -767,7 +769,10 @@ def standard_portrait_framing_plan_for_video(source_video: Path) -> dict[str, An
     return build_portrait_framing_plan_for_video(source_video)
 
 
-def standard_portrait_filter_complex(portrait_plan: dict[str, Any]) -> str:
+def standard_portrait_filter_complex(
+    portrait_plan: dict[str, Any],
+    intensity: float = 1.0,
+) -> str:
     """Compose Standard's active source over its blurred 9:16 background.
 
     This deliberately uses the exact Recap filter primitive. Standard still
@@ -800,7 +805,7 @@ def standard_portrait_filter_complex(portrait_plan: dict[str, Any]) -> str:
         blur_sigma=float(portrait_plan.get("blur_sigma", 25.0)),
         background_dim=float(portrait_plan.get("background_dim", 0.0)),
         active_rect=active_rect,
-        pre_split_filters=polish_filters(PRODUCTION_POLISH_PRESET),
+        pre_split_filters=polish_filters(PRODUCTION_POLISH_PRESET, intensity),
     )
     return f"{composition};[recap_out]setsar=1,format=yuv420p[standard_out]"
 
@@ -824,6 +829,7 @@ def render_base_video(
     # Standard stages still work on the same full 1080x1920 canvas.
     portrait_plan = standard_portrait_framing_plan_for_video(source_video)
     settings = load_render_settings()
+    fx_intensity = settings.get("fx_intensity", 1.0)
     settings["content_x"] = 0
     settings["content_y"] = 0
     settings["content_width"] = OUTPUT_WIDTH
@@ -844,7 +850,7 @@ def render_base_video(
         str(source_video),
 
         "-filter_complex",
-        standard_portrait_filter_complex(portrait_plan),
+        standard_portrait_filter_complex(portrait_plan, fx_intensity),
 
         # ShortsFactory exports only the primary video plus optional primary
         # audio. Some source files carry long timecode/data tracks; allowing

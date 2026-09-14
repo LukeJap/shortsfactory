@@ -233,10 +233,14 @@ class ProgramMonitorComposition(QWidget):
         if not self._filter_preview_enabled or self._filter_preview_intensity <= 0.0:
             return (1.0, 1.0, 0.0)
         try:
-            from visual_fx import baseline_filter_values
+            from base_video_polish import PRODUCTION_POLISH_PRESET, polish_filter_values
 
-            values = baseline_filter_values(
-                self._filter_preview_energy,
+            # Mirrors render.py's actual base grade (base_video_polish's
+            # fixed production preset, scaled by Filter Intensity) rather
+            # than visual_fx's edit-energy grade, which Standard Mode no
+            # longer exposes and which the real render no longer applies.
+            values = polish_filter_values(
+                PRODUCTION_POLISH_PRESET,
                 self._filter_preview_intensity,
             )
             return (
