@@ -37,9 +37,28 @@ PREFERRED_MIN_CLIP_SECONDS = 60
 PREFERRED_MAX_CLIP_SECONDS = 60
 EXTENDED_CLIP_MIN_SECONDS = 60
 MAX_CLIP_SECONDS = 60
+# A mechanical minute-boundary can land mid-sentence. Once a window is
+# actually selected (not during ranking -- see generate_valid_windows()'s
+# own docstring on why scoring stays on the fixed grid), nudge each edge
+# to the nearest real transcript-segment boundary within this many
+# seconds, so a clip starts/ends at a natural pause instead of cutting
+# off a word or sentence. Final clips end up 60s +/- this amount, not
+# perfectly exact -- an explicit, requested trade-off after live testing
+# showed exact cuts routinely landed mid-sentence.
+CLIP_BOUNDARY_LEEWAY_SECONDS = 4.0
 MAX_VALID_WINDOWS_FOR_PROMPT = 30
 WINDOW_STRIDE_SECONDS = 15
 TIMESTAMP_MATCH_TOLERANCE_SECONDS = 0.05
+# find_matching_window() re-identifies which mechanical valid_windows entry
+# a candidate came from, purely to re-validate it in normalize_analysis().
+# A candidate that went through the sentence-boundary leeway snap above can
+# now be up to CLIP_BOUNDARY_LEEWAY_SECONDS away from that mechanical grid
+# on either edge -- the tight TIMESTAMP_MATCH_TOLERANCE_SECONDS (meant for
+# comparing untouched mechanical values to each other) made every snapped
+# candidate fail this lookup and get silently dropped. WINDOW_STRIDE_SECONDS
+# (15s) is comfortably larger than any realistic leeway value, so a small
+# safety margin over the leeway still can't cross-match an adjacent window.
+WINDOW_MATCH_TOLERANCE_SECONDS = CLIP_BOUNDARY_LEEWAY_SECONDS + 0.5
 RANKING_CONTEXT_MAX_CHARS = 12000
 
 GENERIC_HOOK_PHRASES = (
@@ -1241,9 +1260,63 @@ def rank_exact_minute_windows(
         target_clip_count,
     )
 
+def snap_boundary_to_segment_edge(
+    boundary: float,
+    segments: list[TranscriptSegment],
+    leeway_seconds: float = CLIP_BOUNDARY_LEEWAY_SECONDS,
+) -> float:
+    """Nudge one clip edge to the nearest segment start/end within leeway.
+
+    Looks at both segment starts and ends as candidate landing points --
+    either can mark a natural pause -- and returns the closest one within
+    leeway_seconds. Returns the original boundary unchanged if nothing
+    real transcript evidence falls within range.
+    """
+
+    best = boundary
+    best_distance = leeway_seconds
+    for segment in segments:
+        for edge in (segment.start, segment.end):
+            distance = abs(edge - boundary)
+            if distance <= best_distance:
+                best = edge
+                best_distance = distance
+    return best
+
+
+def snap_window_to_sentence_boundaries(
+    window: CandidateWindow,
+    segments: list[TranscriptSegment] | None,
+    leeway_seconds: float = CLIP_BOUNDARY_LEEWAY_SECONDS,
+) -> CandidateWindow:
+    """Return a copy of window with edges nudged to natural sentence pauses.
+
+    Only ever called on an already-selected/final window, never on the
+    fixed grid generate_valid_windows() hands to the ranker -- scoring
+    stays on exact minutes so overlap/dedup logic keeps working, and only
+    the clip a viewer will actually see gets the more natural edges.
+    """
+
+    if not segments:
+        return window
+
+    new_start = snap_boundary_to_segment_edge(window.start, segments, leeway_seconds)
+    new_end = snap_boundary_to_segment_edge(window.end, segments, leeway_seconds)
+    if new_end <= new_start:
+        return window
+
+    text = " ".join(
+        segment.text
+        for segment in segments
+        if segment.end > new_start and segment.start < new_end
+    )
+    return CandidateWindow(start=new_start, end=new_end, text=text or window.text)
+
+
 def candidate_clips_from_ranked_windows(
     ranked_windows: list[tuple[CandidateWindow, int, str]],
     raw_analysis: dict[str, Any],
+    segments: list[TranscriptSegment] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert ranked CandidateWindow objects into candidate clip dictionaries."""
     analysis = raw_analysis.get("analysis", raw_analysis)
@@ -1252,7 +1325,8 @@ def candidate_clips_from_ranked_windows(
 
     candidates: list[dict[str, Any]] = []
 
-    for window, score, reason in ranked_windows:
+    for raw_window, score, reason in ranked_windows:
+        window = snap_window_to_sentence_boundaries(raw_window, segments)
         description = truncate_for_prompt(window.text, 180)
         grounded_reason = (
             ""
@@ -1522,8 +1596,8 @@ def find_matching_window(
 
     for window in valid_windows:
         if (
-            abs(window.start - start) <= TIMESTAMP_MATCH_TOLERANCE_SECONDS
-            and abs(window.end - end) <= TIMESTAMP_MATCH_TOLERANCE_SECONDS
+            abs(window.start - start) <= WINDOW_MATCH_TOLERANCE_SECONDS
+            and abs(window.end - end) <= WINDOW_MATCH_TOLERANCE_SECONDS
         ):
             return window
 
@@ -1546,13 +1620,27 @@ def normalize_candidate_clip(
     if window is None:
         return None
 
-    duration = window.duration_seconds
-    if not MIN_CLIP_SECONDS <= duration <= MAX_CLIP_SECONDS:
+    # Trust the candidate's own precise boundaries once find_matching_window()
+    # has confirmed they correspond to a real mechanical window -- window.start/
+    # window.end are the unsnapped mechanical grid, and using them here would
+    # silently discard the sentence-boundary leeway
+    # candidate_clips_from_ranked_windows() already applied.
+    candidate_start = parse_timestamp(raw_candidate.get("start_timestamp"), prefer="first")
+    candidate_end = parse_timestamp(raw_candidate.get("end_timestamp"), prefer="last")
+    if candidate_start is None or candidate_end is None or candidate_end <= candidate_start:
+        candidate_start, candidate_end = window.start, window.end
+
+    duration = candidate_end - candidate_start
+    if not (
+        MIN_CLIP_SECONDS - CLIP_BOUNDARY_LEEWAY_SECONDS
+        <= duration
+        <= MAX_CLIP_SECONDS + CLIP_BOUNDARY_LEEWAY_SECONDS
+    ):
         return None
 
     candidate = {
-        "start_timestamp": format_timestamp(window.start),
-        "end_timestamp": format_timestamp(window.end),
+        "start_timestamp": format_timestamp(candidate_start),
+        "end_timestamp": format_timestamp(candidate_end),
         "duration_seconds": round_duration(duration),
         "hook": str(raw_candidate.get("hook", "")).strip(),
         "description": str(raw_candidate.get("description", "")).strip(),
@@ -1764,8 +1852,15 @@ def validate_normalized_analysis(analysis: dict[str, Any]) -> list[str]:
         duration_float = 0
 
     if duration_float:
-        if not MIN_CLIP_SECONDS <= duration_float <= MAX_CLIP_SECONDS:
-            issues.append("selected_clip duration must be exactly 60 seconds.")
+        if not (
+            MIN_CLIP_SECONDS - CLIP_BOUNDARY_LEEWAY_SECONDS
+            <= duration_float
+            <= MAX_CLIP_SECONDS + CLIP_BOUNDARY_LEEWAY_SECONDS
+        ):
+            issues.append(
+                "selected_clip duration must be close to 60 seconds "
+                f"(+/-{CLIP_BOUNDARY_LEEWAY_SECONDS:.0f}s for sentence-boundary leeway)."
+            )
         if is_generic_hook(str(selected.get("hook", ""))):
             issues.append("selected_clip hook is generic instead of specific.")
     elif not str(analysis.get("no_viable_clip_reason", "")).strip() and not str(
@@ -2092,6 +2187,7 @@ def main() -> int:
             ranked_candidate_clips = candidate_clips_from_ranked_windows(
                 ranked_windows,
                 raw_analysis,
+                segments=transcript.segments,
             )
 
             ranked_candidate_clips = ranked_candidate_clips[
@@ -2181,6 +2277,7 @@ def main() -> int:
         ranked_candidate_clips = candidate_clips_from_ranked_windows(
             ranked_windows,
             raw_analysis,
+            segments=transcript.segments,
         )
 
         if len(ranked_candidate_clips) >= 3:

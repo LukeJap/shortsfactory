@@ -202,3 +202,73 @@ def test_long_sources_are_ranked_in_chronological_batches_then_finalized(monkeyp
     assert len(calls[2][0]) == 6
     assert len(ranked) == 3
     assert all(window.duration_seconds == 60 for window, _score, _reason in ranked)
+
+
+def _segment(start, end, text):
+    return analyze.TranscriptSegment(start=start, end=end, text=text)
+
+
+def test_snap_boundary_moves_to_nearby_segment_edge_within_leeway():
+    segments = [_segment(10.0, 57.0, "a"), _segment(61.5, 90.0, "b")]
+
+    # 60.0 is 1.5s from the next segment's start (61.5) -- inside leeway.
+    assert analyze.snap_boundary_to_segment_edge(60.0, segments) == 61.5
+
+
+def test_snap_boundary_ignores_edges_outside_leeway():
+    segments = [_segment(10.0, 40.0, "a"), _segment(70.0, 90.0, "b")]
+
+    # Nearest edges are 30s and 10s away -- both well outside the default
+    # leeway, so the mechanical boundary must be left alone.
+    assert analyze.snap_boundary_to_segment_edge(60.0, segments) == 60.0
+
+
+def test_snap_window_moves_end_to_sentence_boundary_and_updates_text():
+    segments = [
+        _segment(0.0, 30.0, "Setup line."),
+        _segment(30.0, 57.5, "The reveal lands here."),
+        _segment(61.0, 90.0, "Next scene begins."),
+    ]
+    window = analyze.CandidateWindow(
+        start=0.0, end=60.0, text="Setup line. The reveal lands here."
+    )
+
+    snapped = analyze.snap_window_to_sentence_boundaries(window, segments)
+
+    # 60.0 is nearer to the next segment's start (61.0, 1.0s away) than to
+    # the end of "The reveal lands here." (57.5, 2.5s away) -- the closer
+    # edge wins, landing the cut right as the next line begins rather than
+    # lopping 2.5s off the reveal sentence.
+    assert snapped.end == 61.0
+    assert snapped.start == 0.0
+    # The clip runs up to (not including) 61.0, so it still ends exactly
+    # on the reveal line -- the next scene's own text starts at 61.0 and
+    # is correctly excluded, not bled into this clip's description.
+    assert "The reveal lands here." in snapped.text
+    assert "Next scene begins." not in snapped.text
+
+
+def test_snap_window_leaves_boundary_alone_without_nearby_segments():
+    segments = [_segment(0.0, 20.0, "a"), _segment(90.0, 110.0, "b")]
+    window = analyze.CandidateWindow(start=20.0, end=80.0, text="middle")
+
+    snapped = analyze.snap_window_to_sentence_boundaries(window, segments)
+
+    assert snapped == window
+
+
+def test_candidate_clips_apply_leeway_only_when_segments_are_supplied():
+    segments = [
+        _segment(0.0, 30.0, "Setup."),
+        _segment(30.0, 57.0, "Payoff line."),
+        _segment(61.5, 90.0, "Next scene."),
+    ]
+    window = analyze.CandidateWindow(start=0.0, end=60.0, text="Setup. Payoff line.")
+    ranked = [(window, 91, "payoff")]
+
+    without_segments = analyze.candidate_clips_from_ranked_windows(ranked, {})
+    assert without_segments[0]["duration_seconds"] == 60.0
+
+    with_segments = analyze.candidate_clips_from_ranked_windows(ranked, {}, segments=segments)
+    assert with_segments[0]["end_timestamp"] == analyze.format_timestamp(61.5)
+    assert with_segments[0]["duration_seconds"] == 61.5
