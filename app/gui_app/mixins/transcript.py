@@ -785,7 +785,6 @@ class TranscriptMixin:
         self.save_transcript_corrections()
         self.update_transcript_panel()
         self.refresh_transcript_timeline_overlays()
-        self.clear_visual_plan_display()
 
         # The caption overlay only refreshes its text on the next position
         # tick otherwise -- force it now so a correction made *from* the
@@ -813,7 +812,6 @@ class TranscriptMixin:
         self.save_transcript_corrections()
         self.update_transcript_panel()
         self.refresh_transcript_timeline_overlays()
-        self.clear_visual_plan_display()
 
 
     def refresh_transcript_timeline_overlays(self):
@@ -1275,8 +1273,6 @@ class TranscriptMixin:
         self.save_transcript_corrections()
         self.update_transcript_panel()
         self.refresh_transcript_timeline_overlays()
-        self.clear_visual_plan_display()
-        self.clear_visual_plan_display()
         self.refresh_transcript_timeline_overlays()
 
 
@@ -1297,8 +1293,6 @@ class TranscriptMixin:
         self.save_transcript_corrections()
         self.update_transcript_panel()
         self.refresh_transcript_timeline_overlays()
-        self.clear_visual_plan_display()
-        self.clear_visual_plan_display()
         self.refresh_transcript_timeline_overlays()
 
 
@@ -1339,8 +1333,6 @@ class TranscriptMixin:
         self.save_transcript_corrections()
         self.update_transcript_panel()
         self.refresh_transcript_timeline_overlays()
-        self.clear_visual_plan_display()
-        self.clear_visual_plan_display()
         self.refresh_transcript_timeline_overlays()
 
 
