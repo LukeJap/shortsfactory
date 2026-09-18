@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,34 +31,52 @@ from ollama_config import OLLAMA_HOST as DEFAULT_OLLAMA_HOST
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 TRANSCRIPT_EXTENSIONS = {".json", ".txt"}
 REQUEST_TIMEOUT_SECONDS = 180
-# Find Best Clips is intentionally a one-minute clip finder.  Keep the
-# validation limits equal so every downstream candidate remains exact too.
-MIN_CLIP_SECONDS = 60
+# Retired 2026-09-17: exact-60.0s windows on a fixed grid were the main
+# cause of poor clip quality, because the good clip was usually not in the
+# candidate set at all. Candidates are now variable-length, boundary-derived
+# "beats" (see generate_valid_windows()) bounded to this range instead.
+MIN_CLIP_SECONDS = 15.0
+MAX_CLIP_SECONDS = 90.0
 PREFERRED_MIN_CLIP_SECONDS = 60
 PREFERRED_MAX_CLIP_SECONDS = 60
-EXTENDED_CLIP_MIN_SECONDS = 60
-MAX_CLIP_SECONDS = 60
-# A mechanical minute-boundary can land mid-sentence. Once a window is
-# actually selected (not during ranking -- see generate_valid_windows()'s
-# own docstring on why scoring stays on the fixed grid), nudge each edge
-# to the nearest real transcript-segment boundary within this many
-# seconds, so a clip starts/ends at a natural pause instead of cutting
-# off a word or sentence. Final clips end up 60s +/- this amount, not
-# perfectly exact -- an explicit, requested trade-off after live testing
-# showed exact cuts routinely landed mid-sentence.
+# Consecutive transcript segments merge into one beat when the silence gap
+# between them is smaller than this; a gap this size or larger marks a beat
+# boundary.
+BEAT_GAP_SECONDS = 0.6
+# Per candidate start beat, keep only the longest-duration qualifying ends,
+# so candidate count stays roughly linear in beat count instead of quadratic.
+MAX_ENDS_PER_START = 4
+# Two candidates whose start and end both land within this many seconds of
+# each other are treated as the same moment; only the first (longest, since
+# ends are generated longest-first per start) is kept.
+CANDIDATE_DEDUPE_TOLERANCE_SECONDS = 1.0
+# A mechanical boundary can still land mid-sentence in edge cases. Once a
+# window is actually selected, nudge each edge to the nearest real
+# transcript-segment boundary within this many seconds, so a clip starts/ends
+# at a natural pause instead of cutting off a word -- an explicit, requested
+# trade-off after live testing showed unsnapped cuts routinely landed
+# mid-sentence.
 CLIP_BOUNDARY_LEEWAY_SECONDS = 4.0
-MAX_VALID_WINDOWS_FOR_PROMPT = 30
-WINDOW_STRIDE_SECONDS = 15
+FIRST_STAGE_RANKING_BATCH_SIZE = 8
+FIRST_STAGE_SHORTLIST_COUNT = 2
+FIRST_STAGE_CONTEXT_MAX_CHARS = 2400
+FINAL_RANKING_CONTEXT_MAX_CHARS = 6000
+# Ollama defaults llama3.1:8b to a 4096-token context. A first-stage batch of
+# 8 one-minute transcripts plus instructions plus FIRST_STAGE_CONTEXT_MAX_CHARS
+# of source context can exceed that and get silently truncated. Set both
+# explicitly rather than trust the server default.
+RANKING_NUM_CTX = 8192
+RANKING_NUM_PREDICT = 1024
 TIMESTAMP_MATCH_TOLERANCE_SECONDS = 0.05
 # find_matching_window() re-identifies which mechanical valid_windows entry
-# a candidate came from, purely to re-validate it in normalize_analysis().
-# A candidate that went through the sentence-boundary leeway snap above can
-# now be up to CLIP_BOUNDARY_LEEWAY_SECONDS away from that mechanical grid
-# on either edge -- the tight TIMESTAMP_MATCH_TOLERANCE_SECONDS (meant for
-# comparing untouched mechanical values to each other) made every snapped
-# candidate fail this lookup and get silently dropped. WINDOW_STRIDE_SECONDS
-# (15s) is comfortably larger than any realistic leeway value, so a small
-# safety margin over the leeway still can't cross-match an adjacent window.
+# a candidate came from, purely to re-validate it in normalize_analysis()
+# (the legacy non-clip-discovery-only path; the GUI always passes
+# --clip-discovery-only and never exercises this). A candidate that went
+# through the sentence-boundary leeway snap above can now be up to
+# CLIP_BOUNDARY_LEEWAY_SECONDS away from that mechanical window on either
+# edge -- the tight TIMESTAMP_MATCH_TOLERANCE_SECONDS (meant for comparing
+# untouched mechanical values to each other) made every snapped candidate
+# fail this lookup and get silently dropped.
 WINDOW_MATCH_TOLERANCE_SECONDS = CLIP_BOUNDARY_LEEWAY_SECONDS + 0.5
 RANKING_CONTEXT_MAX_CHARS = 12000
 
@@ -224,6 +243,23 @@ class TranscriptLoadError(Exception):
     """Raised when a transcript exists but cannot be used."""
 
 
+class WindowRankingTimeout(RuntimeError):
+    """A ranking request exceeded the shared Ollama request timeout."""
+
+
+class WindowRankingShortfall(RuntimeError):
+    """A ranking request returned fewer valid selections than the caller's minimum_count."""
+
+    def __init__(self, request_label: str, requested: int, returned: int) -> None:
+        self.request_label = request_label
+        self.requested = requested
+        self.returned = returned
+        super().__init__(
+            f"Ollama returned {returned} valid selections for {request_label}; "
+            f"expected {requested}."
+        )
+
+
 @dataclass(frozen=True)
 class TranscriptSegment:
     start: float
@@ -246,6 +282,17 @@ class CandidateWindow:
     @property
     def duration_seconds(self) -> float:
         return self.end - self.start
+
+
+@dataclass(frozen=True)
+class Beat:
+    """One merged run of transcript segments with no internal silence gap
+    large enough to count as a beat boundary (see BEAT_GAP_SECONDS)."""
+
+    start: float
+    end: float
+    text: str
+    ends_with_terminal_punctuation: bool
 
 
 def project_root() -> Path:
@@ -569,44 +616,110 @@ def load_newest_transcript(root: Path) -> tuple[Path, Path, TranscriptData] | No
     return None
 
 
-def generate_valid_windows(segments: list[TranscriptSegment]) -> list[CandidateWindow]:
-    """Create exact one-minute candidates over the complete source timeline.
+def ends_with_terminal_punctuation(text: str) -> bool:
+    """True if text ends a sentence, ignoring trailing quote/bracket marks."""
+    stripped = text.strip().rstrip("\"'”’)]")
+    return bool(stripped) and stripped[-1] in ".!?"
 
-    Candidate boundaries deliberately do not depend on Whisper segment
-    boundaries: a strong sixty-second scene should not become 52 seconds just
-    because a transcript line ends there.  Transcript lines are only the
-    evidence supplied to the ranker for that fixed source range.
+
+def build_beats(
+    segments: list[TranscriptSegment],
+    gap_seconds: float = BEAT_GAP_SECONDS,
+) -> list[Beat]:
+    """Merge consecutive transcript segments into beats.
+
+    A beat boundary falls where the silence gap between consecutive segments
+    is >= gap_seconds; segments closer together than that merge into one
+    beat. Beats are the atomic unit candidate clips are built from -- a real
+    content boundary, not a mechanical timestamp.
     """
     if not segments:
         return []
 
-    source_end = max(segment.end for segment in segments)
-    latest_start = source_end - MAX_CLIP_SECONDS
-    if latest_start < 0:
+    ordered = sorted(segments, key=lambda segment: segment.start)
+    beats: list[Beat] = []
+    current_start = ordered[0].start
+    current_end = ordered[0].end
+    current_texts = [ordered[0].text]
+
+    def flush() -> None:
+        text = " ".join(current_texts).strip()
+        beats.append(
+            Beat(
+                start=current_start,
+                end=current_end,
+                text=text,
+                ends_with_terminal_punctuation=ends_with_terminal_punctuation(text),
+            )
+        )
+
+    for segment in ordered[1:]:
+        # Subtract a small float-noise tolerance rather than compare the raw
+        # gap directly -- real transcript timestamps can make an intended
+        # exact-gap_seconds boundary land a hair under it (e.g. 4.6 - 4.0 ==
+        # 0.5999999999999996 in floating point).
+        if segment.start - current_end >= gap_seconds - TIMESTAMP_MATCH_TOLERANCE_SECONDS:
+            flush()
+            current_start = segment.start
+            current_texts = [segment.text]
+        else:
+            current_texts.append(segment.text)
+        current_end = max(current_end, segment.end)
+
+    flush()
+    return beats
+
+
+def generate_valid_windows(segments: list[TranscriptSegment]) -> list[CandidateWindow]:
+    """Build variable-length candidates anchored to real content boundaries.
+
+    A candidate starts on a beat that opens a sentence (the previous beat
+    ends on terminal punctuation, or there is no previous beat) and ends on
+    a beat that itself ends on terminal punctuation, so a clip is never
+    proposed starting or ending mid-clause. Duration is bounded to
+    [MIN_CLIP_SECONDS, MAX_CLIP_SECONDS] rather than pinned to a fixed
+    length -- a good Short starts on the setup line and ends on the payoff
+    line, and that length varies scene to scene.
+    """
+    beats = build_beats(segments)
+    if not beats:
         return []
 
-    starts: list[float] = []
-    start = 0.0
-    while start <= latest_start + TIMESTAMP_MATCH_TOLERANCE_SECONDS:
-        starts.append(round(start, 3))
-        start += WINDOW_STRIDE_SECONDS
+    raw_candidates: list[CandidateWindow] = []
+    for start_index, start_beat in enumerate(beats):
+        if start_index > 0 and not beats[start_index - 1].ends_with_terminal_punctuation:
+            continue
 
-    # Always assess the final full minute, even where the stride does not land
-    # exactly on it. This prevents the ending from being accidentally omitted.
-    tail_start = round(latest_start, 3)
-    if not starts or abs(starts[-1] - tail_start) > TIMESTAMP_MATCH_TOLERANCE_SECONDS:
-        starts.append(tail_start)
+        qualifying_ends: list[tuple[float, int]] = []
+        for end_index in range(start_index, len(beats)):
+            end_beat = beats[end_index]
+            duration = end_beat.end - start_beat.start
+            if duration > MAX_CLIP_SECONDS:
+                break
+            if duration < MIN_CLIP_SECONDS:
+                continue
+            if not end_beat.ends_with_terminal_punctuation:
+                continue
+            qualifying_ends.append((duration, end_index))
+
+        qualifying_ends.sort(key=lambda item: -item[0])
+        for _duration, end_index in qualifying_ends[:MAX_ENDS_PER_START]:
+            text = " ".join(beat.text for beat in beats[start_index : end_index + 1]).strip()
+            raw_candidates.append(
+                CandidateWindow(start=start_beat.start, end=beats[end_index].end, text=text)
+            )
 
     windows: list[CandidateWindow] = []
-    for window_start in starts:
-        window_end = round(window_start + MAX_CLIP_SECONDS, 3)
-        text = " ".join(
-            segment.text
-            for segment in segments
-            if segment.end > window_start and segment.start < window_end
-        )
-        windows.append(CandidateWindow(start=window_start, end=window_end, text=text))
+    for candidate in raw_candidates:
+        if any(
+            abs(candidate.start - kept.start) <= CANDIDATE_DEDUPE_TOLERANCE_SECONDS
+            and abs(candidate.end - kept.end) <= CANDIDATE_DEDUPE_TOLERANCE_SECONDS
+            for kept in windows
+        ):
+            continue
+        windows.append(candidate)
 
+    windows.sort(key=lambda window: (window.start, window.end))
     return windows
 
 def truncate_for_prompt(text: str, max_chars: int = 320) -> str:
@@ -622,7 +735,7 @@ def format_valid_windows_for_prompt(
 ) -> str:
     if not windows:
         return (
-            "No valid exact 60-second timestamp-aligned windows were found. "
+            "No valid candidate clip windows were found. "
             "Return candidate_clips as an empty array and selected_clip with empty timestamps."
         )
 
@@ -932,6 +1045,18 @@ def window_ranking_json_schema(
     }
 
 
+class WindowRankingResponse(dict):
+    """Parsed ranker JSON, plus the raw model text for debugging.
+
+    Subclassing dict keeps `isinstance(result, dict)` and
+    `result == {"selections": [...]}` working everywhere the parsed object
+    is already used; only callers that want the raw text for logging need
+    to know about the extra `raw_text` attribute.
+    """
+
+    raw_text: str = ""
+
+
 def call_ollama_window_ranker(
     host: str,
     model: str,
@@ -945,9 +1070,12 @@ def call_ollama_window_ranker(
         "prompt": prompt,
         "stream": False,
         "format": window_ranking_json_schema(window_ids, selection_count),
+        "keep_alive": "10m",
         "options": {
             "temperature": 0,
             "top_p": 0.9,
+            "num_ctx": RANKING_NUM_CTX,
+            "num_predict": RANKING_NUM_PREDICT,
         },
     }
 
@@ -966,7 +1094,7 @@ def call_ollama_window_ranker(
             f"Ollama stopped responding: {exc.reason}"
         ) from exc
     except TimeoutError as exc:
-        raise RuntimeError(
+        raise WindowRankingTimeout(
             "Ollama took too long to rank the clip candidates. Please try again."
         ) from exc
     except json.JSONDecodeError as exc:
@@ -986,21 +1114,30 @@ def call_ollama_window_ranker(
         )
 
     try:
-        return extract_json_object(response_text)
+        parsed = extract_json_object(response_text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError(
-            f"The window-ranking response was not valid JSON: {exc}"
+            f"The window-ranking response was not valid JSON: {exc} "
+            f"Raw response (first 500 chars): {response_text[:500]!r}"
         ) from exc
+
+    result = WindowRankingResponse(parsed)
+    result.raw_text = response_text
+    return result
 def build_window_ranking_prompt(
     transcript: TranscriptData,
     valid_windows: list[CandidateWindow],
     target_clip_count: int = 3,
     excluded_window_ids: set[str] | None = None,
     response_count_override: int | None = None,
+    context_max_chars: int = RANKING_CONTEXT_MAX_CHARS,
 ) -> str:
     excluded = excluded_window_ids or set()
     windows_text = format_valid_windows_for_prompt(valid_windows, excluded)
-    source_context = transcript_context_for_window_ranking(transcript)
+    source_context = transcript_context_for_window_ranking(
+        transcript,
+        max_chars=context_max_chars,
+    )
     response_count = window_ranking_response_count(
         valid_windows,
         target_clip_count,
@@ -1022,7 +1159,9 @@ Do NOT return timestamps.
 
 Each window has an ID such as W001, W002, etc.
 
-Choose the {response_count} strongest potential exact 60-second Shorts.
+Choose the {response_count} strongest potential Shorts. Candidates vary in
+length (see each window's own duration below); a good Short is exactly as
+long as its setup-to-payoff arc needs, not a fixed length.
 
 A strong Short should:
 - make sense with minimal context
@@ -1033,8 +1172,8 @@ A strong Short should:
 - have a natural beginning and ending
 - avoid long stretches of filler conversation
 - avoid generic statements
-- work as a standalone exact 60-second clip
-- use the supplied sixty seconds as a complete mini-story, not merely a setup before a payoff elsewhere
+- work as a standalone clip at its own supplied length
+- use its full supplied span as a complete mini-story, not merely a setup before a payoff elsewhere
 
 Penalize a candidate that only establishes the episode, introduces people or a
 location, mostly contains greetings, ends before its payoff, or needs lots of
@@ -1085,7 +1224,7 @@ Rules:
 9. Avoid returning multiple windows that cover essentially the same scene or conversation beat.
 10. Reasons must mention concrete words, people, objects, places, or actions from that window.
 11. Do not write phrases such as "clear setup and payoff", "engaging conversation", or "becomes the center of attention".
-12. Every supplied candidate is exactly 60 seconds. Do not prefer one based on duration.
+12. Candidates vary in length between {MIN_CLIP_SECONDS:g} and {MAX_CLIP_SECONDS:g} seconds. Judge the moment, not the duration -- do not prefer a candidate merely for being longer or shorter.
 13. Do not select a structural theme, title, credits, recap, sponsor, or boilerplate window unless it itself contains a unique story event.
 14. Default toward distinct scenes from different parts of the source. Do not cluster selections in one adjacent conversation when similarly strong moments exist elsewhere.
 15. Do not omit weaker-but-usable real scenes because they score below 70. Rank them honestly after stronger candidates so the requested final count can still be filled.
@@ -1187,13 +1326,145 @@ def select_distinct_ranked_windows(
 
 def chronological_window_batches(
     windows: list[CandidateWindow],
-    batch_size: int = MAX_VALID_WINDOWS_FOR_PROMPT,
+    batch_size: int = FIRST_STAGE_RANKING_BATCH_SIZE,
 ) -> list[list[CandidateWindow]]:
     """Split a complete candidate timeline into prompt-sized chronological batches."""
     return [
         windows[index : index + batch_size]
         for index in range(0, len(windows), batch_size)
     ]
+
+
+def rank_window_request(
+    host: str,
+    model: str,
+    transcript: TranscriptData,
+    windows: list[CandidateWindow],
+    selection_count: int,
+    *,
+    request_label: str,
+    context_max_chars: int,
+    minimum_count: int = 0,
+) -> list[tuple[CandidateWindow, int, str]]:
+    """Run one measured, schema-constrained ranking request."""
+
+    selection_count = min(len(windows), max(0, int(selection_count)))
+    if not windows or selection_count <= 0:
+        return []
+    prompt = build_window_ranking_prompt(
+        transcript,
+        windows,
+        target_clip_count=selection_count,
+        context_max_chars=context_max_chars,
+    )
+    log(
+        f"Ranking {request_label}: {len(windows)} candidates, "
+        f"{len(prompt)} prompt chars, timeout={REQUEST_TIMEOUT_SECONDS}s"
+    )
+    started = time.monotonic()
+    try:
+        result = call_ollama_window_ranker(
+            host,
+            model,
+            prompt,
+            window_ids=[f"W{index:03d}" for index in range(1, len(windows) + 1)],
+            selection_count=selection_count,
+        )
+    except WindowRankingTimeout:
+        elapsed = time.monotonic() - started
+        log(f"{request_label} timed out after {elapsed:.1f}s.")
+        raise
+
+    ranked = ranked_windows_from_result(result, windows)
+    elapsed = time.monotonic() - started
+    log(f"{request_label} completed in {elapsed:.1f}s: {len(ranked)} valid selections")
+
+    if not ranked:
+        raw_text = getattr(result, "raw_text", "")
+        log(f"{request_label} raw model response (first 500 chars): {raw_text[:500]!r}")
+
+    if len(ranked) >= selection_count:
+        return ranked[:selection_count]
+
+    if len(ranked) >= minimum_count:
+        log(
+            f"WARNING: {request_label} returned {len(ranked)} valid selections; "
+            f"requested {selection_count}."
+        )
+        return ranked
+
+    raise WindowRankingShortfall(request_label, selection_count, len(ranked))
+
+
+def rank_first_stage_batch(
+    host: str,
+    model: str,
+    transcript: TranscriptData,
+    batch: list[CandidateWindow],
+    selection_count: int,
+    *,
+    batch_number: int,
+    batch_total: int,
+) -> list[tuple[CandidateWindow, int, str]]:
+    """Rank one chronological batch, splitting it once after a timeout or shortfall.
+
+    Losing one batch's shortlist must never fail the whole analysis -- the
+    other chronological batches still cover the source -- so every failure
+    path here logs a warning and returns an empty list instead of raising.
+    """
+
+    label = f"batch {batch_number}/{batch_total}"
+    try:
+        return rank_window_request(
+            host,
+            model,
+            transcript,
+            batch,
+            selection_count,
+            request_label=label,
+            context_max_chars=FIRST_STAGE_CONTEXT_MAX_CHARS,
+            minimum_count=1,
+        )
+    except (WindowRankingTimeout, WindowRankingShortfall):
+        if len(batch) <= 1:
+            log(f"{label} produced no usable selections; skipping this batch.")
+            return []
+
+    midpoint = max(1, len(batch) // 2)
+    sub_batches = [batch[:midpoint], batch[midpoint:]]
+    sub_batches = [items for items in sub_batches if items]
+    per_sub_batch = max(1, (selection_count + len(sub_batches) - 1) // len(sub_batches))
+    log(
+        f"Retrying {label} once as {len(sub_batches)} smaller chronological "
+        f"sub-batches."
+    )
+    ranked: list[tuple[CandidateWindow, int, str]] = []
+    for sub_number, sub_batch in enumerate(sub_batches, start=1):
+        try:
+            ranked.extend(
+                rank_window_request(
+                    host,
+                    model,
+                    transcript,
+                    sub_batch,
+                    min(len(sub_batch), per_sub_batch),
+                    request_label=f"{label} retry {sub_number}/{len(sub_batches)}",
+                    context_max_chars=FIRST_STAGE_CONTEXT_MAX_CHARS,
+                    minimum_count=1,
+                )
+            )
+        except (WindowRankingTimeout, WindowRankingShortfall):
+            log(
+                f"{label} retry {sub_number}/{len(sub_batches)} produced no "
+                "usable selections; skipping this sub-batch."
+            )
+            continue
+
+    if not ranked:
+        log(f"{label} produced no usable selections after retry; skipping this batch.")
+        return []
+
+    return sorted(ranked, key=lambda item: (-item[1], item[0].start))[:selection_count]
 
 
 def rank_exact_minute_windows(
@@ -1203,7 +1474,7 @@ def rank_exact_minute_windows(
     valid_windows: list[CandidateWindow],
     target_clip_count: int,
 ) -> list[tuple[CandidateWindow, int, str]]:
-    """Rank all source regions, batching first only when one prompt is too large."""
+    """Rank exact-minute windows through local shortlists and one global pass."""
     batches = chronological_window_batches(valid_windows)
     if not batches:
         return []
@@ -1211,52 +1482,47 @@ def rank_exact_minute_windows(
     if len(batches) == 1:
         rankable_windows = valid_windows
     else:
-        # Keep a bounded final prompt while ensuring every chronological region
-        # contributes a locally ranked contender.
-        per_batch = max(1, min(target_clip_count, MAX_VALID_WINDOWS_FOR_PROMPT // len(batches)))
+        per_batch_shortlist = min(
+            3,
+            max(
+                FIRST_STAGE_SHORTLIST_COUNT,
+                (target_clip_count * 2 + len(batches) - 1) // len(batches),
+            ),
+        )
         shortlist: list[tuple[CandidateWindow, int, str]] = []
         for batch_number, batch in enumerate(batches, start=1):
-            log(f"Ranking chronological candidate batch {batch_number}/{len(batches)}...")
-            selection_count = min(len(batch), per_batch)
-            batch_result = call_ollama_window_ranker(
-                host,
-                model,
-                build_window_ranking_prompt(
+            shortlist.extend(
+                rank_first_stage_batch(
+                    host,
+                    model,
                     transcript,
                     batch,
-                    target_clip_count=selection_count,
-                ),
-                window_ids=[f"W{index:03d}" for index in range(1, len(batch) + 1)],
-                selection_count=selection_count,
+                    min(len(batch), per_batch_shortlist),
+                    batch_number=batch_number,
+                    batch_total=len(batches),
+                )
             )
-            shortlist.extend(ranked_windows_from_result(batch_result, batch))
-
-        # Batch winners can still overlap at a boundary.  Strictly collapse
-        # them before the final pass so the final shortlist describes separate
-        # moments from the whole source.
-        shortlist = select_distinct_ranked_windows(
-            sorted(shortlist, key=lambda candidate: (-candidate[1], candidate[0].start)),
-            MAX_VALID_WINDOWS_FOR_PROMPT,
-        )
+        if not shortlist:
+            raise RuntimeError("No candidate windows survived first-stage ranking.")
+        shortlist.sort(key=lambda candidate: candidate[0].start)
         rankable_windows = [window for window, _score, _reason in shortlist]
 
     selection_count = min(
         len(rankable_windows),
-        max(target_clip_count, target_clip_count * 3),
+        max(target_clip_count, target_clip_count * 2),
     )
-    final_result = call_ollama_window_ranker(
+    final_ranked = rank_window_request(
         host,
         model,
-        build_window_ranking_prompt(
-            transcript,
-            rankable_windows,
-            target_clip_count=selection_count,
-        ),
-        window_ids=[f"W{index:03d}" for index in range(1, len(rankable_windows) + 1)],
-        selection_count=selection_count,
+        transcript,
+        rankable_windows,
+        selection_count,
+        request_label="final shortlist",
+        context_max_chars=FINAL_RANKING_CONTEXT_MAX_CHARS,
+        minimum_count=min(target_clip_count, len(rankable_windows)),
     )
     return select_distinct_ranked_windows(
-        ranked_windows_from_result(final_result, rankable_windows),
+        final_ranked,
         target_clip_count,
     )
 
@@ -1858,8 +2124,9 @@ def validate_normalized_analysis(analysis: dict[str, Any]) -> list[str]:
             <= MAX_CLIP_SECONDS + CLIP_BOUNDARY_LEEWAY_SECONDS
         ):
             issues.append(
-                "selected_clip duration must be close to 60 seconds "
-                f"(+/-{CLIP_BOUNDARY_LEEWAY_SECONDS:.0f}s for sentence-boundary leeway)."
+                f"selected_clip duration must be within {MIN_CLIP_SECONDS:g}-"
+                f"{MAX_CLIP_SECONDS:g}s (+/-{CLIP_BOUNDARY_LEEWAY_SECONDS:.0f}s "
+                "for sentence-boundary leeway)."
             )
         if is_generic_hook(str(selected.get("hook", ""))):
             issues.append("selected_clip hook is generic instead of specific.")
@@ -2138,7 +2405,7 @@ def main() -> int:
     log(f"Timestamped transcript segments: {len(transcript.segments)}")
     log(f"Requested clip candidates: {target_clip_count}")
     valid_windows = generate_valid_windows(transcript.segments)
-    log(f"Valid exact 60-second windows across source: {len(valid_windows)}")
+    log(f"Candidate clip windows across source: {len(valid_windows)}")
 
     host = normalize_ollama_host(os.environ.get("OLLAMA_HOST"))
     log(f"Checking Ollama at {host}...")
