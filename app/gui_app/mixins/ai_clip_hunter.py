@@ -13,7 +13,12 @@ import textwrap
 
 from PySide6.QtCore import QProcess
 
-from ..constants import ROOT
+from ..constants import (
+    LONG_SOURCE_CLIP_COUNT,
+    LONG_SOURCE_MIN_MINUTES,
+    ROOT,
+    SHORT_SOURCE_CLIP_COUNT,
+)
 from ..helpers import (
     format_time,
     is_generic_editor_text,
@@ -181,13 +186,11 @@ class AIClipHunterMixin:
                 or ""
             ).strip()
 
+            # A generic hook is dropped, never replaced by a transcript quote.
             if is_generic_editor_text(
                 hook
             ):
-                hook = transcript_excerpt(
-                    description,
-                    max_words=7,
-                )
+                hook = ""
 
             # Keep cards compact enough to feel like an editor,
             # not a wall of AI-generated text.
@@ -196,24 +199,34 @@ class AIClipHunterMixin:
                 max_words=12,
             )
 
-            grounded_reason = reason
-            if is_generic_editor_text(
-                grounded_reason
-            ):
-                grounded_reason = (
-                    f'Anchored by "{quote}".'
-                    if quote
-                    else "Transcript-grounded candidate."
-                )
+            # A non-generic model reason is tooltip-only material now; the
+            # title and hook carry the card.
+            tooltip_reason = (
+                ""
+                if not reason or is_generic_editor_text(reason)
+                else reason
+            )
 
-            title = hook or quote or "Transcript moment"
+            title = str(
+                candidate.get(
+                    "title",
+                    "",
+                )
+                or ""
+            ).strip()
+            if not title or is_generic_editor_text(title):
+                title = hook or quote or "Transcript moment"
 
             if len(title) > 54:
 
                 title = title[:51].rstrip() + "..."
 
-            if len(grounded_reason) > 92:
-                grounded_reason = grounded_reason[:89].rstrip() + "..."
+            def _plain(text: str) -> str:
+                return text.strip(" .!?\"'").lower()
+
+            card_hook = "" if _plain(hook) == _plain(title) else hook
+            if len(card_hook) > 92:
+                card_hook = card_hook[:89].rstrip() + "..."
 
             duration = max(
                 0,
@@ -221,14 +234,13 @@ class AIClipHunterMixin:
                 - start_ms,
             ) / 1000
 
-            headline = (
-                f"\"{self._card_text_lines(quote or title)}\"\n"
-                f"{self._card_text_lines(grounded_reason)}"
-            )
+            headline = self._card_text_lines(title)
+            if card_hook:
+                headline += f"\n{self._card_text_lines(card_hook)}"
 
             card.setText(
                 f"AI PICK #{rank}   •   {score}/100\n"
-                f"{format_time(start_ms)} → {format_time(end_ms)}\n"
+                f"{format_time(start_ms)} → {format_time(end_ms)}  ·  {duration:.1f}s\n"
                 f"{headline}"
             )
 
@@ -239,9 +251,14 @@ class AIClipHunterMixin:
                     f"Range: "
                     f"{start_ms / 1000:.2f}s → "
                     f"{end_ms / 1000:.2f}s\n\n"
+                    f"Title: {title}\n"
                     f"Hook: {hook or '—'}\n\n"
-                    f"Description: {description or '—'}\n\n"
-                    f"Why selected: {reason or '—'}"
+                    f"Transcript: {description or '—'}"
+                    + (
+                        f"\n\nWhy selected: {tooltip_reason}"
+                        if tooltip_reason
+                        else ""
+                    )
                 )
             )
 
@@ -563,9 +580,9 @@ class AIClipHunterMixin:
         )
 
         target_clip_count = (
-            6
-            if source_duration_ms >= 10 * 60 * 1000
-            else 3
+            LONG_SOURCE_CLIP_COUNT
+            if source_duration_ms >= LONG_SOURCE_MIN_MINUTES * 60 * 1000
+            else SHORT_SOURCE_CLIP_COUNT
         )
 
         self.render_log.append(
@@ -631,7 +648,7 @@ class AIClipHunterMixin:
         self.ai_candidates = []
 
         for rank, candidate in enumerate(
-            candidates[:6],
+            candidates,
             start=1,
         ):
 
@@ -690,6 +707,13 @@ class AIClipHunterMixin:
                     "start_ms": start_ms,
                     "end_ms": end_ms,
                     "score": score,
+                    "title": str(
+                        candidate.get(
+                            "title",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
                     "hook": str(
                         candidate.get(
                             "hook",
@@ -784,7 +808,7 @@ class AIClipHunterMixin:
         )
 
         self.render_log.append(
-            f"✓ Found {len(suggestions)} strong clip candidates."
+            f"✓ Found {len(suggestions)} clip candidates."
         )
 
         self.render_log.append(

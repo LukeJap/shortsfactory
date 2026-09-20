@@ -14,10 +14,12 @@ from dataclasses import dataclass
 import argparse
 import json
 import os
+import random
 import re
 import shutil
 import sys
 import time
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,19 +39,23 @@ REQUEST_TIMEOUT_SECONDS = 180
 # "beats" (see generate_valid_windows()) bounded to this range instead.
 MIN_CLIP_SECONDS = 15.0
 MAX_CLIP_SECONDS = 90.0
-PREFERRED_MIN_CLIP_SECONDS = 60
-PREFERRED_MAX_CLIP_SECONDS = 60
+PREFERRED_MIN_CLIP_SECONDS = 25.0
+PREFERRED_MAX_CLIP_SECONDS = 60.0
 # Consecutive transcript segments merge into one beat when the silence gap
 # between them is smaller than this; a gap this size or larger marks a beat
 # boundary.
 BEAT_GAP_SECONDS = 0.6
-# Per candidate start beat, keep only the longest-duration qualifying ends,
-# so candidate count stays roughly linear in beat count instead of quadratic.
-MAX_ENDS_PER_START = 4
+# Per candidate start beat, keep the qualifying end nearest each of these
+# durations, so candidates spread evenly across the range and the count stays
+# roughly linear in beat count instead of quadratic.
+CANDIDATE_DURATION_TARGETS = (20.0, 35.0, 55.0, 80.0)
+# A start beat needs at least this much silence before it (except the first
+# beat of the source), which keeps the candidate set small and openings clean.
+CANDIDATE_START_GAP_SECONDS = 1.5
 # Two candidates whose start and end both land within this many seconds of
 # each other are treated as the same moment; only the first (longest, since
 # ends are generated longest-first per start) is kept.
-CANDIDATE_DEDUPE_TOLERANCE_SECONDS = 1.0
+CANDIDATE_DEDUPE_TOLERANCE_SECONDS = 3.0
 # A mechanical boundary can still land mid-sentence in edge cases. Once a
 # window is actually selected, nudge each edge to the nearest real
 # transcript-segment boundary within this many seconds, so a clip starts/ends
@@ -66,7 +72,41 @@ FINAL_RANKING_CONTEXT_MAX_CHARS = 6000
 # of source context can exceed that and get silently truncated. Set both
 # explicitly rather than trust the server default.
 RANKING_NUM_CTX = 8192
-RANKING_NUM_PREDICT = 1024
+RANKING_NUM_PREDICT_BASE = 256
+RANKING_NUM_PREDICT_PER_SELECTION = 120
+# Detailed (final-pass) selections carry four sub-scores, a title and a hook.
+RANKING_NUM_PREDICT_PER_DETAILED_SELECTION = 60
+# Titling is a separate pass over only the chosen clips.
+TITLING_NUM_PREDICT_PER_CLIP = 90
+# The final ranking pass sees at most this many candidates (top by first-stage
+# score), which keeps its prompt inside num_ctx=8192.
+FINAL_POOL_MAX_CANDIDATES = 26
+TITLING_CLIP_TEXT_MAX_CHARS = 700
+# Ollama request timeout tracks the output budget at a conservative rate.
+TIMEOUT_TOKENS_PER_SECOND = 5
+TIMEOUT_SLACK_SECONDS = 60
+# The final pass asks for this many times the requested clip count, so
+# quota/overlap filtering has a real pool to backfill from.
+FINAL_SELECTION_MULTIPLIER = 3
+RUBRIC_FIELDS = ("hook_strength", "self_contained", "payoff", "peak")
+RUBRIC_MAX_PER_FIELD = 25
+RANKING_TITLE_MAX_CHARS = 60
+RANKING_HOOK_MAX_CHARS = 80
+# At most this fraction of returned clips may be longer than LONG_CLIP_SECONDS.
+LONG_CLIP_SECONDS = 70.0
+MAX_LONG_CLIP_FRACTION = 0.5
+# Max selections whose start falls in the same equal-width source region.
+MAX_SELECTIONS_PER_REGION = 2
+# 8192 is a hard ceiling: a 16k context spills the KV cache past 8GB VRAM and
+# generation drops from ~40 tok/s to ~7. Requests are sized to fit instead.
+RANKING_NUM_CTX_MAX = RANKING_NUM_CTX
+DEFAULT_CLIP_COUNT = 10
+MAX_CLIP_COUNT = 10
+# Length-variety quotas for select_distinct_ranked_windows.
+MID_LONG_CLIP_SECONDS = 45.0
+MIN_MID_LONG_CLIPS = 2
+SHORT_CLIP_SECONDS = 30.0
+TITLE_MIN_WORDS = 4
 TIMESTAMP_MATCH_TOLERANCE_SECONDS = 0.05
 # find_matching_window() re-identifies which mechanical valid_windows entry
 # a candidate came from, purely to re-validate it in normalize_analysis()
@@ -98,6 +138,8 @@ GENERIC_HOOK_PHRASES = (
     "creates curiosity",
     "viewers will want to know",
     "something surprising happens",
+    "in this episode",
+    "in this clip",
 )
 
 EXPECTED_ANALYSIS: dict[str, Any] = {
@@ -687,8 +729,17 @@ def generate_valid_windows(segments: list[TranscriptSegment]) -> list[CandidateW
 
     raw_candidates: list[CandidateWindow] = []
     for start_index, start_beat in enumerate(beats):
-        if start_index > 0 and not beats[start_index - 1].ends_with_terminal_punctuation:
-            continue
+        if start_index > 0:
+            previous_beat = beats[start_index - 1]
+            if not previous_beat.ends_with_terminal_punctuation:
+                continue
+            # A clip opening after a real pause opens cleanly; one opening
+            # right after the previous line is a mid-scene splice.
+            if (
+                start_beat.start - previous_beat.end
+                < CANDIDATE_START_GAP_SECONDS - TIMESTAMP_MATCH_TOLERANCE_SECONDS
+            ):
+                continue
 
         qualifying_ends: list[tuple[float, int]] = []
         for end_index in range(start_index, len(beats)):
@@ -702,8 +753,16 @@ def generate_valid_windows(segments: list[TranscriptSegment]) -> list[CandidateW
                 continue
             qualifying_ends.append((duration, end_index))
 
-        qualifying_ends.sort(key=lambda item: -item[0])
-        for _duration, end_index in qualifying_ends[:MAX_ENDS_PER_START]:
+        # Pick the qualifying end nearest each duration target so candidates
+        # spread across the whole range instead of clustering at the maximum.
+        chosen_end_indices: set[int] = set()
+        if qualifying_ends:
+            for target in CANDIDATE_DURATION_TARGETS:
+                _nearest_duration, nearest_index = min(
+                    qualifying_ends, key=lambda item: abs(item[0] - target)
+                )
+                chosen_end_indices.add(nearest_index)
+        for end_index in sorted(chosen_end_indices, reverse=True):
             text = " ".join(beat.text for beat in beats[start_index : end_index + 1]).strip()
             raw_candidates.append(
                 CandidateWindow(start=start_beat.start, end=beats[end_index].end, text=text)
@@ -1020,7 +1079,36 @@ def window_ranking_response_count(
 def window_ranking_json_schema(
     window_ids: list[str],
     selection_count: int,
+    detailed: bool = False,
 ) -> dict[str, Any]:
+    if detailed:
+        properties: dict[str, Any] = {
+            "window_id": {"type": "string", "enum": window_ids},
+        }
+        for field in RUBRIC_FIELDS:
+            properties[field] = {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": RUBRIC_MAX_PER_FIELD,
+            }
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["selections"],
+            "properties": {
+                "selections": {
+                    "type": "array",
+                    "minItems": selection_count,
+                    "maxItems": selection_count,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(properties),
+                        "properties": properties,
+                    },
+                }
+            },
+        }
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1037,12 +1125,38 @@ def window_ranking_json_schema(
                     "properties": {
                         "window_id": {"type": "string", "enum": window_ids},
                         "score": {"type": "integer", "minimum": 0, "maximum": 100},
-                        "reason": {"type": "string"},
+                        "reason": {"type": "string", "maxLength": 160},
                     },
                 },
             }
         },
     }
+
+
+class RankedReason(str):
+    """A ranked window's reason text, plus the title/hook/sub-scores the
+    detailed ranker returns. Subclassing str keeps the existing
+    (window, score, reason) tuple shape working for every other caller."""
+
+    title: str = ""
+    hook: str = ""
+    sub_scores: dict[str, int]
+
+
+def _shares_content_word(candidate: str, source_text: str) -> bool:
+    source_words = set(re.findall(r"[a-z0-9']{4,}", source_text.lower()))
+    return any(word in source_words for word in re.findall(r"[a-z0-9']{4,}", candidate.lower()))
+
+
+def grounded_ranker_text(candidate: str, window: CandidateWindow) -> str:
+    """Return the model's title/hook only if it is specific and grounded in the
+    window's own text; otherwise an empty string so the caller regenerates it."""
+    cleaned = " ".join(str(candidate or "").split())
+    if not cleaned or is_generic_hook(cleaned):
+        return ""
+    if not _shares_content_word(cleaned, window.text):
+        return ""
+    return cleaned
 
 
 class WindowRankingResponse(dict):
@@ -1057,25 +1171,150 @@ class WindowRankingResponse(dict):
     raw_text: str = ""
 
 
-def call_ollama_window_ranker(
+def ranking_num_predict(selection_count: int, detailed: bool = False) -> int:
+    per_selection = (
+        RANKING_NUM_PREDICT_PER_DETAILED_SELECTION
+        if detailed
+        else RANKING_NUM_PREDICT_PER_SELECTION
+    )
+    return RANKING_NUM_PREDICT_BASE + per_selection * max(0, selection_count)
+
+
+def ranking_timeout(num_predict: int) -> int:
+    """Timeout that scales with the output budget; never below the base."""
+    return max(
+        REQUEST_TIMEOUT_SECONDS,
+        int(num_predict / TIMEOUT_TOKENS_PER_SECOND) + TIMEOUT_SLACK_SECONDS,
+    )
+
+
+def ranking_num_ctx(prompt_chars: int, num_predict: int) -> int:
+    """Context must cover the prompt *and* the output, or Ollama silently
+    truncates the prompt. Floor at RANKING_NUM_CTX, cap at RANKING_NUM_CTX_MAX."""
+    needed = prompt_chars // 3 + num_predict + 512
+    size = RANKING_NUM_CTX
+    while size < needed and size < RANKING_NUM_CTX_MAX:
+        size *= 2
+    return min(size, RANKING_NUM_CTX_MAX)
+
+
+def estimated_request_tokens(prompt_chars: int, num_predict: int) -> int:
+    """Same estimate ranking_num_ctx() sizes the context from."""
+    return prompt_chars // 3 + num_predict + 512
+
+
+def shrink_pool_to_context(
+    transcript: TranscriptData,
+    shortlist: list[tuple[CandidateWindow, int, str]],
+    target_clip_count: int,
+) -> list[tuple[CandidateWindow, int, str]]:
+    """Drop the weakest candidates until the final request fits RANKING_NUM_CTX.
+
+    Shrinks the pool rather than ever stepping num_ctx past 8192.
+    """
+    pool = list(shortlist)
+    while True:
+        windows = [window for window, _score, _reason in sorted(pool, key=lambda c: c[0].start)]
+        selection_count = min(len(windows), target_clip_count * FINAL_SELECTION_MULTIPLIER)
+        prompt = build_window_ranking_prompt(
+            transcript,
+            windows,
+            target_clip_count=selection_count,
+            context_max_chars=FINAL_RANKING_CONTEXT_MAX_CHARS,
+            detailed=True,
+        )
+        estimate = estimated_request_tokens(
+            len(prompt), ranking_num_predict(selection_count, True)
+        )
+        if estimate <= RANKING_NUM_CTX or len(pool) <= 1:
+            log(
+                f"Final pool token estimate: {estimate} of {RANKING_NUM_CTX} "
+                f"with {len(pool)} candidates."
+            )
+            return pool
+        weakest = min(range(len(pool)), key=lambda index: pool[index][1])
+        pool.pop(weakest)
+
+
+def salvage_selections(text: str) -> dict[str, Any] | None:
+    """Recover every complete object from a truncated "selections" array.
+
+    Scans with brace depth, tracking string state and escapes. Returns None
+    when no complete selection can be recovered.
+    """
+    key = text.find('"selections"')
+    if key == -1:
+        return None
+    bracket = text.find("[", key)
+    if bracket == -1:
+        return None
+
+    selections: list[Any] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    object_start = -1
+    for index in range(bracket + 1, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                object_start = index
+            depth += 1
+        elif char == "}":
+            if depth == 0:
+                break
+            depth -= 1
+            if depth == 0:
+                try:
+                    selections.append(json.loads(text[object_start : index + 1]))
+                except json.JSONDecodeError:
+                    break
+        elif char == "]" and depth == 0:
+            break
+
+    if not selections:
+        return None
+    return {"selections": selections}
+
+
+def post_for_selections(
     host: str,
     model: str,
     prompt: str,
+    schema: dict[str, Any],
     *,
-    window_ids: list[str],
+    num_predict: int,
     selection_count: int,
-) -> dict[str, Any]:
+    purpose: str,
+    timeout_message: str = "",
+) -> "WindowRankingResponse":
+    """POST one schema-constrained request whose answer is a "selections" array.
+
+    Shared by the ranking and titling passes. Truncated arrays are salvaged
+    rather than failing the run.
+    """
+    num_ctx = ranking_num_ctx(len(prompt), num_predict)
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "format": window_ranking_json_schema(window_ids, selection_count),
+        "format": schema,
         "keep_alive": "10m",
         "options": {
             "temperature": 0,
             "top_p": 0.9,
-            "num_ctx": RANKING_NUM_CTX,
-            "num_predict": RANKING_NUM_PREDICT,
+            "num_ctx": num_ctx,
+            "num_predict": num_predict,
         },
     }
 
@@ -1083,11 +1322,11 @@ def call_ollama_window_ranker(
         response = request_json(
             f"{host}/api/generate",
             payload=payload,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=ranking_timeout(num_predict),
         )
     except HTTPError as exc:
         raise RuntimeError(
-            f"Ollama window-ranking request failed with HTTP {exc.code}."
+            f"Ollama {purpose} request failed with HTTP {exc.code}."
         ) from exc
     except URLError as exc:
         raise RuntimeError(
@@ -1095,35 +1334,318 @@ def call_ollama_window_ranker(
         ) from exc
     except TimeoutError as exc:
         raise WindowRankingTimeout(
-            "Ollama took too long to rank the clip candidates. Please try again."
+            timeout_message
+            or f"Ollama took too long for the {purpose} request. Please try again."
         ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            "Ollama returned invalid JSON for the window-ranking request."
+            f"Ollama returned invalid JSON for the {purpose} request."
         ) from exc
     except OSError as exc:
         raise RuntimeError(
-            f"Ollama window-ranking request failed: {exc}"
+            f"Ollama {purpose} request failed: {exc}"
         ) from exc
 
     response_text = str(response.get("response", "")).strip()
 
     if not response_text:
         raise RuntimeError(
-            "Ollama returned an empty window-ranking response."
+            f"Ollama returned an empty {purpose} response."
         )
 
     try:
         parsed = extract_json_object(response_text)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RuntimeError(
-            f"The window-ranking response was not valid JSON: {exc} "
-            f"Raw response (first 500 chars): {response_text[:500]!r}"
-        ) from exc
+        parsed = salvage_selections(response_text)
+        if parsed is None:
+            raise RuntimeError(
+                f"The {purpose} response was not valid JSON: {exc} "
+                f"Raw response (first 500 chars): {response_text[:500]!r}"
+            ) from exc
+        log(
+            f"WARNING: {purpose} response was truncated or malformed ({exc}); "
+            f"salvaged {len(parsed['selections'])} of {selection_count} requested selections."
+        )
 
     result = WindowRankingResponse(parsed)
     result.raw_text = response_text
     return result
+
+
+
+def call_ollama_window_ranker(
+    host: str,
+    model: str,
+    prompt: str,
+    *,
+    window_ids: list[str],
+    selection_count: int,
+    detailed: bool = False,
+) -> dict[str, Any]:
+    return post_for_selections(
+        host,
+        model,
+        prompt,
+        window_ranking_json_schema(window_ids, selection_count, detailed),
+        num_predict=ranking_num_predict(selection_count, detailed),
+        selection_count=selection_count,
+        purpose="window-ranking",
+        timeout_message="Ollama took too long to rank the clip candidates. Please try again.",
+    )
+
+
+def titling_json_schema(window_ids: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["selections"],
+        "properties": {
+            "selections": {
+                "type": "array",
+                "minItems": len(window_ids),
+                "maxItems": len(window_ids),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["window_id", "title", "hook"],
+                    "properties": {
+                        "window_id": {"type": "string", "enum": window_ids},
+                        "title": {"type": "string", "maxLength": RANKING_TITLE_MAX_CHARS},
+                        "hook": {"type": "string", "maxLength": RANKING_HOOK_MAX_CHARS},
+                    },
+                },
+            }
+        },
+    }
+
+
+def call_ollama_clip_titler(
+    host: str,
+    model: str,
+    prompt: str,
+    *,
+    window_ids: list[str],
+) -> dict[str, Any]:
+    return post_for_selections(
+        host,
+        model,
+        prompt,
+        titling_json_schema(window_ids),
+        num_predict=RANKING_NUM_PREDICT_BASE
+        + TITLING_NUM_PREDICT_PER_CLIP * len(window_ids),
+        selection_count=len(window_ids),
+        purpose="clip-titling",
+    )
+
+
+def _normalize_for_match(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9' ]+", " ", str(text).lower()).split())
+
+
+def is_quote_of_clip(hook: str, window: CandidateWindow) -> bool:
+    """A hook lifted verbatim from the clip's transcript is a quote, not a hook."""
+    normalized = _normalize_for_match(hook)
+    return bool(normalized) and normalized in _normalize_for_match(window.text)
+
+
+def is_valid_title(title: str) -> bool:
+    cleaned = title.strip()
+    return len(cleaned.split()) >= TITLE_MIN_WORDS and not cleaned.endswith(".")
+
+
+def build_titling_prompt(windows: list[CandidateWindow], *, retry: bool = False) -> str:
+    clips = "\n\n".join(
+        f"W{index:03d} ({window.duration_seconds:.0f}s): "
+        f"{truncate_for_prompt(window.text, TITLING_CLIP_TEXT_MAX_CHARS)}"
+        for index, window in enumerate(windows, start=1)
+    )
+    retry_note = (
+        "\nYour previous answer quoted the clip or was too short. Rewrite it: "
+        "no words copied in a row from the clip.\n"
+        if retry
+        else ""
+    )
+    return f"""
+You are naming short-form video clips. For each clip below write:
+- title: {TITLE_MIN_WORDS}-9 words, a claim or a question, no trailing period. State what is at stake
+  or what is strange; never just label the scene. At most {RANKING_TITLE_MAX_CHARS} characters.
+- hook: one sentence, at most {RANKING_HOOK_MAX_CHARS} characters, saying why a viewer should stay.
+  Never quote the clip: do not copy any line of dialogue.
+
+Use names and objects from the clip, but write your own words. Never write
+"In this episode..." or "Interesting moment". Two finished examples:
+
+{{"selections": [
+  {{"window_id": "W001", "title": "Their secret recipe was never a secret", "hook": "One reveal turns a family legend into a joke on everyone."}},
+  {{"window_id": "W002", "title": "Who really pays for the mule's feed?", "hook": "A partnership deal hides a cost nobody agreed to."}}
+]}}
+{retry_note}
+Return exactly {len(windows)} entries, one per clip, using only the IDs below.
+
+CLIPS:
+
+{clips}
+""".strip()
+
+
+def _titling_selections(
+    host: str,
+    model: str,
+    windows: list[CandidateWindow],
+    *,
+    retry: bool,
+) -> dict[str, dict[str, Any]] | None:
+    window_ids = [f"W{index:03d}" for index in range(1, len(windows) + 1)]
+    try:
+        result = call_ollama_clip_titler(
+            host,
+            model,
+            build_titling_prompt(windows, retry=retry),
+            window_ids=window_ids,
+        )
+    except (RuntimeError, WindowRankingTimeout) as exc:
+        log(f"WARNING: titling pass failed ({exc}); using local titles.")
+        return None
+    by_id: dict[str, dict[str, Any]] = {}
+    for selection in result.get("selections", []) if isinstance(result, dict) else []:
+        if isinstance(selection, dict):
+            by_id[str(selection.get("window_id", "")).strip().upper()] = selection
+    return by_id
+
+
+def _accepted_title_and_hook(
+    selection: dict[str, Any], window: CandidateWindow
+) -> tuple[str, str]:
+    title = grounded_ranker_text(selection.get("title", ""), window)
+    if not is_valid_title(title):
+        title = ""
+    hook = grounded_ranker_text(selection.get("hook", ""), window)
+    if is_quote_of_clip(hook, window):
+        hook = ""
+    return title, hook
+
+
+def title_selected_clips(
+    host: str,
+    model: str,
+    ranked: list[tuple[CandidateWindow, int, str]],
+) -> list[tuple[CandidateWindow, int, str]]:
+    """Add a title and hook to each chosen clip with one small extra call.
+
+    Rejected titles/hooks (generic, ungrounded, a quote of the clip, a title
+    under 4 words or ending in a period) get one retry call covering only those
+    clips. Titling is cosmetic: on any failure the clips come back unchanged
+    and candidate_clips_from_ranked_windows() falls back to the local
+    grounded_title_from_text / make_specific_hook generators.
+    """
+    if not ranked:
+        return ranked
+
+    windows = [item[0] for item in ranked]
+    started = time.monotonic()
+    first = _titling_selections(host, model, windows, retry=False)
+    if first is None:
+        return ranked
+
+    accepted: list[tuple[str, str]] = []
+    for index, window in enumerate(windows, start=1):
+        accepted.append(_accepted_title_and_hook(first.get(f"W{index:03d}", {}), window))
+
+    rejected = [index for index, (title, hook) in enumerate(accepted) if not title or not hook]
+    if rejected:
+        log(f"Titling retry for {len(rejected)} clip(s) with a rejected title or hook.")
+        second = _titling_selections(
+            host, model, [windows[index] for index in rejected], retry=True
+        )
+        for position, index in enumerate(rejected, start=1):
+            retried = _accepted_title_and_hook(
+                (second or {}).get(f"W{position:03d}", {}), windows[index]
+            )
+            accepted[index] = (accepted[index][0] or retried[0], accepted[index][1] or retried[1])
+
+    titled: list[tuple[CandidateWindow, int, str]] = []
+    model_titles = 0
+    for (window, score, reason), (title, hook) in zip(ranked, accepted):
+        model_titles += 1 if title else 0
+        new_reason = RankedReason(str(reason))
+        new_reason.title = title
+        new_reason.hook = hook
+        new_reason.sub_scores = dict(
+            reason.sub_scores if isinstance(reason, RankedReason) else {}
+        )
+        titled.append((window, score, new_reason))
+    log(
+        f"Titling pass completed in {time.monotonic() - started:.1f}s: "
+        f"{model_titles}/{len(ranked)} model titles kept."
+    )
+    return titled
+
+
+SIMPLE_CALIBRATION_BLOCK = """Score calibration:
+- 90-100: exceptional standout moment; an obvious Short
+- 80-89: strong complete scene or moment
+- 70-79: usable but not special
+- below 70: weaker but still usable backup material
+
+Do not award 90+ to ordinary setup, a title/opening, or recognizable dialogue
+without a concrete event or payoff."""
+
+SIMPLE_EXAMPLE_BLOCK = """Return ONLY this JSON structure:
+
+{
+  "selections": [
+    {
+      "window_id": "W001",
+      "score": 95,
+      "reason": "Krabs refuses to pay, then bills the customers."
+    },
+    {
+      "window_id": "W002",
+      "score": 88,
+      "reason": "Krabs refuses to pay, then bills the customers."
+    },
+    {
+      "window_id": "W003",
+      "score": 82,
+      "reason": "Krabs refuses to pay, then bills the customers."
+    }
+  ]
+}"""
+
+DETAILED_CALIBRATION_BLOCK = """Score every selection on four independent 0-25 judgments:
+- hook_strength: does the first line make a viewer stay?
+- self_contained: does it make sense with no prior context?
+- payoff: does it resolve, land a joke, or reveal something?
+- peak: is there a genuine emotional or comedic high point?
+
+Judge each one separately; ordinary setup, a title/opening, or plain
+recognizable dialogue scores low on payoff and peak. Return only the window ID
+and the four numbers -- no text."""
+
+DETAILED_EXAMPLE_BLOCK = """Return ONLY this JSON structure. The two entries below are unrelated
+to your windows; they only show the shape. Their numbers are arbitrary --
+judge each of your windows on its own content:
+
+{
+  "selections": [
+    {
+      "window_id": "W001",
+      "hook_strength": 12,
+      "self_contained": 22,
+      "payoff": 6,
+      "peak": 9
+    },
+    {
+      "window_id": "W002",
+      "hook_strength": 8,
+      "self_contained": 15,
+      "payoff": 24,
+      "peak": 23
+    }
+  ]
+}"""
+
+
 def build_window_ranking_prompt(
     transcript: TranscriptData,
     valid_windows: list[CandidateWindow],
@@ -1131,6 +1653,7 @@ def build_window_ranking_prompt(
     excluded_window_ids: set[str] | None = None,
     response_count_override: int | None = None,
     context_max_chars: int = RANKING_CONTEXT_MAX_CHARS,
+    detailed: bool = False,
 ) -> str:
     excluded = excluded_window_ids or set()
     windows_text = format_valid_windows_for_prompt(valid_windows, excluded)
@@ -1144,6 +1667,30 @@ def build_window_ranking_prompt(
         excluded,
         response_count_override,
     )
+
+    if detailed:
+        calibration_block = DETAILED_CALIBRATION_BLOCK
+        example_block = DETAILED_EXAMPLE_BLOCK
+        detailed_field_rule = (
+            " Score each candidate on the four 0-25 sub-scores only; "
+            "never return a total."
+        )
+        duration_rule = (
+            f"Candidates run {MIN_CLIP_SECONDS:g}-{MAX_CLIP_SECONDS:g} seconds and each "
+            "window shows its own duration. A Short lives or dies in its first three "
+            "seconds, so a tight 25-second moment beats a padded 85-second one. Choose "
+            "a longer window only when its payoff genuinely needs the runtime. More "
+            "words are not more quality."
+        )
+    else:
+        calibration_block = SIMPLE_CALIBRATION_BLOCK
+        example_block = SIMPLE_EXAMPLE_BLOCK
+        detailed_field_rule = ""
+        duration_rule = (
+            f"Candidates vary in length between {MIN_CLIP_SECONDS:g} and "
+            f"{MAX_CLIP_SECONDS:g} seconds. Judge the moment, not the duration -- do "
+            "not prefer a candidate merely for being longer or shorter."
+        )
 
     return f"""
 You are an editor selecting clips for short-form video.
@@ -1181,36 +1728,8 @@ outside context. Treat opening themes, title sequences, credits, recaps,
 sponsor reads, and other boilerplate as structural material, not strong Shorts,
 unless that material itself contains a unique story event.
 
-Score calibration:
-- 90-100: exceptional standout moment; an obvious Short
-- 80-89: strong complete scene or moment
-- 70-79: usable but not special
-- below 70: weaker but still usable backup material
-
-Do not award 90+ to ordinary setup, a title/opening, or recognizable dialogue
-without a concrete event or payoff.
-
-Return ONLY this JSON structure:
-
-{{
-  "selections": [
-    {{
-      "window_id": "W001",
-      "score": 95,
-      "reason": "Concrete transcript detail that makes this window work."
-    }},
-    {{
-      "window_id": "W002",
-      "score": 88,
-      "reason": "Concrete transcript detail that makes this window work."
-    }},
-    {{
-      "window_id": "W003",
-      "score": 82,
-      "reason": "Concrete transcript detail that makes this window work."
-    }}
-  ]
-}}
+{calibration_block}
+{example_block}
 
 Rules:
 1. Return exactly {response_count} different window IDs whenever that many eligible non-structural windows exist.
@@ -1218,13 +1737,13 @@ Rules:
 3. Never invent an ID.
 4. Do not return timestamps.
 5. Do not return the transcript.
-6. Do not return any additional fields.
+6. Do not return any additional fields.{detailed_field_rule}
 7. Rank the strongest candidate first.
 8. Prefer distinct, non-overlapping moments from different parts of the source when quality is similar.
 9. Avoid returning multiple windows that cover essentially the same scene or conversation beat.
 10. Reasons must mention concrete words, people, objects, places, or actions from that window.
 11. Do not write phrases such as "clear setup and payoff", "engaging conversation", or "becomes the center of attention".
-12. Candidates vary in length between {MIN_CLIP_SECONDS:g} and {MAX_CLIP_SECONDS:g} seconds. Judge the moment, not the duration -- do not prefer a candidate merely for being longer or shorter.
+12. {duration_rule}
 13. Do not select a structural theme, title, credits, recap, sponsor, or boilerplate window unless it itself contains a unique story event.
 14. Default toward distinct scenes from different parts of the source. Do not cluster selections in one adjacent conversation when similarly strong moments exist elsewhere.
 15. Do not omit weaker-but-usable real scenes because they score below 70. Rank them honestly after stronger candidates so the requested final count can still be filled.
@@ -1274,11 +1793,24 @@ def ranked_windows_from_result(
         if window is None:
             continue
 
-        score = coerce_int(selection.get("score"), minimum=0, maximum=100)
-        if score is None:
-            score = 0
+        sub_scores: dict[str, int] = {}
+        for field in RUBRIC_FIELDS:
+            value = coerce_int(
+                selection.get(field), minimum=0, maximum=RUBRIC_MAX_PER_FIELD
+            )
+            if value is not None:
+                sub_scores[field] = value
 
-        reason = str(selection.get("reason", "")).strip()
+        if sub_scores:
+            # The model judges each dimension; Python does the adding.
+            score = sum(sub_scores.values())
+        else:
+            score = coerce_int(selection.get("score"), minimum=0, maximum=100)
+            if score is None:
+                score = 0
+
+        reason = RankedReason(str(selection.get("reason", "")).strip())
+        reason.sub_scores = sub_scores
         ranked.append((window, score, reason))
         seen.add(window_id)
 
@@ -1301,26 +1833,84 @@ def ranked_window_ids(
 def select_distinct_ranked_windows(
     ranked_windows: list[tuple[CandidateWindow, int, str]],
     target_clip_count: int,
+    source_duration: float | None = None,
 ) -> list[tuple[CandidateWindow, int, str]]:
-    """Select distinct source moments without returning overlapping clips."""
+    """Select distinct source moments without returning overlapping clips.
 
-    selected: list[tuple[CandidateWindow, int, str]] = []
+    Pass 1 applies the overlap rule plus a duration quota (at most half the
+    clips longer than LONG_CLIP_SECONDS) and, when source_duration is known,
+    a region quota (at most MAX_SELECTIONS_PER_REGION per equal-width region
+    by start time). If that leaves fewer than target_clip_count, pass 2
+    backfills by score with the quotas relaxed. Overlap is never relaxed, so fewer than
+    target_clip_count clips come back only when no non-overlapping ones remain.
+    """
 
-    def overlaps(
-        first: CandidateWindow,
-        second: CandidateWindow,
-    ) -> bool:
+    def overlaps(first: CandidateWindow, second: CandidateWindow) -> bool:
         overlap = max(0.0, min(first.end, second.end) - max(first.start, second.start))
         return overlap > TIMESTAMP_MATCH_TOLERANCE_SECONDS
 
-    for candidate in ranked_windows:
-        window = candidate[0]
-        if any(overlaps(window, chosen[0]) for chosen in selected):
-            continue
-        selected.append(candidate)
-        if len(selected) >= target_clip_count:
-            return selected
+    ordered = list(ranked_windows)
+    max_long = max(1, target_clip_count // 2) if target_clip_count > 0 else 0
+    region_count = max(1, target_clip_count)
 
+    def region_of(window: CandidateWindow) -> int:
+        if not source_duration or source_duration <= 0:
+            return 0
+        return min(region_count - 1, int(window.start / source_duration * region_count))
+
+    max_short = max(1, target_clip_count // 2)
+    min_mid_long = min(MIN_MID_LONG_CLIPS, target_clip_count)
+    selected: list[tuple[CandidateWindow, int, str]] = []
+
+    def run_pass(*, enforce_quotas: bool) -> None:
+        for candidate in ordered:
+            if len(selected) >= target_clip_count:
+                return
+            if any(candidate is chosen for chosen in selected):
+                continue
+            window = candidate[0]
+            if any(overlaps(window, chosen[0]) for chosen in selected):
+                continue
+            if enforce_quotas:
+                long_count = sum(
+                    1 for chosen in selected if chosen[0].duration_seconds > LONG_CLIP_SECONDS
+                )
+                if window.duration_seconds > LONG_CLIP_SECONDS and long_count >= max_long:
+                    continue
+                if source_duration and source_duration > 0:
+                    in_region = sum(
+                        1 for chosen in selected if region_of(chosen[0]) == region_of(window)
+                    )
+                    if in_region >= MAX_SELECTIONS_PER_REGION:
+                        continue
+                if window.duration_seconds < SHORT_CLIP_SECONDS and sum(
+                    1 for chosen in selected if chosen[0].duration_seconds < SHORT_CLIP_SECONDS
+                ) >= max_short and any(
+                    other[0].duration_seconds >= SHORT_CLIP_SECONDS
+                    and not any(other is chosen for chosen in selected)
+                    and not any(overlaps(other[0], chosen[0]) for chosen in selected)
+                    for other in ordered
+                ):
+                    continue
+                if window.duration_seconds < MID_LONG_CLIP_SECONDS:
+                    deficit = min_mid_long - sum(
+                        1
+                        for chosen in selected
+                        if chosen[0].duration_seconds >= MID_LONG_CLIP_SECONDS
+                    )
+                    slots_after = target_clip_count - len(selected) - 1
+                    if deficit > slots_after and any(
+                        other[0].duration_seconds >= MID_LONG_CLIP_SECONDS
+                        and not any(other is chosen for chosen in selected)
+                        and not any(overlaps(other[0], chosen[0]) for chosen in selected)
+                        for other in ordered
+                    ):
+                        continue
+            selected.append(candidate)
+
+    run_pass(enforce_quotas=True)
+    if len(selected) < target_clip_count:
+        run_pass(enforce_quotas=False)
     return selected
 
 
@@ -1345,6 +1935,7 @@ def rank_window_request(
     request_label: str,
     context_max_chars: int,
     minimum_count: int = 0,
+    detailed: bool = False,
 ) -> list[tuple[CandidateWindow, int, str]]:
     """Run one measured, schema-constrained ranking request."""
 
@@ -1356,10 +1947,14 @@ def rank_window_request(
         windows,
         target_clip_count=selection_count,
         context_max_chars=context_max_chars,
+        detailed=detailed,
     )
+    predict_budget = ranking_num_predict(selection_count, detailed)
     log(
         f"Ranking {request_label}: {len(windows)} candidates, "
-        f"{len(prompt)} prompt chars, timeout={REQUEST_TIMEOUT_SECONDS}s"
+        f"{len(prompt)} prompt chars, timeout={ranking_timeout(predict_budget)}s, "
+        f"num_predict={predict_budget}, "
+        f"num_ctx={ranking_num_ctx(len(prompt), predict_budget)}"
     )
     started = time.monotonic()
     try:
@@ -1369,6 +1964,7 @@ def rank_window_request(
             prompt,
             window_ids=[f"W{index:03d}" for index in range(1, len(windows) + 1)],
             selection_count=selection_count,
+            **({"detailed": True} if detailed else {}),
         )
     except WindowRankingTimeout:
         elapsed = time.monotonic() - started
@@ -1378,6 +1974,18 @@ def rank_window_request(
     ranked = ranked_windows_from_result(result, windows)
     elapsed = time.monotonic() - started
     log(f"{request_label} completed in {elapsed:.1f}s: {len(ranked)} valid selections")
+
+    if detailed:
+        missing = [
+            window_item
+            for window_item in ranked
+            if not getattr(window_item[2], "sub_scores", None)
+        ]
+        if missing:
+            log(
+                f"WARNING: {request_label} requested detailed sub-scores but "
+                f"{len(missing)}/{len(ranked)} selections came back without any."
+            )
 
     if not ranked:
         raw_text = getattr(result, "raw_text", "")
@@ -1467,12 +2075,109 @@ def rank_first_stage_batch(
     return sorted(ranked, key=lambda item: (-item[1], item[0].start))[:selection_count]
 
 
+def format_clip_log_lines(candidate: dict[str, Any], analysis: dict[str, Any]) -> list[str]:
+    """CLI lines for one clip: title as the headline, hook beneath it."""
+    title = candidate.get("title") or make_specific_hook(analysis, candidate)
+    lines = [
+        "Clip: {start} -> {end} | {duration:.1f}s | score {score} | {title}".format(
+            start=candidate["start_timestamp"],
+            end=candidate["end_timestamp"],
+            duration=float(candidate["duration_seconds"]),
+            score=candidate.get("score", 0),
+            title=title,
+        )
+    ]
+    if candidate.get("hook"):
+        lines.append(f"       hook: {candidate['hook']}")
+    return lines
+
+
+def trim_shortlist_by_region(
+    shortlist: list[tuple[CandidateWindow, int, str]],
+    region_count: int,
+    source_duration: float,
+    max_candidates: int = FINAL_POOL_MAX_CANDIDATES,
+) -> list[tuple[CandidateWindow, int, str]]:
+    """Trim to max_candidates without starving any part of the source.
+
+    The source is split into region_count equal regions by window start. Each
+    region contributes its top ceil(max_candidates / region_count) by
+    first-stage score, then leftover slots fill by global score. Returned in
+    chronological order.
+    """
+    if len(shortlist) <= max_candidates:
+        return sorted(shortlist, key=lambda candidate: candidate[0].start)
+
+    region_count = max(1, region_count)
+    per_region = -(-max_candidates // region_count)
+
+    def region_of(window: CandidateWindow) -> int:
+        if source_duration <= 0:
+            return 0
+        return min(region_count - 1, max(0, int(window.start / source_duration * region_count)))
+
+    regions: list[list[tuple[CandidateWindow, int, str]]] = [[] for _ in range(region_count)]
+    for candidate in shortlist:
+        regions[region_of(candidate[0])].append(candidate)
+
+    kept: list[tuple[CandidateWindow, int, str]] = []
+    leftovers: list[tuple[CandidateWindow, int, str]] = []
+    for members in regions:
+        members.sort(key=lambda candidate: -candidate[1])
+        kept.extend(members[:per_region])
+        leftovers.extend(members[per_region:])
+
+    # Per-region quotas can overshoot when max_candidates isn't a multiple of
+    # region_count; drop the weakest so the cap always holds.
+    if len(kept) > max_candidates:
+        kept.sort(key=lambda candidate: -candidate[1])
+        leftovers.extend(kept[max_candidates:])
+        kept = kept[:max_candidates]
+    if len(kept) < max_candidates:
+        leftovers.sort(key=lambda candidate: -candidate[1])
+        kept.extend(leftovers[: max_candidates - len(kept)])
+
+    counts = [
+        f"{sum(1 for candidate in kept if region_of(candidate[0]) == index)}/{len(members)}"
+        for index, members in enumerate(regions)
+    ]
+    log(
+        f"Trimmed final pool from {len(shortlist)} to {len(kept)} "
+        f"(kept/available per region): {', '.join(counts)}"
+    )
+    return sorted(kept, key=lambda candidate: candidate[0].start)
+
+
+def shuffled_for_final_pass(
+    windows: list[CandidateWindow], seed: int | None = None
+) -> tuple[list[CandidateWindow], int]:
+    """Seeded shuffle so prompt position carries no chronological signal.
+
+    W-IDs are assigned by prompt position and mapped straight back to the real
+    window objects, so callers restore chronological order by sorting on start.
+    The seed comes from SHORTS_RANK_SEED when set, else is derived from the
+    windows themselves, so a run is reproducible.
+    """
+    if seed is None:
+        env_seed = os.environ.get("SHORTS_RANK_SEED", "").strip()
+        if env_seed.lstrip("-").isdigit():
+            seed = int(env_seed)
+        else:
+            seed = zlib.crc32(
+                ",".join(f"{window.start:.2f}" for window in windows).encode()
+            )
+    order = list(windows)
+    random.Random(seed).shuffle(order)
+    return order, seed
+
+
 def rank_exact_minute_windows(
     host: str,
     model: str,
     transcript: TranscriptData,
     valid_windows: list[CandidateWindow],
     target_clip_count: int,
+    seed: int | None = None,
 ) -> list[tuple[CandidateWindow, int, str]]:
     """Rank exact-minute windows through local shortlists and one global pass."""
     batches = chronological_window_batches(valid_windows)
@@ -1504,27 +2209,43 @@ def rank_exact_minute_windows(
             )
         if not shortlist:
             raise RuntimeError("No candidate windows survived first-stage ranking.")
+        if len(shortlist) > FINAL_POOL_MAX_CANDIDATES:
+            source_end = max((segment.end for segment in transcript.segments), default=0.0)
+            shortlist = trim_shortlist_by_region(
+                shortlist,
+                target_clip_count,
+                source_end or max(window.end for window, _s, _r in shortlist),
+            )
+        shortlist = shrink_pool_to_context(transcript, shortlist, target_clip_count)
         shortlist.sort(key=lambda candidate: candidate[0].start)
         rankable_windows = [window for window, _score, _reason in shortlist]
 
     selection_count = min(
         len(rankable_windows),
-        max(target_clip_count, target_clip_count * 2),
+        target_clip_count * FINAL_SELECTION_MULTIPLIER,
     )
+    prompt_order, seed = shuffled_for_final_pass(rankable_windows, seed)
+    log(f"Final pass candidate order shuffled with seed {seed}.")
     final_ranked = rank_window_request(
         host,
         model,
         transcript,
-        rankable_windows,
+        prompt_order,
         selection_count,
         request_label="final shortlist",
         context_max_chars=FINAL_RANKING_CONTEXT_MAX_CHARS,
         minimum_count=min(target_clip_count, len(rankable_windows)),
+        detailed=True,
     )
-    return select_distinct_ranked_windows(
+    # Rank by the Python-computed total, best first, before quota selection.
+    final_ranked = sorted(final_ranked, key=lambda item: (-item[1], item[0].start))
+    source_end = max((segment.end for segment in transcript.segments), default=0.0)
+    selected = select_distinct_ranked_windows(
         final_ranked,
         target_clip_count,
+        source_duration=source_end,
     )
+    return title_selected_clips(host, model, selected)
 
 def snap_boundary_to_segment_edge(
     boundary: float,
@@ -1600,18 +2321,33 @@ def candidate_clips_from_ranked_windows(
             else reason
         )
 
+        # A plain str has a .title() method, so only trust RankedReason attrs.
+        ranker_title = reason.title if isinstance(reason, RankedReason) else ""
+        ranker_hook = reason.hook if isinstance(reason, RankedReason) else ""
+
         candidate = {
             "start_timestamp": format_timestamp(window.start),
             "end_timestamp": format_timestamp(window.end),
             "duration_seconds": round_duration(window.duration_seconds),
             "hook": "",
+            "title": ranker_title or grounded_title_from_text(window.text),
             "description": description,
             "score": score,
-            "reason": grounded_reason
-            or grounded_reason_from_text(description),
+            # The title/hook pair replaces the "anchored by the line" template;
+            # only a real, non-generic model reason is kept.
+            "reason": grounded_reason,
         }
 
-        candidate["hook"] = make_specific_hook(analysis, candidate)
+        # A rejected/missing hook stays empty: the local fallback generators
+        # return transcript excerpts, which is exactly what the quote guard
+        # forbids. The card shows the title alone instead.
+        candidate["hook"] = ranker_hook
+
+        if isinstance(reason, RankedReason):
+            sub_scores = getattr(reason, "sub_scores", {})
+            for field in RUBRIC_FIELDS:
+                if field in sub_scores:
+                    candidate[field] = sub_scores[field]
         candidates.append(candidate)
 
     return candidates
@@ -1909,19 +2645,31 @@ def normalize_candidate_clip(
         "end_timestamp": format_timestamp(candidate_end),
         "duration_seconds": round_duration(duration),
         "hook": str(raw_candidate.get("hook", "")).strip(),
+        "title": str(raw_candidate.get("title", "")).strip(),
         "description": str(raw_candidate.get("description", "")).strip(),
         "score": coerce_int(raw_candidate.get("score"), minimum=0, maximum=100),
         "reason": str(raw_candidate.get("reason", "")).strip(),
     }
+    for field in RUBRIC_FIELDS:
+        value = coerce_int(
+            raw_candidate.get(field), minimum=0, maximum=RUBRIC_MAX_PER_FIELD
+        )
+        if value is not None:
+            candidate[field] = value
     if has_generic_editor_language(candidate["description"]):
         candidate["description"] = truncate_for_prompt(window.text, 180)
     if is_generic_hook(candidate["hook"]):
         candidate["hook"] = make_specific_hook(analysis, candidate)
+    if not candidate["title"] or is_generic_hook(candidate["title"]):
+        candidate["title"] = grounded_title_from_text(window.text)
     if candidate["score"] is None:
         candidate["score"] = 0
     if has_generic_editor_language(candidate["reason"]):
-        candidate["reason"] = grounded_reason_from_text(
-            candidate["description"]
+        # With a real hook the reason carries nothing a user wants to read.
+        candidate["reason"] = (
+            ""
+            if candidate["hook"]
+            else grounded_reason_from_text(candidate["description"])
         )
     return candidate
 
@@ -2295,8 +3043,8 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-clips",
         type=int,
-        default=3,
-        help="Number of ranked clip candidates to return (1-6).",
+        default=DEFAULT_CLIP_COUNT,
+        help=f"Number of ranked clip candidates to return (1-{MAX_CLIP_COUNT}).",
     )
 
     args = parser.parse_args()
@@ -2364,7 +3112,7 @@ def main() -> int:
     target_clip_count = max(
         1,
         min(
-            6,
+            MAX_CLIP_COUNT,
             int(args.max_clips),
         ),
     )
@@ -2435,7 +3183,7 @@ def main() -> int:
         if len(ranked_windows) < target_clip_count:
             log(
                 f"WARNING: Found {len(ranked_windows)} valid clip candidate(s) instead of "
-                f"the requested {target_clip_count}."
+                f"the requested {target_clip_count} (overlap filtering is never relaxed)."
             )
 
         log(f"Ranker selected {len(ranked_windows)} candidate windows.")
@@ -2464,15 +3212,8 @@ def main() -> int:
             raw_analysis["candidate_clips"] = ranked_candidate_clips
 
             for candidate in ranked_candidate_clips:
-                log(
-                    "Clip: {start} -> {end} | {duration:.1f}s | score {score} | {reason}".format(
-                        start=candidate["start_timestamp"],
-                        end=candidate["end_timestamp"],
-                        duration=float(candidate["duration_seconds"]),
-                        score=candidate.get("score", 0),
-                        reason=candidate.get("reason", ""),
-                    )
-                )
+                for line in format_clip_log_lines(candidate, raw_analysis):
+                    log(line)
 
             if ranked_candidate_clips:
                 best_ranked_clip = ranked_candidate_clips[0]

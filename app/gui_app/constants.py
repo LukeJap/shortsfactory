@@ -29,6 +29,11 @@ SUPPORTED_EXTENSIONS = {
 
 VISUAL_EVENT_PREFIX = "SF_VISUAL_EVENT "
 
+# Clips requested for a long source; also the size of the card pool.
+LONG_SOURCE_CLIP_COUNT = 10
+LONG_SOURCE_MIN_MINUTES = 10
+SHORT_SOURCE_CLIP_COUNT = 3
+
 GENERIC_EDITOR_PHRASES = (
     "becomes the center of attention",
     "becomes the center of a short exchange",
@@ -38,4 +43,6 @@ GENERIC_EDITOR_PHRASES = (
     "creates curiosity",
     "viewers will want to know",
     "something surprising happens",
+    "in this episode",
+    "in this clip",
 )

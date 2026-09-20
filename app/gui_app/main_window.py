@@ -65,7 +65,7 @@ from standard_video_speed import (
     format_standard_video_speed,
 )
 
-from .constants import ROOT
+from .constants import LONG_SOURCE_CLIP_COUNT, ROOT
 from .settings_keys import (
     AUTO_CUTS_ENABLED,
     AUTO_CUT_AGGRESSION,
@@ -2154,7 +2154,7 @@ class ShortsFactoryWindow(
         ai_title = QLabel("AI CLIP HUNTER")
         ai_title.setObjectName("SectionTitle")
 
-        ai_hint = QLabel("UP TO 6 PICKS")
+        ai_hint = QLabel("RANKED PICKS")
         ai_hint.setObjectName("MicroBadge")
 
         ai_header.addWidget(ai_title)
@@ -2166,7 +2166,7 @@ class ShortsFactoryWindow(
         self.clip_cards_layout.setColumnStretch(0, 1)
 
         self.clip_cards = []
-        for index in range(6):
+        for index in range(LONG_SOURCE_CLIP_COUNT):
             card = QPushButton(f"AI PICK #{index + 1}\nRun Find Best Clips to populate")
             card.setObjectName("ClipCard")
             card.setProperty("selected", False)
