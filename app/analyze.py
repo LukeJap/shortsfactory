@@ -89,6 +89,10 @@ TIMEOUT_SLACK_SECONDS = 60
 # quota/overlap filtering has a real pool to backfill from.
 FINAL_SELECTION_MULTIPLIER = 3
 RUBRIC_FIELDS = ("hook_strength", "self_contained", "payoff", "peak")
+# hook_strength is scored deterministically in Python (see hook_strength()
+# below) rather than by the model, so the model's schema/rubric cover only
+# these three -- RUBRIC_FIELDS itself stays four-long for persistence.
+MODEL_RUBRIC_FIELDS = ("self_contained", "payoff", "peak")
 RUBRIC_MAX_PER_FIELD = 25
 RANKING_TITLE_MAX_CHARS = 60
 RANKING_HOOK_MAX_CHARS = 80
@@ -100,6 +104,11 @@ MAX_SELECTIONS_PER_REGION = 2
 # 8192 is a hard ceiling: a 16k context spills the KV cache past 8GB VRAM and
 # generation drops from ~40 tok/s to ~7. Requests are sized to fit instead.
 RANKING_NUM_CTX_MAX = RANKING_NUM_CTX
+# One window per request: ~370 prompt tokens + ~30 output, so a small fixed
+# context that never depends on pool size.
+SINGLE_SCORE_NUM_CTX = 2048
+SINGLE_SCORE_NUM_PREDICT = 64
+SINGLE_SCORE_TEXT_MAX_CHARS = 1200
 DEFAULT_CLIP_COUNT = 10
 MAX_CLIP_COUNT = 10
 # Length-variety quotas for select_distinct_ranked_windows.
@@ -662,6 +671,57 @@ def ends_with_terminal_punctuation(text: str) -> bool:
     """True if text ends a sentence, ignoring trailing quote/bracket marks."""
     stripped = text.strip().rstrip("\"'”’)]")
     return bool(stripped) and stripped[-1] in ".!?"
+
+
+def first_spoken_line(text: str) -> str:
+    """The literal first sentence of a window's run-on transcript text.
+
+    Window text is one concatenated paragraph with no line breaks, so
+    "judge only the first line" is otherwise undefined for the model -- it
+    reads ahead into the rest of the clip and scores the opening beat
+    instead of the opening utterance. Isolating it here, rather than
+    leaving the model to find it, is what makes single-word fragments
+    ("Ah!", "Fuse!") stop scoring like real hooks.
+    """
+    match = re.search(r"[.!?]", text)
+    return text[: match.end()].strip() if match else text.strip()
+
+
+FILLER_OPENERS = {
+    "oh", "ah", "uh", "um", "hey", "hi", "hello", "yeah", "yes", "no", "wow",
+    "huh", "well", "so", "okay", "ok", "hmm", "aw", "ugh", "whoa",
+    "good morning", "good afternoon", "good evening",
+}
+
+
+def hook_strength(first_line: str) -> int:
+    """Deterministic 0-25 score for a clip's opening utterance.
+
+    The model was asked to judge this three different ways and returned a
+    constant 20 every time -- length, question form and filler openers are
+    mechanical checks, not judgment calls, so Python scores them instead.
+    """
+    line = (first_line or "").strip()
+    if not line:
+        return 0
+    words = re.findall(r"[A-Za-z']+", line)
+    n = len(words)
+    lowered = " ".join(w.lower() for w in words)
+    first = words[0].lower() if words else ""
+
+    if n <= 2:                                   # "Oh!", "Fuse!"
+        return 2
+    if first in FILLER_OPENERS and n <= 5:       # "Yeah, that checks out."
+        return 4
+    if lowered in FILLER_OPENERS:
+        return 2
+    if line.rstrip().endswith("?") and n >= 4:   # a question is an open loop
+        return 22 if n >= 6 else 20
+    if n <= 5:
+        return 8
+    if n <= 10:
+        return 14
+    return 17
 
 
 def build_beats(
@@ -1297,13 +1357,15 @@ def post_for_selections(
     selection_count: int,
     purpose: str,
     timeout_message: str = "",
+    num_ctx: int | None = None,
 ) -> "WindowRankingResponse":
     """POST one schema-constrained request whose answer is a "selections" array.
 
     Shared by the ranking and titling passes. Truncated arrays are salvaged
     rather than failing the run.
     """
-    num_ctx = ranking_num_ctx(len(prompt), num_predict)
+    if num_ctx is None:
+        num_ctx = ranking_num_ctx(len(prompt), num_predict)
     payload = {
         "model": model,
         "prompt": prompt,
@@ -2171,6 +2233,147 @@ def shuffled_for_final_pass(
     return order, seed
 
 
+def single_window_json_schema() -> dict[str, Any]:
+    properties = {
+        field: {"type": "integer", "minimum": 0, "maximum": RUBRIC_MAX_PER_FIELD}
+        for field in MODEL_RUBRIC_FIELDS
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(MODEL_RUBRIC_FIELDS),
+        "properties": properties,
+    }
+
+
+SINGLE_SCORE_CALIBRATION_BLOCK = """Calibration -- two fixed reference clips, unrelated to the one you are
+scoring. Judge your clip against these bands, not against their content.
+
+STRONG example (total 64):
+  "You didn't actually eat the last krabby patty, did you?" Squidward went
+  pale. "I did more than eat it -- I microwaved the recipe and gave it to the
+  seagulls." Mr. Krabs's eye twitched, and by the time he opened his mouth the
+  whole restaurant had gone silent.
+  self_contained=24 (no outside characters or backstory needed)
+  payoff=21 (the reveal is the clip's climax and it lands)
+  peak=19 (the twitch and the room going silent is the high point)
+
+MID example (total 28) -- real content this pipeline scored 75 last run;
+anchors the bottom of the real range, not an invented extreme:
+  "It's so dry! Step right up and try our Jim Dandy Jams!" ...never
+  resolves... "Oh, hey, that's good tail!"
+  self_contained=14 (sales patter, but the gist comes through)
+  payoff=6 (never resolves, just more hype lines)
+  peak=8 (energetic, but not a standout beat)"""
+
+SINGLE_SCORE_RUBRIC_BLOCK = """Score it on three independent 0-25 judgments, each judged only from the
+transcript below:
+
+self_contained (0-25): judge whether a viewer with zero prior context follows it.
+  0-5   requires knowing who these people are or what happened earlier
+  6-12  mostly followable but leans on an unexplained reference
+  13-19 a new viewer follows the gist with only minor confusion
+  20-25 fully self-contained -- nothing outside the clip is needed
+
+payoff (0-25): judge the ending.
+  0-5   ends before anything resolves, or nothing happens
+  6-12  a mild resolution or trailing remark
+  13-19 a clear joke lands, a question is answered, or a reveal occurs
+  20-25 a sharp, specific payoff that recontextualizes what came before
+
+peak (0-25): judge the single highest moment in the clip.
+  0-5   no emotional or comedic high point at all
+  6-12  a mild reaction or low-key moment
+  13-19 raised voices or an argument, ordinary for this show -- not a
+        standout
+  20-25 extreme even by this show's own baseline -- worth replaying,
+        not just another heated exchange like the rest
+
+Do not return the same total for different clips unless they are genuinely
+equivalent -- a midpoint score must match the midpoint band, not be chosen as
+a hedge. Return only the three numbers."""
+
+
+def build_single_window_prompt(window: CandidateWindow) -> str:
+    return f"""
+You are an editor judging one candidate clip for short-form video.
+
+{SINGLE_SCORE_CALIBRATION_BLOCK}
+
+{SINGLE_SCORE_RUBRIC_BLOCK}
+
+FIRST LINE: {first_spoken_line(window.text)}
+
+CLIP ({window.duration_seconds:.0f}s):
+{truncate_for_prompt(window.text, SINGLE_SCORE_TEXT_MAX_CHARS)}
+""".strip()
+
+
+def call_ollama_single_scorer(host: str, model: str, prompt: str) -> dict[str, Any]:
+    return post_for_selections(
+        host,
+        model,
+        prompt,
+        single_window_json_schema(),
+        num_predict=SINGLE_SCORE_NUM_PREDICT,
+        selection_count=1,
+        purpose="clip-scoring",
+        num_ctx=SINGLE_SCORE_NUM_CTX,
+    )
+
+
+def score_windows_individually(
+    host: str,
+    model: str,
+    windows: list[CandidateWindow],
+    seed: int | None = None,
+) -> list[tuple[CandidateWindow, int, str]]:
+    """Score every window in its own request so no judgment sees another.
+
+    A failed request scores that window 0 with no sub-scores and is logged;
+    one bad call costs one candidate. Requests run in a seeded shuffled order
+    (presentation order only -- results are independent of it).
+    """
+    order, seed = shuffled_for_final_pass(windows, seed)
+    log(f"Scoring {len(order)} candidates one per request (seed {seed}).")
+    started = time.monotonic()
+    results: list[tuple[CandidateWindow, int, str]] = []
+    failures = 0
+    for number, window in enumerate(order, start=1):
+        sub_scores: dict[str, int] = {}
+        try:
+            result = call_ollama_single_scorer(
+                host, model, build_single_window_prompt(window)
+            )
+            for field in MODEL_RUBRIC_FIELDS:
+                value = coerce_int(
+                    result.get(field), minimum=0, maximum=RUBRIC_MAX_PER_FIELD
+                )
+                if value is not None:
+                    sub_scores[field] = value
+            if len(sub_scores) == len(MODEL_RUBRIC_FIELDS):
+                sub_scores["hook_strength"] = hook_strength(
+                    first_spoken_line(window.text)
+                )
+        except (RuntimeError, WindowRankingTimeout) as exc:
+            log(f"WARNING: scoring candidate {number}/{len(order)} failed: {exc}")
+        if len(sub_scores) < len(RUBRIC_FIELDS):
+            failures += 1
+            log(
+                f"WARNING: candidate at {format_timestamp(window.start)} got no usable "
+                "sub-scores; scoring it 0."
+            )
+            sub_scores = {}
+        reason = RankedReason("")
+        reason.sub_scores = sub_scores
+        results.append((window, sum(sub_scores.values()), reason))
+    log(
+        f"Scored {len(order)} candidates in {time.monotonic() - started:.1f}s "
+        f"({failures} failed)."
+    )
+    return results
+
+
 def rank_exact_minute_windows(
     host: str,
     model: str,
@@ -2183,6 +2386,11 @@ def rank_exact_minute_windows(
     batches = chronological_window_batches(valid_windows)
     if not batches:
         return []
+
+    # First-stage batch scores are otherwise discarded once the final pass
+    # runs; keep them only to break ties in the final rubric total, since
+    # they are the one comparative signal in the pipeline.
+    first_stage_scores: dict[CandidateWindow, int] = {}
 
     if len(batches) == 1:
         rankable_windows = valid_windows
@@ -2216,29 +2424,18 @@ def rank_exact_minute_windows(
                 target_clip_count,
                 source_end or max(window.end for window, _s, _r in shortlist),
             )
-        shortlist = shrink_pool_to_context(transcript, shortlist, target_clip_count)
         shortlist.sort(key=lambda candidate: candidate[0].start)
         rankable_windows = [window for window, _score, _reason in shortlist]
+        first_stage_scores = {window: score for window, score, _reason in shortlist}
 
-    selection_count = min(
-        len(rankable_windows),
-        target_clip_count * FINAL_SELECTION_MULTIPLIER,
+    final_ranked = score_windows_individually(host, model, rankable_windows, seed)
+    # Rank by the Python-computed total, best first; ties break by the
+    # first-stage batch score (free, already computed, order-independent)
+    # before falling back to start time.
+    final_ranked = sorted(
+        final_ranked,
+        key=lambda item: (-item[1], -first_stage_scores.get(item[0], 0), item[0].start),
     )
-    prompt_order, seed = shuffled_for_final_pass(rankable_windows, seed)
-    log(f"Final pass candidate order shuffled with seed {seed}.")
-    final_ranked = rank_window_request(
-        host,
-        model,
-        transcript,
-        prompt_order,
-        selection_count,
-        request_label="final shortlist",
-        context_max_chars=FINAL_RANKING_CONTEXT_MAX_CHARS,
-        minimum_count=min(target_clip_count, len(rankable_windows)),
-        detailed=True,
-    )
-    # Rank by the Python-computed total, best first, before quota selection.
-    final_ranked = sorted(final_ranked, key=lambda item: (-item[1], item[0].start))
     source_end = max((segment.end for segment in transcript.segments), default=0.0)
     selected = select_distinct_ranked_windows(
         final_ranked,

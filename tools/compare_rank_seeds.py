@@ -1,10 +1,16 @@
-"""Compare two Find Best Clips runs to test for positional score bias.
+r"""Compare two Find Best Clips runs to test for positional score bias.
 
-Usage:
-    # run once per seed, copying the result aside each time
-    $env:SHORTS_RANK_SEED=1;  .\.venv\Scripts\python.exe -m app.analyze ...
+Run the analyzer once per seed, copying the result aside each time, then
+compare. Each run must actually invoke the analyzer -- copying analysis.json
+twice without re-running compares a file with itself and always reports a
+delta of zero.
+
+    $env:SHORTS_RANK_SEED=1
+    .\.venv\Scripts\python.exe -m app.analyze --clip-discovery-only
     copy output\analysis.json output\analysis_seed1.json
-    $env:SHORTS_RANK_SEED=2;  .\.venv\Scripts\python.exe -m app.analyze ...
+
+    $env:SHORTS_RANK_SEED=2
+    .\.venv\Scripts\python.exe -m app.analyze --clip-discovery-only
     copy output\analysis.json output\analysis_seed2.json
 
     .\.venv\Scripts\python.exe tools\compare_rank_seeds.py ^
@@ -13,9 +19,13 @@ Usage:
 Reports, for each run: whether score tracks episode position, and, across runs,
 how far each clip's score moved. A clip whose score swings widely between seeds
 was scored by where it sat in the prompt, not by what is in it.
+
+A mean delta of exactly 0.0 on every clip almost always means the two files are
+identical -- check that the analyzer actually ran twice.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -75,6 +85,25 @@ def main() -> int:
         print(__doc__)
         return 2
     a_path, b_path = Path(sys.argv[1]), Path(sys.argv[2])
+
+    # Guard against the most common mistake: the analyzer did not actually
+    # re-run between the two copies, so both files are the same bytes. Without
+    # this check the comparison reports a perfect zero delta and declares
+    # success, which is the opposite of the truth.
+    digest_a = hashlib.sha256(a_path.read_bytes()).hexdigest()
+    digest_b = hashlib.sha256(b_path.read_bytes()).hexdigest()
+    if digest_a == digest_b:
+        print("ABORT: the two files are byte-identical.")
+        print(f"  {a_path}")
+        print(f"  {b_path}")
+        print("  sha256", digest_a[:16])
+        print()
+        print("The analyzer did not re-run between the copies -- check that each")
+        print("run actually produced output and did not fail. Run it by path:")
+        print(r"    .\.venv\Scripts\python.exe app\analyze.py --clip-discovery-only")
+        print(r"  (not -m app.analyze: analyze.py needs app\ itself on sys.path)")
+        return 1
+
     a, b = load(a_path), load(b_path)
     report_one(a_path.name, a)
     report_one(b_path.name, b)

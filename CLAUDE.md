@@ -91,6 +91,31 @@ dialogue removed. Hook first, then minimal context, then causal escalation
 payoff, end fast. Rhythm is narration → short source punch (~9–14s) → narration.
 No "In this episode…" openers.
 
+## Scoring pipeline — hard-won rules
+
+These cost several iterations each. Do not undo them without reading the
+matching brief.
+
+1. **An example in a prompt is a specification.** `llama3.1:8b` copied example
+   phrasing verbatim four separate times, and copied an example's *score shape*
+   once (a descending pair produced a descending ramp across 26 candidates).
+   Never put a descriptive sentence in a JSON example field, and never let two
+   example entries imply an ordering.
+2. **One judgment per request.** Asking for N scores in one response conditions
+   each score on the ones already written, which is positional by construction —
+   the same clip scored 7 and 84 depending on prompt order. Per-candidate calls
+   are no slower and are exactly reproducible.
+3. **`num_ctx` 8192 is a VRAM budget, not a knob.** On the 8GB 2070, 16384 spills
+   the KV cache to CPU: generation drops from ~35 tok/s to ~7.
+4. **Anchor rating scales inside the candidate distribution.** Extreme anchors
+   (a perfect clip vs. a filler greeting) compress every real candidate against
+   the top. A mid anchor is what makes the scale work.
+5. **Let Python judge what is mechanical.** `hook_strength` returned a constant
+   20 across three runs and three wordings; a 15-line rule function gives 5
+   distinct values. The model judges meaning; Python counts words and adds up.
+6. **Degrade, never abort.** A short, truncated or failed model response costs
+   one candidate, not the run.
+
 ## Working style
 
 One small issue at a time: find the failure point, make the smallest change, run
@@ -104,11 +129,12 @@ GUI/media run. Regression sources: `input/s17e9a duct tape dystopia.mp4` (recap)
 
 ## Current open work
 
-- Find Best Clips: hierarchical batch ranking works and is resilient to partial
-  model results (`num_ctx` pinned to 8192, `keep_alive`, shortfall handling).
-  Next: variable-length moment candidates (task 1), then per-clip score + title
-  and 16 results (task 2), then a results grid UI (task 3). See
-  `BRIEF_clip_discovery.md`. Target is Opus-Clips-style output.
+- Find Best Clips: **done** (tasks 1-10, 2026-09-21). Variable-length candidates
+  on content boundaries, region-aware trim, one-model-call-per-candidate rubric
+  scoring, titles and hooks, results wired to the cards. Verified: 10 clips,
+  8 distinct scores, seed-stable (mean delta 0.5), 9/10 deciles covered, ~2 min
+  end to end. The briefs `BRIEF_clip_discovery*.md` record why each choice was
+  made; `tools/compare_rank_seeds.py` is the regression check.
 - Recap: stale narration in editor, dropped narration words, source-caption
   remapping, SFX/emoji lane population, live music preview parity, narrator voice
   selector, `display_text`/`tts_text` split.

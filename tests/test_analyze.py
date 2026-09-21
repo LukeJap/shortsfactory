@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import analyze
 
@@ -312,6 +314,19 @@ def test_distinct_selection_never_falls_back_to_overlapping_exact_minutes():
     assert [window for window, _score, _reason in selected] == [first, later]
 
 
+def _stub_single_scorer(monkeypatch, calls=None):
+    """Per-candidate scorer that judges by the window's own 'Scene N' text."""
+
+    def fake_single(_host, _model, prompt):
+        if calls is not None:
+            calls.append(prompt)
+        match = re.search(r"Scene (\d+)", prompt)
+        value = ((int(match.group(1)) if match else 0) * 7) % 25
+        return {field: value for field in analyze.RUBRIC_FIELDS}
+
+    monkeypatch.setattr(analyze, "call_ollama_single_scorer", fake_single)
+
+
 def test_long_sources_are_ranked_in_chronological_batches_then_finalized(monkeypatch):
     transcript = analyze.TranscriptData(text="Source context", segments=[])
     windows = [_window(index * 60, index * 60 + 60, f"Scene {index}") for index in range(40)]
@@ -327,17 +342,18 @@ def test_long_sources_are_ranked_in_chronological_batches_then_finalized(monkeyp
         }
 
     monkeypatch.setattr(analyze, "call_ollama_window_ranker", fake_ranker)
+    single_calls = []
+    _stub_single_scorer(monkeypatch, single_calls)
 
     ranked = analyze.rank_exact_minute_windows(
         "http://127.0.0.1:11434", "llama3.1:8b", transcript, windows, target_clip_count=3
     )
 
-    # Five cheap chronological batches plus one compact global shortlist.
-    assert len(calls) == 6
-    assert [len(window_ids) for window_ids, _count in calls[:5]] == [8, 8, 8, 8, 8]
-    assert [count for _window_ids, count in calls[:5]] == [2, 2, 2, 2, 2]
-    assert len(calls[5][0]) == 10
-    assert calls[5][1] == 9
+    # Five cheap chronological batches, then one request per shortlisted window.
+    assert len(calls) == 5
+    assert [len(window_ids) for window_ids, _count in calls] == [8, 8, 8, 8, 8]
+    assert [count for _window_ids, count in calls] == [2, 2, 2, 2, 2]
+    assert len(single_calls) == 10
     assert len(ranked) == 3
     assert all(
         analyze.MIN_CLIP_SECONDS <= window.duration_seconds <= analyze.MAX_CLIP_SECONDS
@@ -362,6 +378,7 @@ def test_first_stage_timeout_retries_once_with_smaller_sub_batches(monkeypatch):
         }
 
     monkeypatch.setattr(analyze, "call_ollama_window_ranker", fake_ranker)
+    _stub_single_scorer(monkeypatch)
 
     ranked = analyze.rank_exact_minute_windows(
         "http://127.0.0.1:11434",
@@ -371,7 +388,7 @@ def test_first_stage_timeout_retries_once_with_smaller_sub_batches(monkeypatch):
         target_clip_count=2,
     )
 
-    assert calls == [(8, 2), (4, 1), (4, 1), (8, 2), (4, 4)]
+    assert calls == [(8, 2), (4, 1), (4, 1), (8, 2)]
     assert len(ranked) == 2
 
 
@@ -390,6 +407,8 @@ def test_first_stage_prompts_use_compact_context(monkeypatch):
         }
 
     monkeypatch.setattr(analyze, "call_ollama_window_ranker", fake_ranker)
+    single_calls = []
+    _stub_single_scorer(monkeypatch, single_calls)
 
     analyze.rank_exact_minute_windows(
         "http://127.0.0.1:11434",
@@ -399,9 +418,12 @@ def test_first_stage_prompts_use_compact_context(monkeypatch):
         target_clip_count=2,
     )
 
-    assert len(prompts) == 3
-    assert all(len(prompt) < 9_000 for prompt in prompts[:2])
-    assert len(prompts[-1]) < 13_000
+    assert len(prompts) == 2
+    assert all(len(prompt) < 9_000 for prompt in prompts)
+    # Per-candidate prompts carry no episode context at all -- the fixed
+    # rubric/calibration text is a few hundred chars; a real leak of the
+    # ~34,000-char transcript would blow well past this.
+    assert single_calls and all(len(prompt) < 3_000 for prompt in single_calls)
 
 
 def test_rank_request_returns_partial_results_above_minimum_count(monkeypatch, capsys):
@@ -863,12 +885,13 @@ def test_final_pass_gets_at_most_24_candidates_chosen_by_first_stage_score(monke
         }
 
     monkeypatch.setattr(analyze, "call_ollama_window_ranker", fake_ranker)
+    single_calls = []
+    _stub_single_scorer(monkeypatch, single_calls)
 
     analyze.rank_exact_minute_windows("h", "m", transcript, windows, target_clip_count=6)
 
-    final_window_count, _count, detailed = calls[-1]
-    assert detailed is True
-    assert final_window_count <= analyze.FINAL_POOL_MAX_CANDIDATES
+    assert all(detailed is False for _n, _c, detailed in calls)
+    assert 0 < len(single_calls) <= analyze.FINAL_POOL_MAX_CANDIDATES
 
 
 def test_duration_quota_limits_long_clips_to_half():
@@ -1082,61 +1105,246 @@ def test_detailed_example_block_is_not_a_descending_ranking():
     assert _re.search(r"arbitrary", body)
 
 
-def _content_scoring_ranker(prompts):
-    """Scores each window by the 'Scene N' in its own text, not its position."""
-    import re as _re
-
-    def fake_ranker(_host, _model, prompt, *, window_ids, selection_count, detailed=False):
-        prompts.append(prompt)
-        scored = []
-        for match in _re.finditer(r"(W\d{3}) \[[^\]]*\] [\d.]+s: Scene (\d+)", prompt):
-            scene = int(match.group(2))
-            value = (scene * 7) % 25
-            scored.append((match.group(1), value))
-        scored.sort(key=lambda item: -item[1])
-        return {
-            "selections": [
-                {
-                    "window_id": window_id,
-                    "hook_strength": value,
-                    "self_contained": value,
-                    "payoff": value,
-                    "peak": value,
-                }
-                for window_id, value in scored[:selection_count]
-            ]
-        }
-
-    return fake_ranker
-
-
-def test_final_pass_shuffle_is_seeded_and_result_is_seed_independent(monkeypatch):
+def test_final_pass_scores_one_candidate_per_request_independent_of_seed(monkeypatch):
     transcript = analyze.TranscriptData(text="Source context", segments=[])
     windows = [_window(i * 100, i * 100 + 60, f"Scene {i}") for i in range(8)]
     monkeypatch.setattr(analyze, "title_selected_clips", lambda _h, _m, ranked: ranked)
 
-    results = {}
-    orders = {}
+    results, orders = {}, {}
     for seed in (1, 2, 3):
         prompts = []
-        monkeypatch.setattr(analyze, "call_ollama_window_ranker", _content_scoring_ranker(prompts))
+        _stub_single_scorer(monkeypatch, prompts)
         ranked = analyze.rank_exact_minute_windows(
             "h", "m", transcript, windows, target_clip_count=3, seed=seed
         )
+        assert len(prompts) == len(windows)
         results[seed] = [(w.start, score) for w, score, _r in ranked]
-        orders[seed] = [
-            line.rsplit("Scene ", 1)[1]
-            for line in prompts[-1].splitlines()
-            if line.startswith("W0")
-        ]
+        orders[seed] = [re.search(r"Scene (\d+)", p).group(1) for p in prompts]
 
     assert results[1] == results[2] == results[3]
-    # Prompt position is decoupled from time: the order differs across seeds.
     assert not (orders[1] == orders[2] == orders[3])
-    # Same seed reproduces the same order.
     again, _ = analyze.shuffled_for_final_pass(windows, 1)
     assert again == analyze.shuffled_for_final_pass(windows, 1)[0]
     assert again != windows
+
+
+def test_failed_single_request_scores_that_candidate_zero_and_continues(monkeypatch):
+    logs = []
+    monkeypatch.setattr(analyze, "log", logs.append)
+    windows = [_window(i * 100, i * 100 + 60, f"Scene {i}") for i in range(4)]
+
+    def flaky(_host, _model, prompt):
+        if "Scene 2" in prompt:
+            raise RuntimeError("boom")
+        if "Scene 3" in prompt:
+            return {"self_contained": 5}  # missing payoff/peak -- incomplete
+        return {field: 10 for field in analyze.MODEL_RUBRIC_FIELDS}
+
+    monkeypatch.setattr(analyze, "call_ollama_single_scorer", flaky)
+
+    scored = dict(
+        (w.start, (score, r.sub_scores))
+        for w, score, r in analyze.score_windows_individually("h", "m", windows, seed=1)
+    )
+
+    # 10 + 10 + 10 from the model, plus the Python-computed hook_strength(2)
+    # for the one-word "Scene N" opening line.
+    assert scored[0][0] == 32 and scored[100][0] == 32
+    assert scored[200] == (0, {}) and scored[300] == (0, {})
+    assert sum("WARNING" in line for line in logs) >= 2
+
+
+def test_single_scorer_num_ctx_is_small_and_independent_of_pool(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        analyze,
+        "request_json",
+        lambda url, payload=None, timeout=10: seen.append(payload) or {
+            "response": '{"hook_strength":1,"self_contained":2,"payoff":3,"peak":4}'
+        },
+    )
+
+    for text in ("short", "long text " * 400):
+        result = analyze.call_ollama_single_scorer(
+            "http://h", "m", analyze.build_single_window_prompt(_window(0, 30, text))
+        )
+        assert result["peak"] == 4
+
+    assert [p["options"]["num_ctx"] for p in seen] == [analyze.SINGLE_SCORE_NUM_CTX] * 2
+    assert analyze.SINGLE_SCORE_NUM_CTX <= 2048
+    assert all(p["options"]["temperature"] == 0 and p["keep_alive"] for p in seen)
+    assert "window_id" not in seen[0]["format"]["properties"]
+
+
+# ---- Task 8: anchored rubric + first-stage tie-break ---------------------
+
+def test_rubric_dimensions_each_have_four_band_descriptors():
+    block = analyze.SINGLE_SCORE_RUBRIC_BLOCK
+    for field in analyze.MODEL_RUBRIC_FIELDS:
+        assert field in block
+    # hook_strength is scored in Python now, not by the model.
+    assert "hook_strength" not in block
+    # Every dimension's band ranges: 0-5, 6-12, 13-19, 20-25.
+    for band in ("0-5", "6-12", "13-19", "20-25"):
+        assert block.count(band) == len(analyze.MODEL_RUBRIC_FIELDS)
+
+
+def test_calibration_block_is_byte_identical_across_candidates():
+    windows = [_window(0, 30, "First clip text"), _window(500, 560, "A very different clip")]
+
+    prompts = [analyze.build_single_window_prompt(window) for window in windows]
+
+    assert analyze.SINGLE_SCORE_CALIBRATION_BLOCK in prompts[0]
+    assert analyze.SINGLE_SCORE_CALIBRATION_BLOCK in prompts[1]
+    assert prompts[0] != prompts[1]  # the clip text still differs
+
+
+# ---- Task 9: hook_strength/peak bands + in-distribution calibration ------
+
+# ---- Task 10: hook_strength scored deterministically in Python -----------
+
+def test_hook_strength_matches_documented_scores_for_each_first_line():
+    # The model returned a constant 20 across three different band wordings
+    # (see BRIEF_clip_discovery_task10.md) -- length/question-form/filler
+    # checks are mechanical, so Python scores them instead.
+    assert analyze.hook_strength("Oh!") == 2
+    assert analyze.hook_strength("Ah.") == 2
+    assert analyze.hook_strength("Fuse!") == 2
+    assert analyze.hook_strength("Toast is ready!") == 8
+    assert analyze.hook_strength("I'm okay, ma.") == 8
+    assert analyze.hook_strength("Yeah, that checks out.") == 4
+    assert analyze.hook_strength("You want a refund?") == 20
+
+
+def test_hook_strength_empty_first_line_scores_zero():
+    assert analyze.hook_strength("") == 0
+    assert analyze.hook_strength("   ") == 0
+    assert analyze.hook_strength(None) == 0
+
+
+def test_single_window_schema_has_three_fields_but_persisted_candidate_has_four():
+    schema = analyze.single_window_json_schema()
+    assert set(schema["properties"]) == set(analyze.MODEL_RUBRIC_FIELDS)
+    assert "hook_strength" not in schema["properties"]
+
+    windows = [_window(0, 30, "Toast is ready! Everyone come sit down.")]
+    sub_scores = {"hook_strength": 8, "self_contained": 19, "payoff": 23, "peak": 22}
+    ranked = [(windows[0], 72, _titled_reason(sub_scores=sub_scores))]
+    clips = analyze.candidate_clips_from_ranked_windows(ranked, {})
+
+    assert set(analyze.RUBRIC_FIELDS) - set(clips[0]) == set()
+
+
+def test_hook_strength_added_to_total_only_when_model_fields_are_complete(monkeypatch):
+    windows = [_window(0, 30, "Toast is ready! Everyone come sit down.")]
+
+    monkeypatch.setattr(
+        analyze,
+        "call_ollama_single_scorer",
+        lambda *_a: {"self_contained": 10, "payoff": 10, "peak": 10},
+    )
+    (_window_out, score, reason) = analyze.score_windows_individually(
+        "h", "m", windows, seed=1
+    )[0]
+
+    assert reason.sub_scores["hook_strength"] == analyze.hook_strength("Toast is ready!")
+    assert score == 30 + reason.sub_scores["hook_strength"]
+    assert 0 <= score <= 100
+
+
+def test_first_spoken_line_isolates_the_opening_sentence():
+    # Window text is one run-on paragraph with no line breaks, so "the first
+    # line" is otherwise undefined for the model -- it reads ahead and scores
+    # the whole opening beat instead of the opening utterance. A live A/B
+    # test confirmed this: "Ah! Hey! Watch where you're walking..." scored
+    # hook_strength=20 without an isolated field and 5 with one.
+    assert analyze.first_spoken_line("Ah! Hey! Watch where you're walking!") == "Ah!"
+    assert analyze.first_spoken_line("Fuse! Oh no! I'm so sorry!") == "Fuse!"
+    assert (
+        analyze.first_spoken_line("Hey, honey, would you like a sample?")
+        == "Hey, honey, would you like a sample?"
+    )
+    assert analyze.first_spoken_line("no terminal punctuation here") == (
+        "no terminal punctuation here"
+    )
+
+
+def test_prompt_carries_an_isolated_first_line_field(monkeypatch):
+    window = _window(0, 30, "Ah! Hey! Watch where you're walking, you goof!")
+    prompt = analyze.build_single_window_prompt(window)
+    assert "FIRST LINE: Ah!" in prompt
+    # The FIRST LINE field must appear before the full CLIP text. It no
+    # longer drives a model judgment (hook_strength moved to Python in task
+    # 10) but is still isolated here for that Python scoring to read.
+    assert prompt.index("FIRST LINE:") < prompt.index("CLIP (")
+
+
+def test_peak_top_band_requires_exceeding_the_shows_own_baseline():
+    block = analyze.SINGLE_SCORE_RUBRIC_BLOCK
+    peak_block = block.rsplit("peak (0-25)", 1)[1]
+    # A clip full of raised voices must not auto-qualify for the top band --
+    # the mid band explicitly claims "ordinary" raised-voice conflict so the
+    # top band is reserved for something beyond the show's normal tone.
+    assert "ordinary for this show" in peak_block
+    assert "baseline" in peak_block
+
+
+def test_mid_calibration_anchor_sits_inside_the_real_score_distribution():
+    block = analyze.SINGLE_SCORE_CALIBRATION_BLOCK
+    # The old WEAK anchor (total 19) sat far outside real candidate scores
+    # (75-86), which compressed every real clip against the STRONG anchor.
+    # The replacement anchor must be real, in-distribution content, not an
+    # invented extreme, and must not reintroduce a sub-15 floor collapse.
+    assert "MID example (total 28)" in block
+    assert "WEAK example" not in block
+    assert "invented extreme" in block
+    # hook_strength moved to Python in task 10 -- the model-facing
+    # calibration examples must no longer carry a hook_strength line.
+    assert "hook_strength" not in block
+    assert "payoff=6" in block
+
+
+def test_tied_rubric_totals_break_by_first_stage_score(monkeypatch):
+    transcript = analyze.TranscriptData(text="Source context", segments=[])
+    windows = [_window(index * 60, index * 60 + 60, f"Scene {index}") for index in range(16)]
+    monkeypatch.setattr(analyze, "title_selected_clips", lambda _h, _m, ranked: ranked)
+
+    batch_calls = []
+
+    def fake_ranker(_host, _model, _prompt, *, window_ids, selection_count, detailed=False):
+        batch_calls.append(window_ids)
+        if len(batch_calls) == 1:
+            # windows[0], windows[1]: low first-stage score for the tied window.
+            selections = [("W001", 20), ("W002", 10)]
+        else:
+            # windows[8], windows[9]: high first-stage score for the tied window.
+            selections = [("W001", 90), ("W002", 10)]
+        return {
+            "selections": [
+                {"window_id": window_id, "score": score, "reason": window_id}
+                for window_id, score in selections
+            ]
+        }
+
+    def fake_single(_host, _model, prompt):
+        match = re.search(r"Scene (\d+)", prompt)
+        index = int(match.group(1))
+        value = 20 if index in (0, 8) else 1
+        return {field: value for field in analyze.RUBRIC_FIELDS}
+
+    monkeypatch.setattr(analyze, "call_ollama_window_ranker", fake_ranker)
+    monkeypatch.setattr(analyze, "call_ollama_single_scorer", fake_single)
+
+    ranked = analyze.rank_exact_minute_windows(
+        "h", "m", transcript, windows, target_clip_count=2
+    )
+
+    # windows[0] and windows[8] tie on rubric total (62). windows[8] has the
+    # higher first-stage score (90 vs 20) despite starting later, so it must
+    # rank first -- proving the tie-break uses first-stage score rather than
+    # falling straight through to start time.
+    starts = [window.start for window, _score, _reason in ranked]
+    assert starts == [480.0, 0.0]
 
 
 def test_shuffled_ids_map_back_to_the_true_windows():
