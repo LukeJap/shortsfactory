@@ -1,88 +1,73 @@
 # ShortsFactory
 
-A local desktop app that turns a long source video — a full TV episode,
-podcast, movie, whatever — into an edited, vertical 9:16 "Short" in the
-style of YouTube Shorts, TikTok, or Instagram Reels.
+A local Windows desktop app (PySide6/Qt6, Python 3.12) that turns a long
+source video — a full TV episode, podcast, movie, whatever — into an
+edited, vertical 9:16 "Short" in the style of YouTube Shorts, TikTok, or
+Instagram Reels.
 
 ## What it does
 
 ShortsFactory automates the parts of Shorts-editing a human would
-otherwise do by hand: picking a strong clip from a long source, tightening
-it (cutting dead air and redundant speech), captioning it karaoke-style,
-adding punch-in camera motion, color grading, emoji reactions, sound
-effects, and background music.
+otherwise do by hand: finding a strong clip in a long source ("Find Best
+Clips"), tightening it, captioning it karaoke-style, adding punch-in
+camera motion and color grading, emoji reactions, sound effects, and
+background music. A separate AI Recap pipeline turns a full episode into
+a narrated recap short, with the narrator as the primary storyteller.
 
-It runs entirely on your own machine against your own footage — one user,
-one video at a time, not a hosted or multi-tenant product. Every
-automated/AI decision (which clip, which cuts, which captions, which
-effects) is shown in the editor and can be adjusted or rejected before you
-render, rather than applied silently in the background.
+It runs entirely on your own machine against your own footage — one
+user, one video at a time, local-first, no hosted backend. Every
+automated/AI decision becomes a visible, editable entity on the editor
+timeline — manual edits (moved emoji, resized SFX, caption edits, music
+settings) are authoritative and survive regeneration.
 
 ## Requirements
 
 - **Python 3.12**
 - **[FFmpeg](https://ffmpeg.org/)**, built with `libass` — required for
-  captions and effectively all video/audio processing. On macOS, the
-  default Homebrew `ffmpeg` formula does **not** include `libass`; you
-  need `ffmpeg-full` instead (see install steps below).
-- **[Ollama](https://ollama.com)** running locally, with the `llama3.1:8b`
-  model pulled — used for clip selection, content-editing suggestions, and
-  No cloud AI calls are made.
+  captions and effectively all video/audio processing.
+- **[Ollama](https://ollama.com)** running locally (`ollama serve`), with
+  the `llama3.1:8b` model pulled — used for clip ranking and recap
+  analysis. No cloud AI calls are made.
+- **[Orpheus-FastAPI](Orpheus-FastAPI/)** running locally on
+  `http://localhost:5005` — used for recap narration TTS. Uses its own
+  virtualenv, separate from the project's.
 
-## Install (macOS)
+## Install
 
-```bash
-# 1. Create and activate a virtual environment
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\pip install -r requirements-dev.txt   # for running tests
 
-# 2. Install FFmpeg (the "full" build, for libass/caption support)
-brew install ffmpeg-full
-brew link --force ffmpeg-full
-
-# 3. Install and set up Ollama
-brew install ollama
 ollama pull llama3.1:8b
-
-# 4. Run the app
-.venv/bin/python app/gui.py
 ```
 
-If you're on an Apple Silicon Mac running an x86_64/Rosetta Python
-(check with `python3 -c "import platform; print(platform.machine())"`),
-`requirements.txt`'s `numpy`/`torch`/`opencv-python` pins are deliberately
-conservative to keep PyTorch/NumPy interop working under Rosetta — see the
-comments at the top of `requirements.txt` and `SHORTSFACTORY.md` for why,
-and for the newer versions you can use instead if you rebuild the venv on
-a native arm64 Python.
-
-### Windows / Linux
-
-The app was originally built on Windows and has since been ported to and
-verified on macOS; Windows should still work with the platform-appropriate
-equivalents of the steps above (install Python 3.12, install FFmpeg with
-libass support and put it on `PATH`, install Ollama for Windows, pull
-`llama3.1:8b`, then `python app\gui.py`). Linux support is best-effort —
-the app runs, but font/path fallbacks for a couple of visual effects are
-unverified there.
+Set up `Orpheus-FastAPI/` separately, in its own venv, per its own
+instructions.
 
 ## Running
 
-```bash
-.venv/bin/python app/gui.py
+```powershell
+ollama serve
+cd Orpheus-FastAPI; .\venv\Scripts\python.exe -u app.py   # separate terminal
+cd C:\Users\lukej\Desktop\ShortsFactory
+.\.venv\Scripts\python.exe -m app.gui
 ```
 
 This launches the desktop editor. From there: import a source video,
 click **Find Best Clips** to get AI-suggested moments, select/trim a clip
 on the timeline, adjust captions/emoji/effects, then
-**Generate Final Video**.
+**Generate Final Video** — or use the AI Recap tab for a narrated recap.
 
 ## Running tests
 
-```bash
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest
+```powershell
+.\.venv\Scripts\python.exe -m pytest
 ```
+
+The suite (~60 modules under `tests/`) is pure-Python/headless. It
+verifies correctness, not the real GUI/media/Ollama/Orpheus behavior —
+see `CLAUDE.md` for what still needs a live run.
 
 ## Configuration
 
@@ -97,19 +82,27 @@ A few optional environment variables, all with sensible defaults if unset:
 
 ## Project layout
 
+See `CLAUDE.md` for the current, maintained layout map, product rules,
+and hard-won scoring-pipeline lessons — it's the source of truth for
+agents and humans working in this repo.
+
 - `app/gui.py` — desktop app entry point (thin launcher; the real app is
   in `app/gui_app/`)
 - `app/gui_app/` — the PySide6 UI: main window, the custom timeline
   widget, the visual style sheet, and one `mixins/` file per feature area
-- `app/*.py` — the render pipeline itself (clip selection, cuts,
-  transcription, captions, motion, base color polish, semantic FX, emoji,
-  sound effects, final render) — each stage is a standalone,
-  independently runnable script
+- `app/*.py` — the render pipeline itself (clip discovery, transcription,
+  captions, motion, color grading, emoji, SFX, final render)
+- `app/recap_intelligence/`, `app/recap_media/` — the AI Recap pipeline
+  (identity/research/story map/script, then TTS/sequence/captions/render)
 - `tests/` — the automated test suite (`pytest`)
-- `output/` — everything a render produces: plan files, transcripts,
-  intermediate and final rendered video, the render log
+- `docs/briefs/` — design briefs recording why specific implementation
+  choices were made
+- `docs/history/` — superseded project-status docs, kept for reference
+- `output/` — everything a render produces (gitignored)
 
-For a deeper look at the current UI layout, interaction patterns, and
-visual design system, see `SHORTSFACTORY_DESIGN_CONTEXT.md`. For the
-detailed engineering history (environment setup, bug fixes, past
-refactors), see `SHORTSFACTORY.md`.
+## Non-negotiable product rules
+
+The full list lives in `CLAUDE.md`. The two most load-bearing:
+
+1. No AI-generated image inserts — removed permanently, do not reintroduce.
+2. Manual edits are authoritative and survive regeneration.

@@ -263,6 +263,133 @@ def test_build_narration_captions_skips_visual_only():
 
 
 # ============================================================
+# Task 16 -- expression tags must not reach the screen
+# ============================================================
+
+def test_leading_expression_tag_is_dropped_not_blanked():
+    # tts_text (what was actually synthesized/aligned) carries the tag;
+    # the WAV has a real non-verbal vocalization there, but no matching
+    # recognized word -- same as live Whisper output for a <chuckle>.
+    result = build_segment_narration_captions(
+        "N_001",
+        "<chuckle> The Krusty Krab is open.",
+        recognized_words=[
+            _recognized("The", 1.5, 1.8),
+            _recognized("Krusty", 1.8, 2.1),
+            _recognized("Krab", 2.1, 2.3),
+            _recognized("is", 2.3, 2.4),
+            _recognized("open.", 2.4, 2.7),
+        ],
+    )
+
+    texts = [word["text"] for word in result["words"]]
+    assert texts == ["The", "Krusty", "Krab", "is", "open."]
+    assert not any("<" in text for text in texts)  # no tag reaches a caption
+    assert result["word_count"] == 5
+
+
+def test_mid_sentence_expression_tag_is_dropped_leaving_a_gap():
+    # The tag's own (dropped) audio window sits between two kept words --
+    # nothing should be redistributed onto them to fill it.
+    result = build_segment_narration_captions(
+        "N_004",
+        "And then <gasp> the wall collapses.",
+        recognized_words=[
+            _recognized("And", 0.0, 0.2),
+            _recognized("then", 0.2, 0.5),
+            # <gasp> -- a real non-verbal vocalization, not recognized as a word
+            _recognized("the", 2.2, 2.35),
+            _recognized("wall", 2.35, 2.6),
+            _recognized("collapses.", 2.6, 3.1),
+        ],
+    )
+
+    texts = [word["text"] for word in result["words"]]
+    assert texts == ["And", "then", "the", "wall", "collapses."]
+    assert not any("<" in text for text in texts)
+    # The two matched words straddling the gap keep their real timing --
+    # the tag's interpolated slot is simply gone, not absorbed by them.
+    then_word = next(w for w in result["words"] if w["text"] == "then")
+    the_word = next(w for w in result["words"] if w["text"] == "the")
+    assert then_word["end"] == 0.5
+    assert the_word["start"] == 2.2
+
+
+def test_segment_that_is_only_a_tag_produces_no_words():
+    result = build_segment_narration_captions(
+        "N_004", "<gasp>", recognized_words=[],
+    )
+    assert result["words"] == []
+    assert result["word_count"] == 0
+
+
+def test_dropping_tag_word_leaves_neighbouring_word_timings_unchanged():
+    recognized = [
+        _recognized("The", 1.5, 1.8),
+        _recognized("Krusty", 1.8, 2.1),
+        _recognized("Krab", 2.1, 2.3),
+        _recognized("is", 2.3, 2.4),
+        _recognized("here.", 2.4, 2.7),
+    ]
+
+    without_tag = build_segment_narration_captions(
+        "N_001", "The Krusty Krab is here.", recognized_words=recognized,
+    )
+    with_tag = build_segment_narration_captions(
+        "N_001", "<chuckle> The Krusty Krab is here.", recognized_words=recognized,
+    )
+
+    # Same real words in the same order, with identical timing -- the tag's
+    # own (now-dropped) interpolated slot never gets redistributed onto them.
+    assert [(w["text"], w["start"], w["end"]) for w in with_tag["words"]] == [
+        (w["text"], w["start"], w["end"]) for w in without_tag["words"]
+    ]
+
+
+def test_build_narration_captions_aligns_tts_text_and_strips_tags():
+    segments = [
+        {
+            "segment_id": "N_001",
+            "text": "<chuckle> Hello there.",
+            "presentation_hint": "narration_over_source",
+        },
+    ]
+    result = build_narration_captions(
+        segments,
+        recognized_words_by_segment={
+            "N_001": [_recognized("Hello", 1.5, 1.9), _recognized("there.", 1.9, 2.3)],
+        },
+    )
+    texts = [word["text"] for word in result["segments"][0]["words"]]
+    assert texts == ["Hello", "there."]
+
+
+def test_build_narration_captions_uses_explicit_tts_text_for_alignment():
+    # An explicit tts_text (not the authored display text) is what gets
+    # aligned against the recognized (spoken) words.
+    segments = [
+        {
+            "segment_id": "N_001",
+            "text": "Hello there.",
+            "tts_text": "<chuckle> Hello there, friend.",
+            "presentation_hint": "narration_over_source",
+        },
+    ]
+    result = build_narration_captions(
+        segments,
+        recognized_words_by_segment={
+            "N_001": [
+                _recognized("Hello", 1.5, 1.9),
+                _recognized("there,", 1.9, 2.1),
+                _recognized("friend.", 2.1, 2.5),
+            ],
+        },
+    )
+    texts = [word["text"] for word in result["segments"][0]["words"]]
+    assert texts == ["Hello", "there,", "friend."]
+
+
+# ============================================================
 # build_narration_ass_dialogue_lines
 # ============================================================
 

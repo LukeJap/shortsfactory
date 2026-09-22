@@ -25,6 +25,7 @@ from typing import Any
 
 from canvas_config import OUTPUT_HEIGHT, OUTPUT_WIDTH
 from pipeline_paths import RECAP_NARRATION_CAPTIONS_PATH
+from recap_media.expression_tags import strip_tags, tts_text_for_segment
 from recap_media.loader import RecapInputError
 from recap_media.sequence import WORDS_PER_SECOND_ESTIMATE
 
@@ -251,6 +252,31 @@ def transcribe_narration_wav(
     return words
 
 
+def _drop_expression_tag_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Post-filter aligned words so expression tags (`<gasp>`, `<chuckle>`...)
+    never reach a caption (product rule 8), without re-timing anything.
+
+    Alignment runs against tts_text -- the text Orpheus actually spoke --
+    so timing stays anchored to real audio (the WAV contains a genuine
+    non-verbal vocalization where the tag was; aligning stripped text
+    against it would drift the whole segment). This runs after alignment:
+    a word whose text is *only* a tag is dropped outright (no blank
+    caption holding the screen), never blanked in place. Neighbouring
+    words' start/end are left untouched either way.
+    """
+
+    filtered: list[dict[str, Any]] = []
+    for word in words:
+        display_text = strip_tags(word["text"])
+        if not display_text:
+            continue
+        if display_text != word["text"]:
+            word = {**word, "text": display_text}
+        filtered.append(word)
+    return filtered
+
+
 def build_segment_narration_captions(
     segment_id: str,
     text: str,
@@ -264,6 +290,12 @@ def build_segment_narration_captions(
     already-computed Whisper pass) to skip transcription; otherwise
     wav_path is transcribed via transcribe_narration_wav(). Exactly one
     of recognized_words/wav_path should be given.
+
+    `text` is expected to be the segment's tts_text (what was actually
+    synthesized/spoken) -- see recap_media.expression_tags -- so the
+    alignment step below always has a real audio token for every word,
+    including expression tags. Those tags are stripped from the returned
+    words afterward, never before (see _drop_expression_tag_words()).
     """
 
     if recognized_words is None:
@@ -273,6 +305,7 @@ def build_segment_narration_captions(
 
     authoritative_words = tokenize_narration_text(text)
     words = align_words_to_timing(authoritative_words, recognized_words)
+    words = _drop_expression_tag_words(words)
 
     return {
         "segment_id": segment_id,
@@ -310,7 +343,7 @@ def build_narration_captions(
         segments_out.append(
             build_segment_narration_captions(
                 segment_id,
-                segment["text"],
+                tts_text_for_segment(segment),
                 recognized_words=recognized_words_by_segment.get(segment_id),
                 wav_path=wav_paths_by_segment.get(segment_id),
                 model_name=model_name,

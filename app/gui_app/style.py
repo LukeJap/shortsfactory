@@ -310,6 +310,7 @@ STYLESHEET =            """
             QMessageBox QLabel#qt_msgbox_label,
             QMessageBox QLabel#qt_msgbox_informativelabel {
                 min-width: 300px;
+                max-width: 520px;
                 padding: 8px 10px;
                 color: #F2ECE4;
                 font-size: 13px;

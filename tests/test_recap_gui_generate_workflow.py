@@ -135,6 +135,16 @@ def test_open_recap_in_editor_loads_the_recap_owned_shared_asset_plan(tmp_path):
     context.root.mkdir(parents=True)
     context.final_recap_path.write_bytes(b"preview")
     context.editor_base_recap_path.write_bytes(b"caption-free preview")
+    context.voiceover_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    context.voiceover_manifest_path.write_text(
+        json.dumps(
+            {
+                "N_001": {"content_hash": "hash-1"},
+                "N_002": {"content_hash": "hash-2"},
+            }
+        ),
+        encoding="utf-8",
+    )
     context.editor_base_metadata_path.write_text(
         json.dumps(
             {
@@ -149,6 +159,7 @@ def test_open_recap_in_editor_loads_the_recap_owned_shared_asset_plan(tmp_path):
                     "source_pitch_semitones": 1.8,
                     "narration_gain_db": 4.0,
                 },
+                "narration_content_hashes": {"N_001": "hash-1", "N_002": "hash-2"},
             }
         ),
         encoding="utf-8",
@@ -329,6 +340,128 @@ def test_empty_editor_base_is_rebuilt_instead_of_being_loaded(monkeypatch, tmp_p
     ]
 
 
+def test_editor_base_rebuilds_when_narration_content_changes_but_audio_settings_do_not(
+    monkeypatch, tmp_path
+):
+    """The rendered editor base has narration baked in, so a script edit +
+    narration regen must invalidate it even though recap_audio_settings
+    (speed/pitch/gain) never changed."""
+
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+    sequence = {
+        "total_duration_seconds": 9.0,
+        "segments": [
+            {"segment_id": "N_001", "order": 1, "shots": []},
+            {"segment_id": "S_001", "order": 2, "shots": []},
+            {"segment_id": "N_002", "order": 3, "shots": []},
+        ],
+    }
+
+    context.editor_base_recap_path.write_bytes(b"old base")
+    audio_settings = window._recap_audio_settings()
+    context.editor_base_metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": recap_module.RECAP_EDITOR_BASE_SCHEMA_VERSION,
+                "kind": "ai_recap_clean_editor_base",
+                "time_basis": "recap_final_timeline",
+                "editable_overlays_baked": False,
+                "recap_audio_settings": audio_settings,
+                "narration_content_hashes": {"N_001": "hash-old", "N_002": "hash-2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Narration regenerated for N_001 after a script edit -- the manifest
+    # now carries a hash the cached base was never rendered with.
+    context.voiceover_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    context.voiceover_manifest_path.write_text(
+        json.dumps(
+            {
+                "N_001": {"content_hash": "hash-new"},
+                "N_002": {"content_hash": "hash-2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(recap_module, "load_portrait_framing_plan", lambda _path: {"filter_chain": "portrait"})
+    monkeypatch.setattr(recap_module, "load_duck_plan", lambda _path: {"narration_keyframes": []})
+    monkeypatch.setattr(recap_module, "validate_recap_media_file", lambda _path: {})
+    monkeypatch.setattr(
+        window,
+        "_editor_base_voiceover_clips",
+        lambda *_args: [{"id": "N_001", "kind": "VOICEOVER", "active": True}],
+    )
+    rendered: list[Path] = []
+
+    def _render(*_args, **kwargs):
+        rendered.append(kwargs["output_path"])
+        kwargs["output_path"].write_bytes(b"rebuilt base")
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(recap_module, "render_recap", _render)
+
+    result = window._ensure_recap_editor_base(
+        context, sequence, context.effects_plan_path, context.editor_asset_plan_path
+    )
+
+    assert result == context.editor_base_recap_path
+    assert rendered, "stale narration cache was reused instead of rebuilt"
+    assert context.editor_base_recap_path.read_bytes() == b"rebuilt base"
+    new_metadata = json.loads(context.editor_base_metadata_path.read_text(encoding="utf-8"))
+    assert new_metadata["narration_content_hashes"] == {"N_001": "hash-new", "N_002": "hash-2"}
+
+
+def test_editor_base_reuses_cache_when_narration_content_is_unchanged(monkeypatch, tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+    sequence = {"segments": []}
+
+    context.editor_base_recap_path.write_bytes(b"current base")
+    audio_settings = window._recap_audio_settings()
+    context.editor_base_metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": recap_module.RECAP_EDITOR_BASE_SCHEMA_VERSION,
+                "kind": "ai_recap_clean_editor_base",
+                "time_basis": "recap_final_timeline",
+                "editable_overlays_baked": False,
+                "recap_audio_settings": audio_settings,
+                "narration_content_hashes": {"N_001": "hash-1", "N_002": "hash-2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    context.voiceover_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    context.voiceover_manifest_path.write_text(
+        json.dumps(
+            {
+                "N_001": {"content_hash": "hash-1"},
+                "N_002": {"content_hash": "hash-2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fail_render(*_args, **_kwargs):
+        raise AssertionError("render_recap should not run when the base is still current")
+
+    monkeypatch.setattr(recap_module, "render_recap", _fail_render)
+
+    result = window._ensure_recap_editor_base(
+        context, sequence, context.effects_plan_path, context.editor_asset_plan_path
+    )
+
+    assert result == context.editor_base_recap_path
+    assert context.editor_base_recap_path.read_bytes() == b"current base"
+
+
 def test_editor_base_media_keeps_its_source_bound_recap_context(tmp_path):
     context = _context(tmp_path)
     context.root.mkdir(parents=True)
@@ -338,6 +471,143 @@ def test_editor_base_media_keeps_its_source_bound_recap_context(tmp_path):
     window.recap_editor_mode = True
 
     assert window._active_recap_artifact_context() is context
+
+
+def _write_manifest(path: Path, entries: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def test_editor_base_voiceover_clips_rebuilds_when_narration_hash_differs(tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+
+    _write_manifest(
+        context.voiceover_manifest_path,
+        {
+            "N_001": {"content_hash": "hash-new"},
+            "N_002": {"content_hash": "hash-2"},
+        },
+    )
+    editor_plan_path = context.editor_asset_plan_path
+    save_editor_asset_plan(
+        {
+            "version": 1,
+            "clips": [
+                {"id": "N_001", "kind": "VOICEOVER", "narration_hash": "hash-old"},
+                {"id": "N_002", "kind": "VOICEOVER", "narration_hash": "hash-2"},
+            ],
+        },
+        editor_plan_path,
+    )
+
+    clips = window._editor_base_voiceover_clips(inputs, {"segments": []}, editor_plan_path, context)
+
+    assert [clip["id"] for clip in clips] == ["N_001", "N_002"]
+    assert any("stale" in line.lower() for line in window.log_lines)
+
+
+def test_editor_base_voiceover_clips_reuses_plan_when_hashes_match(tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+
+    _write_manifest(
+        context.voiceover_manifest_path,
+        {
+            "N_001": {"content_hash": "hash-1"},
+            "N_002": {"content_hash": "hash-2"},
+        },
+    )
+    editor_plan_path = context.editor_asset_plan_path
+    save_editor_asset_plan(
+        {
+            "version": 1,
+            "clips": [
+                {"id": "N_001", "kind": "VOICEOVER", "narration_hash": "hash-1", "label": "kept"},
+                {"id": "N_002", "kind": "VOICEOVER", "narration_hash": "hash-2", "label": "kept"},
+            ],
+        },
+        editor_plan_path,
+    )
+
+    clips = window._editor_base_voiceover_clips(inputs, {"segments": []}, editor_plan_path, context)
+
+    assert [clip["label"] for clip in clips] == ["kept", "kept"]
+    assert window.log_lines == []
+
+
+def test_editor_base_voiceover_clips_rebuilds_when_narration_hash_field_missing(tmp_path):
+    """A plan persisted before this change has no narration_hash at all."""
+
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+
+    _write_manifest(
+        context.voiceover_manifest_path,
+        {
+            "N_001": {"content_hash": "hash-1"},
+            "N_002": {"content_hash": "hash-2"},
+        },
+    )
+    editor_plan_path = context.editor_asset_plan_path
+    save_editor_asset_plan(
+        {
+            "version": 1,
+            "clips": [
+                {"id": "N_001", "kind": "VOICEOVER"},
+                {"id": "N_002", "kind": "VOICEOVER"},
+            ],
+        },
+        editor_plan_path,
+    )
+
+    clips = window._editor_base_voiceover_clips(inputs, {"segments": []}, editor_plan_path, context)
+
+    assert [clip["id"] for clip in clips] == ["N_001", "N_002"]
+    assert any("stale" in line.lower() for line in window.log_lines)
+
+
+def test_editor_base_voiceover_clips_rebuilds_when_segment_added(tmp_path):
+    context = _context(tmp_path)
+    context.root.mkdir(parents=True)
+    inputs = _inputs()
+    window = _RecapWindow(context, inputs)
+
+    _write_manifest(context.voiceover_manifest_path, {"N_001": {"content_hash": "hash-1"}})
+    editor_plan_path = context.editor_asset_plan_path
+    save_editor_asset_plan(
+        {
+            "version": 1,
+            "clips": [{"id": "N_001", "kind": "VOICEOVER", "narration_hash": "hash-1"}],
+        },
+        editor_plan_path,
+    )
+
+    clips = window._editor_base_voiceover_clips(inputs, {"segments": []}, editor_plan_path, context)
+
+    assert [clip["id"] for clip in clips] == ["N_001", "N_002"]
+
+
+def test_rebuild_voiceover_clips_writes_narration_hash(tmp_path):
+    window = _RecapWindow(_context(tmp_path), _inputs())
+
+    clips = window._rebuild_voiceover_clips(
+        window.recap_active_inputs,
+        {"N_001": 1.0, "N_002": 1.0},
+        None,
+        {"N_001": "hash-1", "N_002": "hash-2"},
+    )
+
+    assert {clip["id"]: clip["narration_hash"] for clip in clips} == {
+        "N_001": "hash-1",
+        "N_002": "hash-2",
+    }
 
 
 def test_recap_audio_controls_are_persisted_with_the_active_editor_plan(tmp_path):

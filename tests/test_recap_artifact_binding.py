@@ -180,7 +180,28 @@ def test_complete_script_parent_for_another_source_fails_without_fallback(tmp_pa
     selected_script = selected_root / "recap_script.json"
     selected_script.write_text(json.dumps(_external_b003_script()), encoding="utf-8")
 
-    with pytest.raises(RecapInputError, match="does not match the loaded source"):
+    with pytest.raises(RecapInputError, match="belongs to 'other_episode.mkv'"):
         resolve_recap_artifact_context_for_script(
             source, selected_script, output_dir=output_dir
         )
+
+
+def test_mismatch_error_names_the_selected_folder_and_both_sources(tmp_path):
+    output_dir = tmp_path / "output"
+    source = tmp_path / "input" / "s17e9a duct tape dystopia.mp4"
+    source.parent.mkdir()
+    source.touch()
+    selected_root = output_dir / "recap"
+    _write_artifacts(selected_root, "s17e7a my tighty whiteys.mp4", 3)
+    selected_script = selected_root / "recap_script.json"
+    selected_script.write_text(json.dumps(_external_b003_script()), encoding="utf-8")
+
+    with pytest.raises(RecapInputError) as excinfo:
+        resolve_recap_artifact_context_for_script(
+            source, selected_script, output_dir=output_dir
+        )
+
+    message = str(excinfo.value)
+    assert "output/recap" in message
+    assert "s17e7a my tighty whiteys.mp4" in message
+    assert "s17e9a duct tape dystopia.mp4" in message

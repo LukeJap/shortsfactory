@@ -1,5 +1,9 @@
 # ShortsFactory — Development Log: macOS Environment Setup, Repo Cleanup, `gui.py` Split
 
+> Superseded by `CLAUDE.md` as of 2026-09-21. Kept for history; parts of this
+> document describe removed features (AI-generated image inserts, Stable
+> Diffusion) and the pre-redesign UI.
+
 Date: 2026-08-22 (updated through 2026-08-23)
 
 ## Project context

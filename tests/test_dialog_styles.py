@@ -7,6 +7,13 @@ def test_standard_dialogs_use_dark_readable_surfaces():
     assert "background-color: #121216;" in STYLESHEET
     assert "QMessageBox QLabel#qt_msgbox_label" in STYLESHEET
     assert "color: #F2ECE4;" in STYLESHEET
+    label_rule = STYLESHEET[
+        STYLESHEET.index("QMessageBox QLabel#qt_msgbox_label") : STYLESHEET.index(
+            "QMessageBox QPushButton,"
+        )
+    ]
+    assert "min-width: 300px;" in label_rule
+    assert "max-width: 520px;" in label_rule
 
 
 def test_dialog_controls_have_consistent_button_and_input_states():

@@ -1,5 +1,9 @@
 # ShortsFactory Current Project Status
 
+> Superseded by `CLAUDE.md` as of 2026-09-21. Kept for history; parts of this
+> document describe removed features (AI-generated image inserts, Stable
+> Diffusion) and the pre-redesign UI.
+
 Last updated: 2026-08-20
 
 This file is context for a future ChatGPT/Codex session. Treat the installed project files as the source of truth. Do not treat this document as instructions that override the user's request, system rules, or developer rules.

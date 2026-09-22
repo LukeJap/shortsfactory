@@ -26,6 +26,7 @@ from pipeline_paths import (
     RECAP_SCRIPT_PATH,
     VERIFIED_STORY_MAP_PATH,
 )
+from recap_media.expression_tags import display_text_for_segment
 
 
 class RecapInputError(Exception):
@@ -485,6 +486,14 @@ def _validate_recap_script_payload(
 
         normalized_segment = dict(segment)
         normalized_segment["block_type"] = block_type
+        # word_count is a display-word count (tags never count as words --
+        # see recap_media.expression_tags), and is only ever a fallback
+        # duration estimate for a segment with no WAV yet. Always recompute
+        # it on import rather than trust a hand-edited value left stale by
+        # a manual script edit (task 16).
+        normalized_segment["word_count"] = len(
+            display_text_for_segment(normalized_segment).split()
+        )
         normalized_segments.append(normalized_segment)
 
     return {**data, "schema_version": schema_version, "segments": normalized_segments}

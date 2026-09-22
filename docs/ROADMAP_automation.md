@@ -97,6 +97,57 @@ that works. The refresh token is stored locally; treat it like a password.
 
 ---
 
+## Recap shape and publishing cadence (decided 2026-09-21)
+
+**Three self-contained beat recaps per episode**, not a three-part serial. Each
+covers a different beat of the episode with its own hook and its own payoff, and
+works for a viewer who has seen neither of the others. The Shorts feed is
+discovery-first, so arriving cold is the normal case, not the edge case — and
+average % viewed is a ranking signal, which a deliberately unresolved ending
+fights directly.
+
+Connect them by identity, not dependency: same voice, same look, and a line in
+the pinned comment pointing at the others. A soft tease at the end of a recap is
+fine ("and that's not even the worst thing that happens to him") as long as
+nothing is withheld that the viewer needed.
+
+Checked against real data: all three thirds of the test episode yield usable
+material (mean scores 71.0 / 66.3 / 64.0 across the task 10 run), so the choice
+is about narrative structure and distribution, not about raw material.
+
+### Upload once, publish apart
+
+`videos.insert` and go-live are decoupled. One batch run uploads all three beats
+as `privacyStatus: private` with `status.publishAt` timestamps; YouTube publishes
+them on schedule with the machine off.
+
+Never publish an episode's beats simultaneously — they compete for the same
+audience segment in the initial algorithmic test.
+
+### Cadence: 8 hours
+
+| spacing | videos/day | episodes/day | quota/day |
+|---|---|---|---|
+| 6h | 4.0 | 1.33 | 6,400 |
+| **8h** | **3.0** | **1.00** | **4,800** |
+| 12h | 2.0 | 0.67 | 3,200 |
+
+8h covers exactly 24 hours with three videos: one episode per day, one batch run,
+48% of the 10,000-unit daily quota. The original 6h target assumed one recap per
+episode; three beats changes the arithmetic.
+
+### Queue rules
+
+1. Publish an episode's beats in descending score order. The first slot gets the
+   freshest test — spend it on the strongest beat. Self-contained recaps make
+   narrative order irrelevant.
+2. Once 2-3 episodes are buffered, interleave: never publish two beats from the
+   same source within 24h. Cheap to design in now, awkward to retrofit.
+3. `recap_mode` lives on the editing profile — `whole_episode | beats | thirds` —
+   so the serial format stays testable rather than being argued about. Two weeks
+   of each, compared on average % viewed and channel-page visits, settles it with
+   data about this audience rather than anyone's intuition.
+
 ## Build order
 
 Each phase is useful on its own and testable before the next starts.

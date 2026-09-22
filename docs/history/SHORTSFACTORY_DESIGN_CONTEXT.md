@@ -1,5 +1,9 @@
 # ShortsFactory — Project Context for Design
 
+> Superseded by `CLAUDE.md` as of 2026-09-21. Kept for history; parts of this
+> document describe removed features (AI-generated image inserts, Stable
+> Diffusion) and the pre-redesign UI.
+
 *Written as a handoff doc so a designer (or a designer's AI assistant)
 can get oriented without reading the codebase. Current as of 2026-08-25.*
 

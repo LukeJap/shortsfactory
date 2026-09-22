@@ -55,7 +55,7 @@ from editor_asset_plan import (
     save_editor_asset_plan,
     upsert_clip,
 )
-from pipeline_paths import RECAP_DIR
+from pipeline_paths import OUTPUT_DIR, RECAP_DIR
 from recap_media.artifacts import (
     RecapArtifactContext,
     resolve_recap_artifact_context,
@@ -88,6 +88,7 @@ from recap_media.effects import (
     write_recap_effects_plan,
 )
 from recap_media.timeline import RECAP_PLAYBACK_SPEED, recap_final_duration_seconds
+from recap_media.expression_tags import tts_text_for_segment
 from recap_media.loader import (
     RecapInputError,
     RecapInputs,
@@ -123,6 +124,7 @@ from recap_media.sequence import (
     write_recap_sequence,
 )
 from recap_media.voiceover import (
+    load_voiceover_content_hashes,
     load_voiceover_durations,
     synthesize_segment,
     synthesize_segments,
@@ -130,7 +132,7 @@ from recap_media.voiceover import (
 )
 
 
-RECAP_EDITOR_BASE_SCHEMA_VERSION = 2
+RECAP_EDITOR_BASE_SCHEMA_VERSION = 3
 
 
 def _clean_recap_editor_effects() -> dict:
@@ -145,6 +147,7 @@ def _clean_recap_editor_effects() -> dict:
     }
 
 from ..settings_keys import (
+    RECAP_LAST_SCRIPT_FOLDER,
     RECAP_NARRATION_GAIN_DB,
     RECAP_NARRATION_SPEED,
     RECAP_NARRATION_PITCH_SEMITONES,
@@ -155,6 +158,26 @@ from ..settings_keys import (
     RECAP_VOICE,
 )
 from ..constants import ROOT
+from ..helpers import show_message
+
+
+def recap_script_picker_start_directory(window) -> Path:
+    """Prefer the bound artifact folder, then the last folder a script
+    validated from successfully, so a folder full of same-named
+    recap_script.json files doesn't default to wherever Qt last was."""
+
+    context = getattr(window, "recap_artifact_context", None)
+    if context is not None:
+        return context.root
+    settings = getattr(window, "settings", None)
+    if settings is not None:
+        stored = settings.value(RECAP_LAST_SCRIPT_FOLDER, "")
+        if stored:
+            candidate = Path(str(stored))
+            if candidate.is_dir():
+                return candidate
+    return OUTPUT_DIR
+
 
 def _recap_source_filename(episode_identity: dict) -> str | None:
     query = episode_identity.get("query")
@@ -385,6 +408,24 @@ class RecapMixin:
         self.recap_artifact_context = context
         return context
 
+    def _recap_episode_source(self) -> Path | None:
+        """The episode an artifact context is about, not whatever media is
+        currently loaded in the player -- Open in Editor deliberately loads
+        the caption-free base render, which must never be mistaken for the
+        source episode when resolving recap artifacts."""
+
+        active = getattr(self, "recap_artifact_context", None)
+        if isinstance(active, RecapArtifactContext) and active.source_video:
+            return active.source_video
+        inputs = getattr(self, "recap_active_inputs", None)
+        if isinstance(inputs, RecapInputs) and inputs.episode_identity:
+            try:
+                return resolve_recap_source_video(inputs.episode_identity)
+            except (RecapInputError, RecapRenderError):
+                pass
+        path = getattr(self, "video_path", None)
+        return Path(path) if path else None
+
     def set_recap_mode(self, mode: str):
         """Switch workflow pages without resetting normal-short state."""
 
@@ -431,7 +472,7 @@ class RecapMixin:
 
     def _set_recap_episode_context(self, episode_identity: dict | None = None):
         if hasattr(self, "recap_source_label"):
-            source = getattr(self, "video_path", None)
+            source = self._recap_episode_source()
             source_text = source.name if isinstance(source, Path) else "current input source"
             self.recap_source_label.setText(f"Source: {source_text}")
         if not hasattr(self, "recap_episode_label"):
@@ -544,7 +585,7 @@ class RecapMixin:
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import AI Recap Script",
-            "",
+            str(recap_script_picker_start_directory(self)),
             "JSON files (*.json)",
         )
         if path:
@@ -619,12 +660,12 @@ class RecapMixin:
         self._set_recap_status(message, "offline")
         self.append_recap_log(f"ERROR: {message}")
         if isinstance(self, QWidget):
-            QMessageBox.warning(self, "AI Recap", message)
+            show_message(self, QMessageBox.Icon.Warning, "AI Recap", message)
 
     def import_external_recap_script(self, path: Path) -> bool:
         try:
             selected_path = Path(path).expanduser().resolve(strict=False)
-            source = getattr(self, "video_path", None)
+            source = self._recap_episode_source()
             context = resolve_recap_artifact_context_for_script(
                 source,
                 selected_path,
@@ -642,6 +683,9 @@ class RecapMixin:
             return False
         self.recap_external_script_path = selected_path
         self._activate_valid_external_script(script, identity, story_map, context)
+        settings = getattr(self, "settings", None)
+        if settings is not None:
+            settings.setValue(RECAP_LAST_SCRIPT_FOLDER, str(selected_path.parent))
         return True
 
     def import_pasted_recap_script(self, text: str) -> bool:
@@ -766,12 +810,28 @@ class RecapMixin:
         }
         editor_plan = load_editor_asset_plan(editor_plan_path)
         planned_clips = clips_of_kind(editor_plan, "VOICEOVER")
-        planned_ids = {str(clip.get("id", "")) for clip in planned_clips if isinstance(clip, dict)}
-        if expected_ids and expected_ids.issubset(planned_ids):
+        planned_by_id = {
+            str(clip.get("id", "")): clip for clip in planned_clips if isinstance(clip, dict)
+        }
+        content_hashes = load_voiceover_content_hashes(context.voiceover_manifest_path)
+
+        mismatched = [
+            segment_id
+            for segment_id in expected_ids
+            if segment_id not in planned_by_id
+            or planned_by_id[segment_id].get("narration_hash", "")
+            != content_hashes.get(segment_id, "")
+        ]
+        if expected_ids and not mismatched:
             return planned_clips
 
+        if expected_ids and mismatched:
+            self.append_recap_log(
+                f"Editor narration plan stale for {len(mismatched)} segment(s), rebuilding."
+            )
+
         durations = load_voiceover_durations(context.voiceover_manifest_path)
-        return self._rebuild_voiceover_clips(inputs, durations, sequence)
+        return self._rebuild_voiceover_clips(inputs, durations, sequence, content_hashes)
 
     def _detach_recap_editor_preview(self, media_path: Path) -> tuple[int, bool] | None:
         """Release a currently-open editor base before atomically replacing it."""
@@ -833,7 +893,33 @@ class RecapMixin:
         plans remain unchanged.
         """
 
+        # This is the only cache between the raw synthesized WAV and
+        # playback, and it is keyed on the full audio_settings snapshot --
+        # narration_pitch_semitones and playback_speed included. Pitch and
+        # speed nudges are cheap (no Orpheus re-synthesis) precisely because
+        # they invalidate here rather than at the TTS cache in
+        # recap_media.voiceover. Do not add them to that cache's key.
+        #
+        # It is also keyed on narration_content_hashes: this base is a
+        # rendered MP4 with narration audio baked in, so a text/voice/speed
+        # edit that changes a segment's synthesized WAV (content_hash in the
+        # voiceover manifest) has to invalidate this cache even though
+        # nothing in recap_audio_settings changed. Without this, editing the
+        # script and regenerating narration leaves the editor playing the
+        # old narration baked into the old base render.
         audio_settings = self._recap_audio_settings()
+        inputs = self._active_recap_inputs()
+        expected_ids = {
+            str(segment.get("segment_id", ""))
+            for segment in inputs.recap_script.get("segments", [])
+            if isinstance(segment, dict)
+            and segment.get("block_type") != "source_moment"
+            and segment.get("presentation_hint") != "visual_only"
+        }
+        content_hashes = load_voiceover_content_hashes(context.voiceover_manifest_path)
+        narration_content_hashes = {
+            segment_id: content_hashes.get(segment_id, "") for segment_id in expected_ids
+        }
         try:
             metadata = json.loads(
                 context.editor_base_metadata_path.read_text(encoding="utf-8")
@@ -844,12 +930,12 @@ class RecapMixin:
                 and metadata.get("schema_version") == RECAP_EDITOR_BASE_SCHEMA_VERSION
                 and metadata.get("kind") == "ai_recap_clean_editor_base"
                 and metadata.get("recap_audio_settings") == audio_settings
+                and metadata.get("narration_content_hashes") == narration_content_hashes
             ):
                 return context.editor_base_recap_path
         except (OSError, json.JSONDecodeError, AttributeError):
             pass
 
-        inputs = self._active_recap_inputs()
         try:
             portrait_plan = load_portrait_framing_plan(context.portrait_framing_plan_path)
         except RecapInputError:
@@ -922,6 +1008,7 @@ class RecapMixin:
                     "time_basis": "recap_final_timeline",
                     "editable_overlays_baked": False,
                     "recap_audio_settings": audio_settings,
+                    "narration_content_hashes": narration_content_hashes,
                 },
                 indent=2,
             )
@@ -1001,7 +1088,7 @@ class RecapMixin:
             )
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Preview Voice", message)
+                show_message(self, QMessageBox.Icon.Warning, "Preview Voice", message)
             return
 
         self.recap_voice_preview_button.setEnabled(False)
@@ -1019,7 +1106,7 @@ class RecapMixin:
         except OrpheusError as exc:
             self.append_recap_log(f"ERROR: Voice preview failed: {exc}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Preview Voice", str(exc))
+                show_message(self, QMessageBox.Icon.Warning, "Preview Voice", str(exc))
             return
         finally:
             self.recap_voice_preview_button.setEnabled(True)
@@ -1101,7 +1188,7 @@ class RecapMixin:
             message = "Generate the recap sequence and narration before rendering."
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.information(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Information, "Create AI Recap", message)
             return False
 
         try:
@@ -1112,7 +1199,7 @@ class RecapMixin:
             message = str(exc)
             self.append_recap_log(f"ERROR: Recap render setup failed: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             return False
 
         audio_settings = self._persist_recap_audio_settings()
@@ -1127,7 +1214,7 @@ class RecapMixin:
             message = "No active narration blocks are available for recap rendering."
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             return False
 
         self.append_recap_log("Preparing recap render assets...")
@@ -1185,11 +1272,12 @@ class RecapMixin:
                     f"Narration {segment_id} appears to omit {missing!r}; retrying once. "
                     f"Original preserved at {diagnostic_path.name}."
                 )
-                self.append_recap_log(f"Narration {segment_id} retry text: {segment['text']}")
+                retry_text = tts_text_for_segment(segment)
+                self.append_recap_log(f"Narration {segment_id} retry text: {retry_text}")
                 retry = synthesize_segment(
                     OrpheusProvider(),
                     segment_id,
-                    segment["text"],
+                    retry_text,
                     voice=self.recap_voice,
                     speed=audio_settings["narration_speed"],
                     output_dir=context.voiceover_dir,
@@ -1203,7 +1291,7 @@ class RecapMixin:
 
                 retry_captions = build_segment_narration_captions(
                     segment_id,
-                    segment["text"],
+                    retry_text,
                     wav_path=retry.wav_path,
                 )
                 still_missing = probable_dropped_words(retry_captions)
@@ -1231,7 +1319,10 @@ class RecapMixin:
                     source_video=_recap_source_filename(inputs.episode_identity),
                 )
                 write_recap_sequence(self.recap_sequence, context.recap_sequence_path)
-                new_clips = self._rebuild_voiceover_clips(inputs, durations, self.recap_sequence)
+                content_hashes = load_voiceover_content_hashes(context.voiceover_manifest_path)
+                new_clips = self._rebuild_voiceover_clips(
+                    inputs, durations, self.recap_sequence, content_hashes
+                )
                 self.editor_asset_plan = replace_kind_clips(
                     self.editor_asset_plan, "VOICEOVER", new_clips
                 )
@@ -1372,7 +1463,7 @@ class RecapMixin:
             message = str(exc)
             self.append_recap_log(f"ERROR: Recap render failed: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             return False
 
         self.append_recap_log(f"Final recap complete: {output_path}")
@@ -1389,7 +1480,7 @@ class RecapMixin:
             inputs = self._active_recap_inputs()
         except RecapInputError as exc:
             self.append_recap_log(f"ERROR: {exc}")
-            QMessageBox.warning(self, "Create AI Recap", str(exc))
+            show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", str(exc))
             return False
 
         narration_durations = load_voiceover_durations(context.voiceover_manifest_path)
@@ -1414,8 +1505,9 @@ class RecapMixin:
         # authoritative timeline. Manual/locked clips remain protected by
         # replace_kind_clips() below.
         if narration_durations:
+            content_hashes = load_voiceover_content_hashes(context.voiceover_manifest_path)
             new_clips = self._rebuild_voiceover_clips(
-                inputs, narration_durations, sequence
+                inputs, narration_durations, sequence, content_hashes
             )
             self.editor_asset_plan = replace_kind_clips(
                 self.editor_asset_plan, "VOICEOVER", new_clips
@@ -1445,7 +1537,7 @@ class RecapMixin:
         if not getattr(self, "recap_sequence", None):
             self.append_recap_log("Generate a recap sequence first.")
             if isinstance(self, QWidget):
-                QMessageBox.information(self, "AI Recap", "Generate a recap sequence first.")
+                show_message(self, QMessageBox.Icon.Information, "AI Recap", "Generate a recap sequence first.")
             return
         try:
             context = self._active_recap_artifact_context()
@@ -1482,7 +1574,7 @@ class RecapMixin:
             message = f"Caption-free Recap editor base is unavailable: {exc}"
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Open in Editor", message)
+                show_message(self, QMessageBox.Icon.Warning, "Open in Editor", message)
             return
 
         duration = recap_final_duration_seconds(
@@ -1663,11 +1755,13 @@ class RecapMixin:
         inputs,
         durations: dict,
         sequence: dict | None = None,
+        content_hashes: dict | None = None,
     ) -> list[dict]:
 
         cursor = 0.0
         clips = []
         timings = voiceover_timing_by_segment(sequence) if sequence else {}
+        content_hashes = content_hashes or {}
 
         for segment in inputs.recap_script["segments"]:
             if (
@@ -1693,6 +1787,7 @@ class RecapMixin:
                     "volume": 1.0,
                     "manual_override": False,
                     "dialogue_pauses": timing.get("dialogue_pauses", []) if timing else [],
+                    "narration_hash": content_hashes.get(segment_id, ""),
                 }
             )
             cursor = end
@@ -1705,7 +1800,7 @@ class RecapMixin:
             message = "Generate the recap sequence first."
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.information(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Information, "Create AI Recap", message)
             return False
 
         # Same context-sync step generate_sfx()/generate_visual_assets()
@@ -1724,7 +1819,7 @@ class RecapMixin:
             message = str(exc)
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             return False
 
         narration_segments = [
@@ -1739,7 +1834,7 @@ class RecapMixin:
             message = "The recap script has no narration blocks to synthesize."
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             return False
 
         self.append_recap_log("Checking Orpheus...")
@@ -1753,7 +1848,7 @@ class RecapMixin:
             )
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             return False
 
         self.append_recap_log("Orpheus ready.")
@@ -1797,7 +1892,7 @@ class RecapMixin:
             message = f"Voiceover synthesis failed: {exc}"
             self.append_recap_log(f"ERROR: {message}")
             if isinstance(self, QWidget):
-                QMessageBox.warning(self, "Create AI Recap", message)
+                show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", message)
             self.generate_recap_voiceover_button.setEnabled(True)
             if hasattr(self, "generate_recap_sequence_button"):
                 self.generate_recap_sequence_button.setEnabled(
@@ -1830,7 +1925,8 @@ class RecapMixin:
         write_recap_sequence(sequence, context.recap_sequence_path)
         self.recap_sequence = sequence
 
-        new_clips = self._rebuild_voiceover_clips(inputs, durations, sequence)
+        content_hashes = load_voiceover_content_hashes(context.voiceover_manifest_path)
+        new_clips = self._rebuild_voiceover_clips(inputs, durations, sequence, content_hashes)
         self.editor_asset_plan = replace_kind_clips(
             self.editor_asset_plan, "VOICEOVER", new_clips
         )
@@ -1995,7 +2091,7 @@ class RecapMixin:
         result = synthesize_segment(
             provider,
             clip["id"],
-            segment["text"],
+            tts_text_for_segment(segment),
             voice=self.recap_voice,
             speed=self._recap_audio_settings()["narration_speed"],
             output_dir=context.voiceover_dir,
@@ -2007,7 +2103,7 @@ class RecapMixin:
 
         if result.error:
             self.append_recap_log(f"ERROR regenerating {clip['id']}: {result.error}")
-            QMessageBox.warning(self, "Create AI Recap", result.error)
+            show_message(self, QMessageBox.Icon.Warning, "Create AI Recap", result.error)
             return
 
         start = float(clip.get("start", 0.0) or 0.0)

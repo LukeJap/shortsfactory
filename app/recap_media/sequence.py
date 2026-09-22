@@ -69,6 +69,7 @@ from typing import Any
 
 from pipeline_paths import RECAP_SEQUENCE_PATH
 from recap_media.dialogue_boundaries import resolve_source_audio_boundary
+from recap_media.expression_tags import tts_text_for_segment
 from recap_media.loader import RecapInputError
 
 SEQUENCE_SCHEMA_VERSION = 1
@@ -357,7 +358,7 @@ def target_duration_for_segment(
         timeline_duration = math.ceil((measured_duration - 1e-9) * 1000.0) / 1000.0
         return timeline_duration, "measured"
 
-    return estimate_narration_seconds(segment["text"]), "estimated"
+    return estimate_narration_seconds(tts_text_for_segment(segment)), "estimated"
 
 
 def _range_key(candidate: dict[str, Any]) -> tuple[float, float]:

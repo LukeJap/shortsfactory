@@ -1,5 +1,9 @@
 # ShortsFactory AI Recap -- Track B Status
 
+> Superseded by `CLAUDE.md` as of 2026-09-21. Kept for history; parts of this
+> document describe removed features (AI-generated image inserts, Stable
+> Diffusion) and the pre-redesign UI.
+
 Last updated: 2026-08-28
 
 This file is context for a future ChatGPT/Codex session picking up Track B

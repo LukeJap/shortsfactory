@@ -7,9 +7,12 @@ time, and supports forcing exactly one segment to regenerate.
 
 "Manual script/voice edits must become authoritative" (shared contract)
 falls out of the cache design rather than needing its own special case:
-the cache key is a hash of the segment's own (text, voice, speed), so
+the cache key is a hash of the segment's own (tts_text, voice, speed), so
 editing any of those is a cache miss on its own, regardless of whether a
-stale WAV is still sitting on disk from before the edit.
+stale WAV is still sitting on disk from before the edit. tts_text falls
+back to the segment's authored "text" when no explicit tts_text is set
+(recap_media.expression_tags), so unedited segments hash identically to
+before -- editing a segment's own tags/wording is what invalidates it.
 
 Failures here never raise past the public functions -- a segment that
 fails to synthesize (Orpheus offline, network error, invalid audio, ...)
@@ -29,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pipeline_paths import RECAP_DIR
+from recap_media.expression_tags import tts_text_for_segment
 from recap_media.orpheus_provider import (
     DEFAULT_VOICE,
     OrpheusError,
@@ -94,6 +98,24 @@ def load_voiceover_durations(
         _save_manifest(manifest, manifest_path)
 
     return durations
+
+
+def load_voiceover_content_hashes(
+    manifest_path: Path = MANIFEST_PATH,
+) -> dict[str, str]:
+    """{segment_id: content_hash} for every manifest entry.
+
+    Lets a caller detect whether a segment's synthesized narration has
+    changed (text, voice or speed) without recomputing the hash itself --
+    the manifest entry is the record of what was actually last synthesized.
+    """
+
+    manifest = _load_manifest(manifest_path)
+    return {
+        segment_id: str(entry.get("content_hash", ""))
+        for segment_id, entry in manifest.items()
+        if isinstance(entry, dict) and entry.get("content_hash")
+    }
 
 
 def _content_hash(text: str, voice: str, speed: float) -> str:
@@ -280,7 +302,7 @@ def synthesize_segments(
         result = synthesize_segment(
             provider,
             segment_id,
-            segment["text"],
+            tts_text_for_segment(segment),
             voice=voice,
             speed=speed,
             output_dir=output_dir,

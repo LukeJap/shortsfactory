@@ -1,16 +1,31 @@
 """
-Small, pure formatting/text utility functions shared across gui_app
-mixins: time-code formatting (format_time/format_precise_time family) and
-transcript-text helpers (e.g. detecting generic AI-editor phrasing via
-GENERIC_EDITOR_PHRASES). No Qt/widget dependencies -- safe to unit test
-directly.
+Small utility functions shared across gui_app mixins: time-code formatting
+(format_time/format_precise_time family), transcript-text helpers (e.g.
+detecting generic AI-editor phrasing via GENERIC_EDITOR_PHRASES), and
+show_message, the one Qt-widget helper here -- every mixin's message-box
+popups go through it so long text always wraps instead of clipping.
 """
 
 from __future__ import annotations
 
 import re
 
+from PySide6.QtWidgets import QLabel, QMessageBox
+
 from .constants import GENERIC_EDITOR_PHRASES
+
+
+def show_message(parent, icon, title, text, *, detail=None):
+    box = QMessageBox(parent)
+    box.setIcon(icon)
+    box.setWindowTitle(title)
+    box.setText(text)
+    if detail:
+        box.setInformativeText(detail)
+    label = box.findChild(QLabel, "qt_msgbox_label")
+    if label is not None:
+        label.setWordWrap(True)
+    return box.exec()
 
 
 def format_time(milliseconds: int) -> str:

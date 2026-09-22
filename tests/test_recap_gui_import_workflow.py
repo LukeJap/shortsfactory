@@ -88,6 +88,9 @@ class _Settings:
     def setValue(self, key, value):
         self.values[key] = value
 
+    def value(self, key, default=None):
+        return self.values.get(key, default)
+
 
 class _Timeline:
     def __init__(self):
@@ -399,6 +402,68 @@ def test_valid_external_import_does_not_enable_editor_without_ready_artifacts(mo
     assert window.recap_open_editor_button.enabled is False
 
 
+def test_import_resolves_against_the_episode_not_the_open_editor_base(monkeypatch, tmp_path):
+    """Open in Editor loads final_recap_editor_base.mp4 as window.video_path.
+    Validate Script must still resolve against the bound episode, not that
+    base render -- otherwise re-validating after an edit fails in-session."""
+
+    _patch_external_context(monkeypatch, tmp_path)
+    window = _RecapWindow()
+    episode_path = Path("accepted_episode.mkv").resolve()
+    context = RecapArtifactContext(
+        root=tmp_path,
+        source_video=episode_path,
+        episode_identity_path=tmp_path / "episode_identity.json",
+        verified_story_map_path=tmp_path / "verified_story_map.json",
+        recap_script_path=tmp_path / "recap_script.json",
+        recap_sequence_path=tmp_path / "recap_sequence.json",
+        voiceover_dir=tmp_path / "voiceover",
+        voiceover_manifest_path=tmp_path / "voiceover" / "voiceover_manifest.json",
+        pasted_script_path=tmp_path / "external_recap_script_paste.json",
+    )
+    window.video_path = context.editor_base_recap_path
+    window.recap_editor_mode = True
+    window.recap_artifact_context = context
+    captured = {}
+
+    def _resolve_for_script(source, _script_path):
+        captured["source"] = source
+        return window.recap_artifact_context
+
+    monkeypatch.setattr(
+        recap_module, "resolve_recap_artifact_context_for_script", _resolve_for_script
+    )
+
+    assert window.import_external_recap_script(tmp_path / "external.json") is True
+
+    assert captured["source"] == episode_path
+    assert window.recap_source_label.text == f"Source: {episode_path.name}"
+
+
+def test_import_falls_back_to_loaded_source_without_a_bound_context(monkeypatch, tmp_path):
+    """With no artifact context and no active inputs yet (first import of a
+    session), resolution must use the loaded video_path itself -- there is
+    no episode to prefer it over."""
+
+    _patch_external_context(monkeypatch, tmp_path)
+    window = _RecapWindow()
+    window.video_path = Path("some_other_episode.mkv")
+    assert getattr(window, "recap_artifact_context", None) is None
+    assert window.recap_active_inputs is None
+    captured = {}
+    original = recap_module.resolve_recap_artifact_context_for_script
+
+    def _capturing(source, script_path):
+        captured["source"] = source
+        return original(source, script_path)
+
+    monkeypatch.setattr(recap_module, "resolve_recap_artifact_context_for_script", _capturing)
+
+    assert window.import_external_recap_script(tmp_path / "external.json") is True
+
+    assert captured["source"] == Path("some_other_episode.mkv")
+
+
 def test_invalid_external_import_surfaces_readable_error(monkeypatch, tmp_path):
     _patch_external_context(monkeypatch, tmp_path)
     window = _RecapWindow()
@@ -484,3 +549,62 @@ def test_open_in_editor_requires_sequence_and_uses_existing_editor():
 
     assert window.editor_refreshes == 1
     assert window.timeline.focused is True
+
+
+def test_picker_start_directory_prefers_the_bound_artifact_context(tmp_path):
+    window = _RecapWindow()
+    voiceover_dir = tmp_path / "voiceover"
+    window.recap_artifact_context = RecapArtifactContext(
+        root=tmp_path,
+        source_video=Path("accepted_episode.mkv").resolve(),
+        episode_identity_path=tmp_path / "episode_identity.json",
+        verified_story_map_path=tmp_path / "verified_story_map.json",
+        recap_script_path=tmp_path / "recap_script.json",
+        recap_sequence_path=tmp_path / "recap_sequence.json",
+        voiceover_dir=voiceover_dir,
+        voiceover_manifest_path=voiceover_dir / "voiceover_manifest.json",
+        pasted_script_path=tmp_path / "external_recap_script_paste.json",
+    )
+    window.settings.values[recap_module.RECAP_LAST_SCRIPT_FOLDER] = str(tmp_path / "elsewhere")
+
+    assert recap_module.recap_script_picker_start_directory(window) == tmp_path
+
+
+def test_picker_start_directory_falls_back_to_last_validated_folder(tmp_path):
+    window = _RecapWindow()
+    window.settings.values[recap_module.RECAP_LAST_SCRIPT_FOLDER] = str(tmp_path)
+
+    assert recap_module.recap_script_picker_start_directory(window) == tmp_path
+
+
+def test_picker_start_directory_defaults_to_output_dir_otherwise():
+    window = _RecapWindow()
+
+    assert recap_module.recap_script_picker_start_directory(window) == recap_module.OUTPUT_DIR
+
+
+def test_successful_import_persists_the_script_folder_only_on_success(monkeypatch, tmp_path):
+    _patch_external_context(monkeypatch, tmp_path)
+    window = _RecapWindow()
+    source = tmp_path / "external.json"
+    source.write_text("{}", encoding="utf-8")
+
+    assert window.import_external_recap_script(source) is True
+
+    assert window.settings.values[recap_module.RECAP_LAST_SCRIPT_FOLDER] == str(tmp_path)
+
+
+def test_failed_import_does_not_persist_the_script_folder(monkeypatch, tmp_path):
+    _patch_external_context(monkeypatch, tmp_path)
+    window = _RecapWindow()
+    monkeypatch.setattr(
+        recap_module,
+        "load_external_recap_script",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RecapInputError("bad script")
+        ),
+    )
+
+    assert window.import_external_recap_script(tmp_path / "invalid.json") is False
+
+    assert recap_module.RECAP_LAST_SCRIPT_FOLDER not in window.settings.values

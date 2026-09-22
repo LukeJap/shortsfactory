@@ -1,6 +1,7 @@
 # Python virtual environments
 .venv/
 venv/
+.venv-*/
 
 input/
 
@@ -40,3 +41,7 @@ app/analyze_backup.py
 
 # Personal working notes
 PROJECT_ISSUES.md
+
+# Archived experiment output (rendered MP4s, regenerable transcripts)
+archive/recap_experiments/
+archive/test_clips/

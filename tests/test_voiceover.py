@@ -4,6 +4,7 @@ import json
 
 from recap_media.orpheus_provider import DEFAULT_VOICE, OrpheusError
 from recap_media.voiceover import (
+    _content_hash,
     load_voiceover_durations,
     synthesize_segment,
     synthesize_segments,
@@ -310,3 +311,62 @@ def test_load_voiceover_durations_prefers_the_wav_over_stale_metadata(tmp_path):
 
 def test_load_voiceover_durations_missing_manifest_returns_empty(tmp_path):
     assert load_voiceover_durations(tmp_path / "does_not_exist.json") == {}
+
+
+# ============================================================
+# Task 16 -- tts_text drives synthesis/cache key, not the authored text
+# ============================================================
+
+def test_synthesize_segments_content_hash_unchanged_without_explicit_tts_text(tmp_path):
+    """A segment with no explicit tts_text hashes identically to before
+    tts_text existed -- an already-synthesized manifest entry must stay a
+    cache hit (no mass re-synthesis of existing WAVs)."""
+
+    manifest_path = tmp_path / "manifest.json"
+    segment_id = "VO_001"
+    text = "First segment narration."
+
+    wav_path = tmp_path / f"{segment_id}.wav"
+    wav_path.write_bytes(_make_wav_bytes())
+    manifest_path.write_text(
+        json.dumps(
+            {
+                segment_id: {
+                    "content_hash": _content_hash(text, DEFAULT_VOICE, 1.0),
+                    "voice": DEFAULT_VOICE,
+                    "speed": 1.0,
+                    "duration_seconds": 0.25,
+                    "wav_path": str(wav_path),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = FakeProvider()
+    segments = [
+        {"segment_id": segment_id, "text": text, "presentation_hint": "narration_over_source"}
+    ]
+    results = synthesize_segments(
+        provider, segments, voice=DEFAULT_VOICE, output_dir=tmp_path, manifest_path=manifest_path
+    )
+
+    assert results[0].cache_hit is True
+    assert provider.calls == []  # not re-synthesized
+
+
+def test_synthesize_segments_speaks_explicit_tts_text_not_display_text(tmp_path):
+    provider = FakeProvider()
+    segments = [
+        {
+            "segment_id": "VO_001",
+            "text": "<chuckle> Display words only.",
+            "tts_text": "<chuckle> Different words entirely.",
+            "presentation_hint": "narration_over_source",
+        }
+    ]
+    synthesize_segments(
+        provider, segments, output_dir=tmp_path, manifest_path=tmp_path / "manifest.json"
+    )
+
+    assert provider.calls[0][0] == "<chuckle> Different words entirely."

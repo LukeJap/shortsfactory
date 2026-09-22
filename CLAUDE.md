@@ -116,6 +116,33 @@ matching brief.
 6. **Degrade, never abort.** A short, truncated or failed model response costs
    one candidate, not the run.
 
+## AI Recap workflow — the stage chain
+
+The four buttons run in order, and each stage's output feeds the next. Skipping
+one silently leaves the next stage working from stale inputs, which has cost
+several debugging sessions.
+
+```
+Validate Script     binds the script file + artifact context to the episode
+Generate Voiceover  synthesizes narration WAVs   (Orpheus must be running)
+Generate Recap      assembles the sequence; timings come from the new WAV durations
+Open in Editor      renders the editor base and binds it to the timeline
+Render Final Video  consumes the base; does NOT re-run any of the above
+```
+
+After editing `recap_script.json` you need **Validate Script -> Generate
+Voiceover -> Generate Recap -> Open in Editor**. Voiceover alone is not enough:
+changed text changes WAV duration, which moves every later segment, and only
+Generate Recap reassembles the sequence. Regenerating a single segment updates
+that segment's duration but does not re-cascade later positions — run Generate
+Voiceover in full for that.
+
+`Render Final Video` replays the existing base render, so a script change can
+never appear from an export alone.
+
+Known gap: no stage tells you the next one is now stale. Worth fixing the same
+way the narration hash check was — compare inputs, say so plainly.
+
 ## Working style
 
 One small issue at a time: find the failure point, make the smallest change, run
@@ -135,7 +162,23 @@ GUI/media run. Regression sources: `input/s17e9a duct tape dystopia.mp4` (recap)
   8 distinct scores, seed-stable (mean delta 0.5), 9/10 deciles covered, ~2 min
   end to end. The briefs `BRIEF_clip_discovery*.md` record why each choice was
   made; `tools/compare_rank_seeds.py` is the regression check.
-- Recap: stale narration in editor, dropped narration words, source-caption
-  remapping, SFX/emoji lane population, live music preview parity, narrator voice
-  selector, `display_text`/`tts_text` split.
+- Recap: stale narration in editor — **done** (tasks 11-13, live test passed
+  2026-09-22: edit script, re-validate, regenerate, hear the change without
+  restarting). TTS expression tags in captions — task 16 landed, GUI re-render
+  pending.
+  Source-caption remapping — **verified already correct** 2026-09-22: all 310
+  cues in the duct-tape render land inside their own segment window once
+  `playback_speed` is applied. Do not re-open without new evidence; note that
+  caption cues are in *final* (speed-adjusted) time while `recap_sequence.json`
+  durations are *pre-speed*, so any check must divide by `playback_speed` first.
+  Still open: dropped narration words, SFX/emoji lane population, live music
+  preview parity, narrator voice selector.
+- **Editor performance degrades within a long session** — playback gets laggy
+  and drops frames after generating several clips or running many previews.
+  Unmeasured as of 2026-09-21. Handoff §31 flagged the same class of problem.
+  First diagnostics: watch the process's memory and GPU in Task Manager across a
+  session (monotonic climb = leak, plateau with dropped frames = compositing
+  load), and check for orphaned `ffmpeg.exe` processes. Suspects: per-preview
+  `QMediaPlayer`/`QAudioOutput` instances never released, and program-monitor
+  overlay layers accumulating as editor entities grow.
 - Then: base filter + Visual FX parity for Recap, Orpheus auto-start.

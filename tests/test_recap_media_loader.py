@@ -188,6 +188,33 @@ def test_load_recap_script_valid_fixture():
     assert [segment["segment_id"] for segment in data["segments"]] == ["VO_001", "VO_002"]
 
 
+def test_recap_script_word_count_is_recomputed_from_text():
+    data = load_recap_script(FIXTURES_DIR / "recap_script.json")
+    segment = next(s for s in data["segments"] if s["segment_id"] == "VO_001")
+    assert segment["word_count"] == len(segment["text"].split())
+
+
+def test_recap_script_stale_word_count_is_overwritten_on_import(tmp_path):
+    # Task 16: a hand-edited recap_script.json can carry a word_count that
+    # no longer matches its text (e.g. edited by hand after generation).
+    # The loader recomputes it rather than trusting the stored value.
+    source = _valid_recap_script()
+    source["segments"][0]["word_count"] = 999
+    loaded = load_recap_script(_write(tmp_path / "recap_script.json", source))
+
+    segment = loaded["segments"][0]
+    assert segment["word_count"] != 999
+    assert segment["word_count"] == len(segment["text"].split())
+
+
+def test_recap_script_word_count_excludes_expression_tags(tmp_path):
+    source = _valid_recap_script()
+    source["segments"][0]["text"] = "<chuckle> Two words."
+    loaded = load_recap_script(_write(tmp_path / "recap_script.json", source))
+
+    assert loaded["segments"][0]["word_count"] == 2
+
+
 def test_load_recap_inputs_combines_all_three():
     inputs = load_recap_inputs(
         FIXTURES_DIR / "episode_identity.json",

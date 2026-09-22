@@ -266,9 +266,13 @@ def resolve_recap_artifact_context_for_script(
 
     identity = load_episode_identity(context.episode_identity_path)
     if not _identity_matches_source(identity, source):
+        recorded = _source_reference(identity)
+        recorded_name = Path(recorded).name if recorded else "another source"
+        folder_label = f"{Path(output_dir).name}/{context.root.name}"
         raise RecapInputError(
-            "The selected recap script's artifact folder does not match the "
-            f"loaded source {source.name!r}."
+            f"The recap script in {folder_label!r} belongs to {recorded_name!r}, "
+            f"but the loaded source is {source.name!r}.\n"
+            "Pick the script from the artifact folder for this episode."
         )
     load_verified_story_map(context.verified_story_map_path)
     return context

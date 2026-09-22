@@ -54,6 +54,7 @@ from sfx_engine import (
 )
 
 from ..constants import ROOT
+from ..helpers import show_message
 
 SFX_DIR = ROOT / "assets" / "sfx"
 
@@ -931,8 +932,9 @@ class EditorAssetsMixin:
 
         paths = self.available_sfx_files()
         if not paths:
-            QMessageBox.information(
+            show_message(
                 self,
+                QMessageBox.Icon.Information,
                 "Swap SFX",
                 "Add sound files to assets/sfx first.",
             )
@@ -1725,8 +1727,9 @@ class EditorAssetsMixin:
                 exist_ok=True,
             )
         except OSError as exc:
-            QMessageBox.warning(
+            show_message(
                 self,
+                QMessageBox.Icon.Warning,
                 "SFX Folder",
                 f"Could not create SFX folder:\n{exc}",
             )
@@ -1737,8 +1740,9 @@ class EditorAssetsMixin:
                 str(sfx_dir)
             )
         ):
-            QMessageBox.warning(
+            show_message(
                 self,
+                QMessageBox.Icon.Warning,
                 "SFX Folder",
                 "Could not open the SFX folder.",
             )
